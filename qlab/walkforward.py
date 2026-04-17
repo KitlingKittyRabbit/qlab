@@ -115,7 +115,8 @@ def select_dates(
     split : 'train' or 'test'
     """
     if split == "train":
-        mask = (data.index >= fold.train_start) & (data.index <= fold.train_end)
+        mask = (data.index >= fold.train_start) & (
+            data.index <= fold.train_end)
     elif split == "test":
         mask = (data.index >= fold.test_start) & (data.index <= fold.test_end)
     else:

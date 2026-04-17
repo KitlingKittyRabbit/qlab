@@ -41,8 +41,8 @@ def rolling_hedge_ratio(
 
     ratios = pd.Series(np.nan, index=common)
     for i in range(window, len(common)):
-        y = a.iloc[i - window : i].values
-        x = b.iloc[i - window : i].values
+        y = a.iloc[i - window: i].values
+        x = b.iloc[i - window: i].values
         x_dm = x - x.mean()
         denom = np.dot(x_dm, x_dm)
         if denom < 1e-10:

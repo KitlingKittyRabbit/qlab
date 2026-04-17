@@ -13,7 +13,8 @@ class TestSignalBacktest:
             100 * np.cumprod(1 + rng.normal(0.002, 0.005, 200)), index=idx
         )
         signals = pd.Series(1, index=idx)
-        result = run_signal_backtest(signals, prices, holding_days=14, cost_bps=0)
+        result = run_signal_backtest(
+            signals, prices, holding_days=14, cost_bps=0)
         assert result["sharpe"] > 0
         assert result["n_trades"] > 0
 

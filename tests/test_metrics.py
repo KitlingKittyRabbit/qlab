@@ -53,7 +53,8 @@ class TestSharpe:
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             sharpe(r, holding_days=14)
-            ac_warns = [x for x in w if "autocorrelation" in str(x.message).lower()]
+            ac_warns = [x for x in w if "autocorrelation" in str(
+                x.message).lower()]
             assert len(ac_warns) == 0
 
     def test_constant_returns_nan(self):

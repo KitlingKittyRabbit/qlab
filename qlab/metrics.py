@@ -53,7 +53,8 @@ def sharpe(
     _check_autocorrelation(r, holding_days)
 
     periods_per_year = trading_days_per_year / holding_days
-    rf_per_period = (1 + risk_free) ** (holding_days / trading_days_per_year) - 1
+    rf_per_period = (1 + risk_free) ** (holding_days /
+                                        trading_days_per_year) - 1
 
     excess = r - rf_per_period
     std = np.std(excess, ddof=1)
@@ -76,7 +77,8 @@ def sortino(
         return np.nan
 
     periods_per_year = trading_days_per_year / holding_days
-    rf_per_period = (1 + risk_free) ** (holding_days / trading_days_per_year) - 1
+    rf_per_period = (1 + risk_free) ** (holding_days /
+                                        trading_days_per_year) - 1
 
     excess = r - rf_per_period
     downside = excess[excess < 0]

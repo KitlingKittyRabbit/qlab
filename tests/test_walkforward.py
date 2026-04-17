@@ -10,7 +10,8 @@ class TestWalkForwardSplits:
         return pd.date_range("2020-01-01", periods=n, freq="D")
 
     def test_produces_folds(self):
-        folds = list(walk_forward_splits(self._dates(), train_days=90, test_days=90))
+        folds = list(walk_forward_splits(
+            self._dates(), train_days=90, test_days=90))
         assert len(folds) >= 2
 
     def test_train_before_test(self):
@@ -30,12 +31,14 @@ class TestWalkForwardSplits:
             list(walk_forward_splits(self._dates(100), train_days=90, test_days=90))
 
     def test_fold_indices_sequential(self):
-        folds = list(walk_forward_splits(self._dates(), train_days=90, test_days=90))
+        folds = list(walk_forward_splits(
+            self._dates(), train_days=90, test_days=90))
         for i, fold in enumerate(folds):
             assert fold.fold_idx == i
 
     def test_non_overlapping_tests(self):
-        folds = list(walk_forward_splits(self._dates(), train_days=90, test_days=90))
+        folds = list(walk_forward_splits(
+            self._dates(), train_days=90, test_days=90))
         for i in range(1, len(folds)):
             assert folds[i].test_start > folds[i - 1].test_end
 

@@ -16,7 +16,8 @@ class TestSpreadBacktest:
 
     def test_mean_reverting_positive_pnl(self):
         spread = self._ou(n=2000)
-        result = run_spread_backtest(spread, entry_z=2.0, exit_z=0.0, lookback=60)
+        result = run_spread_backtest(
+            spread, entry_z=2.0, exit_z=0.0, lookback=60)
         assert result["n_trades"] > 0
         assert result["trades"]["pnl"].sum() > 0
 
@@ -35,8 +36,10 @@ class TestSpreadBacktest:
 
     def test_cost_reduces_total_pnl(self):
         spread = self._ou(n=2000)
-        r0 = run_spread_backtest(spread, entry_z=2.0, exit_z=0.0, cost_per_trade=0.0)
-        r1 = run_spread_backtest(spread, entry_z=2.0, exit_z=0.0, cost_per_trade=1.0)
+        r0 = run_spread_backtest(
+            spread, entry_z=2.0, exit_z=0.0, cost_per_trade=0.0)
+        r1 = run_spread_backtest(
+            spread, entry_z=2.0, exit_z=0.0, cost_per_trade=1.0)
         if r0["n_trades"] > 0 and r1["n_trades"] > 0:
             assert r0["trades"]["pnl"].sum() >= r1["trades"]["pnl"].sum()
 

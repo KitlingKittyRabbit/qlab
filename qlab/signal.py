@@ -40,7 +40,8 @@ def zscore(
         mu = series.expanding(min_periods=window).mean()
         sd = series.expanding(min_periods=window).std()
     else:
-        raise ValueError(f"method must be 'rolling' or 'expanding', got {method!r}")
+        raise ValueError(
+            f"method must be 'rolling' or 'expanding', got {method!r}")
 
     return (series - mu) / (sd + 1e-10)
 
