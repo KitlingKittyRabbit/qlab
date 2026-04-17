@@ -70,6 +70,14 @@ class TestSharpe:
         r = np.array([0.01, np.nan, 0.02, 0.01, np.nan, 0.015] * 20)
         assert np.isfinite(sharpe(r, holding_days=1))
 
+    def test_small_sample_warns(self):
+        r = np.array([0.01, -0.02, 0.015, 0.005, -0.01])
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            sharpe(r, holding_days=1)
+            assert any("only 5 observations" in str(x.message).lower()
+                       for x in w)
+
 
 class TestSortino:
 
@@ -81,6 +89,21 @@ class TestSortino:
         rng = np.random.RandomState(42)
         r = rng.normal(0.001, 0.02, 500)
         assert sortino(r) > sharpe(r)
+
+    def test_uses_all_periods_for_downside_deviation(self):
+        r = np.array([0.02, -0.01, 0.03, -0.02], dtype=float)
+        expected_dd = np.sqrt(np.mean(np.minimum(0.0, r) ** 2))
+        expected = np.mean(r) / expected_dd * np.sqrt(365)
+        result = sortino(r, holding_days=1, trading_days_per_year=365)
+        assert abs(result - expected) < 1e-10
+
+    def test_small_sample_warns(self):
+        r = np.array([0.01, -0.02, 0.015, 0.005, -0.01])
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            sortino(r, holding_days=1)
+            assert any("only 5 observations" in str(x.message).lower()
+                       for x in w)
 
 
 class TestMaxDrawdown:
@@ -97,6 +120,11 @@ class TestMaxDrawdown:
         eq = np.array([100, 50, 25])
         assert abs(max_drawdown(eq) - (-0.75)) < 1e-10
 
+    def test_non_positive_equity_raises(self):
+        eq = np.array([1.0, 0.0, 1.1])
+        with pytest.raises(ValueError, match="strictly positive"):
+            max_drawdown(eq)
+
 
 class TestCalmar:
 
@@ -106,6 +134,23 @@ class TestCalmar:
         c = calmar(r)
         assert np.isfinite(c)
         assert c > 0
+
+    def test_uses_cagr_not_arithmetic_annualization(self):
+        r = np.array([0.10, -0.10] * 50, dtype=float)
+        equity = np.cumprod(1 + r)
+        mdd = max_drawdown(equity)
+        cagr = equity[-1] ** (365 / len(r)) - 1
+        expected = cagr / abs(mdd)
+        result = calmar(r, holding_days=1, trading_days_per_year=365)
+        assert abs(result - expected) < 1e-10
+
+    def test_small_sample_warns(self):
+        r = np.array([0.01, -0.02, 0.015, 0.005, -0.01])
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            calmar(r, holding_days=1)
+            assert any("only 5 observations" in str(x.message).lower()
+                       for x in w)
 
 
 class TestWinRate:
