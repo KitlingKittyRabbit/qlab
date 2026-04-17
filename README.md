@@ -7,6 +7,7 @@
 | 问题 | 解决方案 |
 |------|---------|
 | `sqrt(365)` 年化 14d 收益导致 Sharpe 膨胀 3.74× | `sharpe(returns, holding_days=14)` 自动用 `sqrt(365/14)` |
+| Sortino / Calmar 口径不一致 | `sortino()` 用全样本 downside deviation，`calmar()` 用 CAGR |
 | 全样本 IC 方向泄漏到 WF | `ic_direction()` 只接受训练切片 |
 | 回测/实盘 z-score 方法不一致 | `zscore()` 和 `zscore_fixed()` 明确区分 |
 | 重叠收益伪造高 Sharpe | `run_signal_backtest()` 强制非重叠持仓 |
@@ -29,6 +30,9 @@ pip install -e ".[dev]"
 | `qlab.cost` | 成本模型 (Crypto / FX) |
 | `qlab.backtest.signal_bt` | 固定持仓期回测 (crypto) |
 | `qlab.backtest.spread_bt` | 均值回复价差回测 (FX pair trade) |
+
+说明：`max_drawdown()` 只接受严格为正的净值 / NAV 曲线；如果你手里是绝对 PnL 序列，应使用绝对金额回撤而不是百分比回撤。
+说明：`run_spread_backtest()` 会返回绝对值 `daily_pnl`，但 `sharpe` / `max_drawdown` 基于 `daily_returns = daily_pnl / capital_base` 计算；要横向比较不同策略，必须使用一致的 `capital_base` 口径。
 
 ## 用法
 

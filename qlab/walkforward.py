@@ -58,12 +58,13 @@ def walk_forward_splits(
 
     start_date = dates[0]
     end_date = dates[-1]
-    total_span = (end_date - start_date).days
+    total_span_days = (end_date - start_date).days
+    total_points_span = total_span_days + 1
 
     min_required = train_days + embargo_days + test_days
-    if total_span < min_required:
+    if total_points_span < min_required:
         raise ValueError(
-            f"Date range spans {total_span} days, but need at least "
+            f"Date range spans {total_span_days} days ({total_points_span} points), but need at least "
             f"{min_required} (train={train_days} + embargo={embargo_days} "
             f"+ test={test_days})."
         )

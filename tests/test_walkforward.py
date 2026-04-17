@@ -30,6 +30,12 @@ class TestWalkForwardSplits:
         with pytest.raises(ValueError, match="need at least"):
             list(walk_forward_splits(self._dates(100), train_days=90, test_days=90))
 
+    def test_exactly_one_fold_boundary_case(self):
+        dates = self._dates(194)
+        folds = list(walk_forward_splits(
+            dates, train_days=90, test_days=90, embargo_days=14))
+        assert len(folds) == 1
+
     def test_fold_indices_sequential(self):
         folds = list(walk_forward_splits(
             self._dates(), train_days=90, test_days=90))
