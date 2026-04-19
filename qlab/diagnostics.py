@@ -103,6 +103,12 @@ def ic_decay(
             meta = list(zip(horizon_list, expected_columns))
         else:
             meta = [(_extract_horizon(col), str(col)) for col in ret_df.columns]
+            unknown = [column for horizon, column in meta if horizon is None]
+            if unknown:
+                raise ValueError(
+                    "Could not infer horizon from forward_ret columns. "
+                    f"Use names like fwd_7 or pass horizons explicitly. Bad columns: {unknown}"
+                )
 
     rows = []
     for horizon, column in meta:
@@ -174,6 +180,11 @@ def quantile_returns(
 
         if horizon is None:
             horizon = _extract_horizon(getattr(forward_series, "name", None))
+            if horizon is None:
+                raise ValueError(
+                    "Could not infer horizon from forward_ret name. "
+                    "Use a name like fwd_7 or pass horizon explicitly."
+                )
 
     aligned = pd.concat(
         [factor.rename("factor"), forward_series.sort_index().astype(float).rename("forward_return")],
@@ -183,8 +194,18 @@ def quantile_returns(
     if len(aligned) < n_quantiles:
         raise ValueError("not enough aligned observations for the requested quantiles")
 
-    ranked = aligned["factor"].rank(method="first")
-    aligned["quantile"] = pd.qcut(ranked, q=n_quantiles, labels=False) + 1
+    unique_factor_count = int(aligned["factor"].nunique())
+    if unique_factor_count < n_quantiles:
+        raise ValueError(
+            "factor does not have enough unique values for the requested quantiles"
+        )
+
+    aligned["quantile"] = pd.qcut(
+        aligned["factor"],
+        q=n_quantiles,
+        labels=False,
+        duplicates="raise",
+    ) + 1
 
     result = (
         aligned.groupby("quantile", observed=False)["forward_return"]

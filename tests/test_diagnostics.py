@@ -75,6 +75,14 @@ class TestICDecay:
         with pytest.raises(ValueError, match="missing"):
             ic_decay(factor, forward_ret=ret, horizons=[1, 3])
 
+    def test_unparseable_forward_return_columns_raise(self):
+        idx = pd.date_range("2020-01-01", periods=20, freq="D")
+        factor = pd.Series(np.arange(20, dtype=float), index=idx)
+        ret = pd.DataFrame({"next_week": np.arange(20, dtype=float)}, index=idx)
+
+        with pytest.raises(ValueError, match="Could not infer horizon"):
+            ic_decay(factor, forward_ret=ret)
+
 
 class TestQuantileReturns:
 
@@ -123,3 +131,19 @@ class TestQuantileReturns:
 
         with pytest.raises(ValueError, match="not enough aligned observations"):
             quantile_returns(factor, forward_ret=forward, n_quantiles=5)
+
+    def test_rejects_tied_factor_without_enough_unique_values(self):
+        idx = pd.date_range("2020-01-01", periods=20, freq="D")
+        factor = pd.Series([1.0] * 10 + [2.0] * 10, index=idx)
+        forward = pd.Series(np.arange(20, dtype=float), index=idx, name="fwd_1")
+
+        with pytest.raises(ValueError, match="enough unique values"):
+            quantile_returns(factor, forward_ret=forward, n_quantiles=5)
+
+    def test_requires_explicit_or_parseable_horizon(self):
+        idx = pd.date_range("2020-01-01", periods=20, freq="D")
+        factor = pd.Series(np.arange(20, dtype=float), index=idx)
+        forward = pd.Series(np.arange(20, dtype=float), index=idx, name="next_week")
+
+        with pytest.raises(ValueError, match="Could not infer horizon"):
+            quantile_returns(factor, forward_ret=forward)
