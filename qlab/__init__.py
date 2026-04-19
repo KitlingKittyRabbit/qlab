@@ -1,5 +1,6 @@
 """qlab — Quantitative research infrastructure."""
 
+from .diagnostics import forward_returns, ic_decay, quantile_returns
 from .metrics import sharpe, sortino, max_drawdown, calmar, win_rate, profit_factor
 from .signal import zscore, zscore_fixed, ic, ic_direction, threshold_signal
 from .walkforward import walk_forward_splits, select_dates

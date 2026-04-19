@@ -11,6 +11,8 @@
 | 全样本 IC 方向泄漏到 WF | `ic_direction()` 只接受训练切片 |
 | 回测/实盘 z-score 方法不一致 | `zscore()` 和 `zscore_fixed()` 明确区分 |
 | 重叠收益伪造高 Sharpe | `run_signal_backtest()` 强制非重叠持仓 |
+| 同一研究里各脚本各自重写 horizon IC 衰减 | `forward_returns()` + `ic_decay()` 统一口径 |
+| 每次都手写分位收益分组和对齐 | `quantile_returns()` 统一输出分位收益表 |
 | 每个脚本重写一遍 Sharpe | 统一 `metrics.py`，一次写对 |
 
 ## 安装
@@ -24,7 +26,8 @@ pip install -e ".[dev]"
 | 模块 | 用途 |
 |------|------|
 | `qlab.metrics` | Sharpe / Sortino / MaxDD / Calmar / WinRate / PF |
-| `qlab.signal` | z-score / IC / IC_IR / 阈值信号 |
+| `qlab.signal` | z-score / IC / 阈值信号 |
+| `qlab.diagnostics` | Forward return 构造 / IC 衰减 / 分位收益 |
 | `qlab.walkforward` | WF 切割器 (支持 embargo) |
 | `qlab.spread` | 价差构建 / 协整检验 / 半衰期 |
 | `qlab.cost` | 成本模型 (Crypto / FX) |
@@ -37,7 +40,7 @@ pip install -e ".[dev]"
 ## 用法
 
 ```python
-from qlab import sharpe, walk_forward_splits, threshold_signal
+from qlab import sharpe, walk_forward_splits, threshold_signal, ic_decay, quantile_returns
 from qlab.backtest import run_signal_backtest, run_spread_backtest
 
 # 正确年化 14 天持仓周期的 Sharpe
@@ -52,6 +55,14 @@ for fold in walk_forward_splits(dates, train_days=90, test_days=90, embargo_days
 # 非重叠回测
 result = run_signal_backtest(signals, prices, holding_days=14, cost_bps=5)
 print(f"Sharpe: {result['sharpe']:.2f}")
+
+# 不同 horizon 下的 IC 衰减
+decay = ic_decay(factor, prices=prices, horizons=[1, 3, 7, 14])
+print(decay)
+
+# 单 horizon 的分位收益
+qret = quantile_returns(factor, prices=prices, horizon=14, n_quantiles=5)
+print(qret)
 
 # 价差回测
 result = run_spread_backtest(spread, entry_z=2.0, exit_z=0.0, stop_z=4.0)
