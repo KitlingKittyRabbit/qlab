@@ -42,6 +42,7 @@ REQUEST_SLEEP = 0.2
 START_TS = pd.Timestamp("2023-07-01 00:00:00", tz="UTC")
 OHLCV_COLUMNS = ["o", "h", "l", "c", "v"]
 HTTP_RETRY_ATTEMPTS = 4
+RECENT_TAIL_REQUEST_TIMEOUT_SECONDS = 5
 
 
 def log(message: str) -> None:
@@ -100,15 +101,18 @@ def get_symbols(env: dict[str, str]) -> list[str]:
     return values or list(SYMBOLS)
 
 
-def build_http_session(proxy_url: str = "") -> requests.Session:
+def build_http_session(proxy_url: str = "", retry_attempts: int = HTTP_RETRY_ATTEMPTS) -> requests.Session:
     session = requests.Session()
-    retry = Retry(
-        total=HTTP_RETRY_ATTEMPTS,
-        backoff_factor=1.5,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET"],
-    )
-    adapter = HTTPAdapter(max_retries=retry)
+    if retry_attempts > 0:
+        retry = Retry(
+            total=retry_attempts,
+            backoff_factor=1.5,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET"],
+        )
+        adapter = HTTPAdapter(max_retries=retry)
+    else:
+        adapter = HTTPAdapter(max_retries=0)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     session.headers.update({"User-Agent": "Mozilla/5.0"})
@@ -204,6 +208,7 @@ def period_frame_from_zip(content: bytes) -> pd.DataFrame:
 def fetch_period_zip(session: requests.Session, url: str) -> pd.DataFrame:
     response = session.get(url, timeout=60)
     if response.status_code == 404:
+        log(f"zip not available yet: {url}")
         return empty_frame()
     response.raise_for_status()
     return period_frame_from_zip(response.content)
@@ -323,7 +328,7 @@ def fetch_recent_tail(
                         "endTime": end_ms,
                         "limit": REQUEST_LIMIT,
                     },
-                    timeout=20,
+                    timeout=RECENT_TAIL_REQUEST_TIMEOUT_SECONDS,
                 )
                 response.raise_for_status()
                 rows = response.json()
@@ -333,6 +338,8 @@ def fetch_recent_tail(
                 continue
 
         if rows is None or not rows:
+            if last_error is not None:
+                log(f"tail fetch skipped for {symbol}: {last_error}")
             return existing
 
         rows_accum.extend(rows)
@@ -410,10 +417,14 @@ def refresh_symbol(
     symbol: str,
     existing: pd.DataFrame,
 ) -> tuple[str, pd.DataFrame]:
-    session = build_http_session(get_env_value(env, "HTTP_PROXY"))
+    proxy_url = get_env_value(env, "HTTP_PROXY")
+    session = build_http_session(proxy_url)
     updated = fetch_symbol_history(session, symbol, existing)
-    if get_bool_env(env, "BINANCE_FETCH_RECENT_TAIL", False):
-        updated = fetch_recent_tail(session, base_urls, symbol, updated)
+    # Default to appending the recent API tail so the 15m cache does not stall
+    # at the last published daily zip boundary.
+    if get_bool_env(env, "BINANCE_FETCH_RECENT_TAIL", True):
+        tail_session = build_http_session(proxy_url, retry_attempts=0)
+        updated = fetch_recent_tail(tail_session, base_urls, symbol, updated)
     return symbol, updated
 
 
