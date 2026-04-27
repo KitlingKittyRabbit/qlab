@@ -195,8 +195,7 @@ def load_api_key() -> str:
     for line in ENV_PATH.read_text(encoding="utf-8", errors="ignore").splitlines():
         if line.startswith("COINGLASS_API_KEY="):
             return line.split("=", 1)[1].strip()
-    raise RuntimeError(
-        "COINGLASS_API_KEY not found in trade/crypto_signal/.env")
+    raise RuntimeError(f"COINGLASS_API_KEY not found in {ENV_PATH}")
 
 
 def to_datetime_index(values: list | pd.Series) -> pd.DatetimeIndex:

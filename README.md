@@ -2,6 +2,8 @@
 
 量化研究基础设施 — 可靠的指标计算、Walk-Forward 验证与回测引擎。
 
+`qlab` 只承载代码与公开文档，不承载滚动热数据、私有运行状态或密钥配置。
+
 ## 为什么需要这个库
 
 | 问题 | 解决方案 |
@@ -20,6 +22,15 @@
 ```bash
 pip install -e ".[dev]"
 ```
+
+## 数据边界
+
+- `qlab` 默认不再把仓内 `data/crypto` 当作正式数据根。
+- crypto 数据应放在仓库外，或放在单独的私有 data 仓库工作树中。
+- 运行时通过 `QLAB_CRYPTO_DATA_DIR` 或 `COINGLASS_DATA_DIR` 指向正式数据根。
+- 推荐运维模型是：公开代码仓 + 私有 data 仓库快照；切换运行设备时，停旧进程、更新代码、更新 data，再启动新机器。
+
+更具体的公开约定见 [docs/crypto_data_root.md](docs/crypto_data_root.md)。
 
 ## 模块
 
@@ -73,3 +84,9 @@ result = run_spread_backtest(spread, entry_z=2.0, exit_z=0.0, stop_z=4.0)
 ```bash
 pytest
 ```
+
+说明：某些与私有 live 脚本联动的集成测试需要显式提供外部脚本路径，默认不会在公开仓库里硬编码私有仓库位置。
+
+## 许可证
+
+本项目采用 [MIT License](LICENSE)。

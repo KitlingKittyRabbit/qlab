@@ -5,3 +5,6 @@ dist/
 build/
 .venv/
 .pytest_cache/
+data/crypto/caches/
+data/crypto/manifests/
+data/crypto/raw_history/

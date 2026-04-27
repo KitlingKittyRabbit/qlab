@@ -1,18 +1,34 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 import csv
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
-LIVE_SCRIPT = ROOT / "qlab_research_private/research/crypto/live/test_oi_ls_top_pos_btc_4h_24h_live.py"
+LIVE_SCRIPT_ENV = "QLAB_LIVE_TIMING_SCRIPT"
+
+
+def resolve_live_script() -> Path:
+    raw_value = os.environ.get(LIVE_SCRIPT_ENV, "").strip()
+    if not raw_value:
+        pytest.skip(f"set {LIVE_SCRIPT_ENV} to run live timing integration tests")
+    candidate = Path(raw_value).expanduser()
+    if not candidate.is_absolute():
+        candidate = ROOT / candidate
+    if not candidate.exists():
+        pytest.skip(f"live timing integration script not found: {candidate}")
+    return candidate
 
 
 def load_live_module():
-    spec = importlib.util.spec_from_file_location("live_top_pos_module", LIVE_SCRIPT)
+    live_script = resolve_live_script()
+    spec = importlib.util.spec_from_file_location("live_top_pos_module", live_script)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     sys.modules[spec.name] = module

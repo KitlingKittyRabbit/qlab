@@ -371,7 +371,7 @@ def fetch_recent_tail(
         ],
     )
     frame["ts"] = pd.to_datetime(
-        frame["ts"], unit="ms", utc=True).tz_localize(None)
+        frame["ts"], unit="ms", utc=True).dt.tz_localize(None)
     for column in OHLCV_COLUMNS:
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
     parsed = frame.set_index("ts")[OHLCV_COLUMNS].sort_index()
