@@ -42,7 +42,14 @@ pip install -e ".[dev]"
 | `qlab.walkforward` | WF 切割器 (支持 embargo) |
 | `qlab.spread` | 价差构建 / 协整检验 / 半衰期 |
 | `qlab.cost` | 成本模型 (Crypto / FX) |
+| `qlab.point_in_time` | 时间戳语义审计 / point-in-time contract 校验 |
+| `qlab.provenance` | 候选文件 schema / provenance 校验 |
+| `qlab.evidence` | 可复核 evidence bundle 生成 |
+| `qlab.research_gate` | 正式重跑前置 gate / 版本化 rerun prerequisite 校验 |
+| `qlab.factor_research` | 截面因子 IC / bucket / Fama-MacBeth / 组合权重基础设施 |
+| `qlab.data.crypto.panel` | crypto panel 价格标准化 / forward return / 控制项构造 |
 | `qlab.backtest.signal_bt` | 固定持仓期回测 (crypto) |
+| `qlab.backtest.point_in_time_bt` | point-in-time 安全事件回测 |
 | `qlab.backtest.spread_bt` | 均值回复价差回测 (FX pair trade) |
 
 说明：`max_drawdown()` 只接受严格为正的净值 / NAV 曲线；如果你手里是绝对 PnL 序列，应使用绝对金额回撤而不是百分比回撤。
@@ -51,8 +58,22 @@ pip install -e ".[dev]"
 ## 用法
 
 ```python
-from qlab import sharpe, walk_forward_splits, threshold_signal, ic_decay, quantile_returns
-from qlab.backtest import run_signal_backtest, run_spread_backtest
+import pandas as pd
+
+from qlab import (
+    PointInTimeSemantics,
+    audit_aggregation_semantics,
+    sharpe,
+    walk_forward_splits,
+    threshold_signal,
+    ic_decay,
+    quantile_returns,
+)
+from qlab.backtest import (
+    run_point_in_time_event_backtest,
+    run_signal_backtest,
+    run_spread_backtest,
+)
 
 # 正确年化 14 天持仓周期的 Sharpe
 sr = sharpe(returns_14d, holding_days=14, trading_days_per_year=365)
@@ -66,6 +87,38 @@ for fold in walk_forward_splits(dates, train_days=90, test_days=90, embargo_days
 # 非重叠回测
 result = run_signal_backtest(signals, prices, holding_days=14, cost_bps=5)
 print(f"Sharpe: {result['sharpe']:.2f}")
+
+# 先审计 12h 聚合时间戳是否更像 bar_start 还是 bar_end
+audit = audit_aggregation_semantics(
+    aggregate=coinglass_12h,
+    component=coinglass_4h,
+    aggregate_duration=pd.Timedelta(hours=12),
+    component_duration=pd.Timedelta(hours=4),
+)
+print(audit.inferred_timestamp_kind)
+
+# 对事件信号做 point-in-time 安全回测
+semantics = PointInTimeSemantics(timestamp_kind="bar_start", value_status="final")
+pit_result = run_point_in_time_event_backtest(
+    signals=factor_signal,
+    prices=open_15m,
+    semantics=semantics,
+    signal_bar_duration=pd.Timedelta(hours=12),
+    holding_period=pd.Timedelta(hours=12),
+    decision_delay=pd.Timedelta(minutes=15),
+)
+print(pit_result["trades"].head())
+
+# 默认执行锚点也是保守的：
+# qlab 不会在 decision timestamp 本身成交，而是取严格晚于它的第一个可交易价格。
+
+# 对 partial / snapshot 数据，必须显式声明 publication_lag；
+# 否则 qlab 会按 fail-closed 拒绝回测。
+intrabar_semantics = PointInTimeSemantics(
+    timestamp_kind="bar_start",
+    value_status="partial",
+    publication_lag=pd.Timedelta(minutes=0),
+)
 
 # 不同 horizon 下的 IC 衰减
 decay = ic_decay(factor, prices=prices, horizons=[1, 3, 7, 14])
@@ -86,6 +139,11 @@ pytest
 ```
 
 说明：某些与私有 live 脚本联动的集成测试需要显式提供外部脚本路径，默认不会在公开仓库里硬编码私有仓库位置。
+例如：`QLAB_LIVE_TIMING_SCRIPT`、`QLAB_COINGLASS_LIVE_VALIDATION_SCRIPT`。
+
+说明：新的 point-in-time / provenance / evidence 测试全部是公开仓内自足测试，不依赖私有研究仓。
+
+说明：`PointInTimeSemantics` 对 `partial` / `snapshot` 输入默认 fail-closed；如果调用方无法明确声明发布时间或 `publication_lag`，相关 contract 校验和 PIT 回测会拒绝继续。
 
 ## 许可证
 

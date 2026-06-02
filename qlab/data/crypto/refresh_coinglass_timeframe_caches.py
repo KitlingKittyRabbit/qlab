@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import pickle
 import sys
 import time
@@ -16,7 +17,7 @@ if __package__ in (None, ""):
 
 from qlab.data.crypto.paths import TRADE_ENV_PATH, cache_path, ensure_data_dirs, manifest_path
 from qlab.data.crypto.raw_history_store import RAW_HISTORY_ROOT, write_timeseries_history
-from qlab.data.crypto.symbol_universe import RESEARCH_SYMBOLS_12
+from qlab.data.crypto.symbol_universe import RESEARCH_SYMBOLS_12, resolve_target_symbols
 
 BASE = "https://open-api-v3.coinglass.com/api"
 ENV_PATH = TRADE_ENV_PATH
@@ -101,14 +102,38 @@ def log(message: str) -> None:
     print(message, flush=True)
 
 
-def load_api_key() -> str:
-    if not ENV_PATH.exists():
-        raise FileNotFoundError(f"Missing env file: {ENV_PATH}")
+def load_env_file(path: Path) -> dict[str, str]:
+    env: dict[str, str] = {}
+    if not path.exists():
+        return env
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        env[key.strip()] = value.strip()
+    return env
 
-    for line in ENV_PATH.read_text(encoding="utf-8", errors="ignore").splitlines():
-        if line.startswith("COINGLASS_API_KEY="):
-            return line.split("=", 1)[1].strip()
+
+def get_env_value(env: dict[str, str], key: str) -> str:
+    return os.environ.get(key, env.get(key, "")).strip()
+
+
+def load_api_key(env: dict[str, str]) -> str:
+    api_key = get_env_value(env, "COINGLASS_API_KEY")
+    if api_key:
+        return api_key
     raise RuntimeError(f"COINGLASS_API_KEY not found in {ENV_PATH}")
+
+
+def get_symbols(env: dict[str, str]) -> list[str]:
+    return resolve_target_symbols(
+        get_env_value(env, "CRYPTO_TARGET_SYMBOLS"),
+        get_env_value(env, "COINGLASS_SYMBOLS"),
+        file_value=get_env_value(env, "CRYPTO_TARGET_SYMBOLS_FILE")
+        or get_env_value(env, "COINGLASS_SYMBOLS_FILE"),
+        default=SYMBOLS,
+    )
 
 
 def fetch_json(url: str, headers: dict[str, str], retries: int = 4) -> list[dict]:
@@ -136,8 +161,8 @@ def fetch_json(url: str, headers: dict[str, str], retries: int = 4) -> list[dict
     raise RuntimeError(f"CoinGlass request failed for {url}: {last_error}")
 
 
-def build_url(interval: IntervalSpec, endpoint: EndpointSpec, symbol: str) -> str:
-    query_symbol = EXCHANGE_SYMBOLS[symbol] if endpoint.symbol_uses_exchange_pair else symbol
+def build_url(interval: IntervalSpec, endpoint: EndpointSpec, symbol: str, exchange_symbols: dict[str, str]) -> str:
+    query_symbol = exchange_symbols[symbol] if endpoint.symbol_uses_exchange_pair else symbol
     params = [f"symbol={query_symbol}",
               f"interval={interval.name}", f"limit={interval.limit}"]
     if endpoint.requires_exchange:
@@ -187,15 +212,20 @@ def parse_frame(endpoint: EndpointSpec, rows: list[dict]) -> pd.DataFrame:
     return frame.set_index("ts")[[ratio_column, long_column]].sort_index()
 
 
-def refresh_interval(interval: IntervalSpec, headers: dict[str, str]) -> pd.DataFrame:
+def refresh_interval(
+    interval: IntervalSpec,
+    headers: dict[str, str],
+    symbols: list[str],
+    exchange_symbols: dict[str, str],
+) -> pd.DataFrame:
     log(f"\n=== Refresh {interval.name} ===")
     cache_payload: dict[str, pd.DataFrame] = {}
     summary_rows: list[dict[str, object]] = []
 
-    for symbol in SYMBOLS:
+    for symbol in symbols:
         log(f"--- {symbol} @ {interval.name} ---")
         for endpoint in ENDPOINTS:
-            url = build_url(interval, endpoint, symbol)
+            url = build_url(interval, endpoint, symbol, exchange_symbols)
             rows = fetch_json(url, headers)
             frame = parse_frame(endpoint, rows)
             cache_key = f"{symbol}_{endpoint.name}"
@@ -257,9 +287,13 @@ def refresh_interval(interval: IntervalSpec, headers: dict[str, str]) -> pd.Data
 def main() -> None:
     ensure_data_dirs()
     RAW_HISTORY_ROOT.mkdir(parents=True, exist_ok=True)
-    headers = {"accept": "application/json", "CG-API-KEY": load_api_key()}
+    env = load_env_file(ENV_PATH)
+    symbols = get_symbols(env)
+    exchange_symbols = {symbol: f"{symbol}USDT" for symbol in symbols}
+    log(f"Using target symbols: {', '.join(symbols)}")
+    headers = {"accept": "application/json", "CG-API-KEY": load_api_key(env)}
 
-    summary_frames = [refresh_interval(interval, headers)
+    summary_frames = [refresh_interval(interval, headers, symbols, exchange_symbols)
                       for interval in INTERVALS]
     summary = pd.concat(summary_frames, ignore_index=True)
     summary_path = manifest_path("coinglass_cache_summary.csv")
