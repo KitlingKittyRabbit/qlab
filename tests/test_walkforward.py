@@ -36,6 +36,45 @@ class TestWalkForwardSplits:
             dates, train_days=90, test_days=90, embargo_days=14))
         assert len(folds) == 1
 
+    @pytest.mark.parametrize(
+        ("freq", "expected_train", "expected_test"),
+        [("4h", 1080, 270), ("8h", 540, 135), ("12h", 360, 90), ("1D", 180, 45)],
+    )
+    def test_subdaily_folds_use_complete_half_open_calendar_windows(
+        self, freq, expected_train, expected_test
+    ):
+        dates = pd.date_range("2024-01-01", "2026-01-01", freq=freq, inclusive="left")
+        folds = list(
+            walk_forward_splits(
+                dates,
+                train_days=180,
+                test_days=45,
+                embargo_days=1,
+                step_days=45,
+            )
+        )
+        assert folds
+        data = pd.DataFrame({"x": range(len(dates))}, index=dates)
+        for fold in folds:
+            assert len(select_dates(data, fold, "train")) == expected_train
+            assert len(select_dates(data, fold, "test")) == expected_test
+
+    @pytest.mark.parametrize("freq", ["4h", "8h", "12h", "1D"])
+    def test_adjacent_oos_folds_are_contiguous_at_decision_cadence(self, freq):
+        dates = pd.date_range("2024-01-01", "2026-01-01", freq=freq, inclusive="left")
+        folds = list(
+            walk_forward_splits(
+                dates,
+                train_days=180,
+                test_days=45,
+                embargo_days=1,
+                step_days=45,
+            )
+        )
+        cadence = pd.Timedelta(freq)
+        for previous, current in zip(folds, folds[1:]):
+            assert current.test_start - previous.test_end == cadence
+
     def test_fold_indices_sequential(self):
         folds = list(walk_forward_splits(
             self._dates(), train_days=90, test_days=90))

@@ -20,7 +20,7 @@ if __package__ in (None, ""):
         sys.path.insert(0, str(PACKAGE_ROOT))
 
 from qlab.data.crypto.paths import TRADE_ENV_PATH, cache_path, ensure_data_dirs, manifest_path
-from qlab.data.crypto.symbol_universe import RESEARCH_SYMBOLS_12
+from qlab.data.crypto.symbol_universe import RESEARCH_SYMBOLS_12, resolve_target_symbols
 
 DEFAULT_BINANCE_FAPI_BASE_URLS = [
     "https://fapi.binance.com",
@@ -93,12 +93,13 @@ def get_bool_env(env: dict[str, str], key: str, default: bool) -> bool:
 
 
 def get_symbols(env: dict[str, str]) -> list[str]:
-    raw_value = get_env_value(env, "BINANCE_SYMBOLS")
-    if not raw_value:
-        return list(SYMBOLS)
-    values = [item.strip().upper()
-              for item in raw_value.split(",") if item.strip()]
-    return values or list(SYMBOLS)
+    return resolve_target_symbols(
+        get_env_value(env, "CRYPTO_TARGET_SYMBOLS"),
+        get_env_value(env, "BINANCE_SYMBOLS"),
+        file_value=get_env_value(env, "CRYPTO_TARGET_SYMBOLS_FILE")
+        or get_env_value(env, "BINANCE_SYMBOLS_FILE"),
+        default=SYMBOLS,
+    )
 
 
 def build_http_session(proxy_url: str = "", retry_attempts: int = HTTP_RETRY_ATTEMPTS) -> requests.Session:
@@ -435,6 +436,7 @@ def main() -> None:
                             DEFAULT_BINANCE_FAPI_BASE_URLS)
     store = load_existing_cache()
     symbols = get_symbols(env)
+    log(f"Using target symbols: {', '.join(symbols)}")
     max_workers = min(len(symbols), get_int_env(
         env, "BINANCE_SYMBOL_WORKERS", 4)) if symbols else 1
 

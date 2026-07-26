@@ -58,13 +58,16 @@ def walk_forward_splits(
 
     start_date = dates[0]
     end_date = dates[-1]
-    total_span_days = (end_date - start_date).days
-    total_points_span = total_span_days + 1
+    positive_deltas = dates[1:] - dates[:-1]
+    positive_deltas = positive_deltas[positive_deltas > pd.Timedelta(0)]
+    cadence = positive_deltas.min() if len(positive_deltas) else pd.Timedelta(days=1)
+    available_end_exclusive = end_date + cadence
+    total_span_days = (available_end_exclusive - start_date) / pd.Timedelta(days=1)
 
     min_required = train_days + embargo_days + test_days
-    if total_points_span < min_required:
+    if total_span_days < min_required:
         raise ValueError(
-            f"Date range spans {total_span_days} days ({total_points_span} points), but need at least "
+            f"Date range spans {total_span_days:g} days, but need at least "
             f"{min_required} (train={train_days} + embargo={embargo_days} "
             f"+ test={test_days})."
         )
@@ -74,15 +77,15 @@ def walk_forward_splits(
 
     while True:
         train_start = cursor
-        train_end = cursor + pd.Timedelta(days=train_days - 1)
-        test_start = train_end + pd.Timedelta(days=embargo_days + 1)
-        test_end = test_start + pd.Timedelta(days=test_days - 1)
+        train_end_exclusive = cursor + pd.Timedelta(days=train_days)
+        test_start = train_end_exclusive + pd.Timedelta(days=embargo_days)
+        test_end_exclusive = test_start + pd.Timedelta(days=test_days)
 
-        if test_end > end_date:
+        if test_end_exclusive > available_end_exclusive:
             break
 
-        train_dates = dates[(dates >= train_start) & (dates <= train_end)]
-        test_dates = dates[(dates >= test_start) & (dates <= test_end)]
+        train_dates = dates[(dates >= train_start) & (dates < train_end_exclusive)]
+        test_dates = dates[(dates >= test_start) & (dates < test_end_exclusive)]
 
         if len(train_dates) < 10 or len(test_dates) < 5:
             cursor += pd.Timedelta(days=step_days)

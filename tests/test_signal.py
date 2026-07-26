@@ -2,7 +2,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from qlab.signal import zscore, zscore_fixed, ic, ic_direction, threshold_signal
+from qlab.signal import (
+    ic,
+    ic_direction,
+    rank_standardize_cross_section,
+    rank_standardize_panel_cross_section,
+    threshold_signal,
+    zscore,
+    zscore_fixed,
+)
 
 
 class TestZscore:
@@ -89,3 +97,27 @@ class TestThresholdSignal:
         comp = np.array([0.5, -0.5])
         result = threshold_signal(comp, threshold=0.5)
         np.testing.assert_array_equal(result, np.array([0, 0]))
+
+
+class TestRankStandardizeCrossSection:
+
+    def test_maps_ranks_to_unit_interval_with_nans(self):
+        series = pd.Series([10.0, np.nan, 30.0, 20.0], index=list("abcd"))
+        result = rank_standardize_cross_section(series)
+
+        expected = pd.Series([-1.0, np.nan, 1.0, 0.0], index=list("abcd"))
+        pd.testing.assert_series_equal(result, expected)
+
+    def test_panel_standardization_by_decision(self):
+        index = pd.MultiIndex.from_product(
+            [pd.date_range("2024-01-01", periods=2, freq="D"),
+             ["BTC", "ETH", "SOL"]],
+            names=["decision_ts", "symbol"],
+        )
+        frame = pd.DataFrame(
+            {"factor": [1.0, 2.0, 3.0, 3.0, 2.0, 1.0]}, index=index)
+
+        result = rank_standardize_panel_cross_section(frame, ["factor"])
+
+        assert result.loc[(index.levels[0][0], "BTC"), "factor"] == -1.0
+        assert result.loc[(index.levels[0][1], "BTC"), "factor"] == 1.0

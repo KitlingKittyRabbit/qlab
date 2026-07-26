@@ -21,7 +21,7 @@ from qlab.data.crypto.raw_history_store import (
     append_snapshot_history,
     write_timeseries_history,
 )
-from qlab.data.crypto.symbol_universe import RESEARCH_SYMBOLS_12
+from qlab.data.crypto.symbol_universe import RESEARCH_SYMBOLS_12, resolve_target_symbols
 
 BASE = "https://open-api-v4.coinglass.com/api"
 ENV_PATH = TRADE_ENV_PATH
@@ -188,14 +188,38 @@ def log(message: str) -> None:
     print(message, flush=True)
 
 
-def load_api_key() -> str:
-    if not ENV_PATH.exists():
-        raise FileNotFoundError(f"Missing env file: {ENV_PATH}")
+def load_env_file(path: Path) -> dict[str, str]:
+    env: dict[str, str] = {}
+    if not path.exists():
+        return env
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        env[key.strip()] = value.strip()
+    return env
 
-    for line in ENV_PATH.read_text(encoding="utf-8", errors="ignore").splitlines():
-        if line.startswith("COINGLASS_API_KEY="):
-            return line.split("=", 1)[1].strip()
+
+def get_env_value(env: dict[str, str], key: str) -> str:
+    return os.environ.get(key, env.get(key, "")).strip()
+
+
+def load_api_key(env: dict[str, str]) -> str:
+    api_key = get_env_value(env, "COINGLASS_API_KEY")
+    if api_key:
+        return api_key
     raise RuntimeError(f"COINGLASS_API_KEY not found in {ENV_PATH}")
+
+
+def get_symbols(env: dict[str, str]) -> list[str]:
+    return resolve_target_symbols(
+        get_env_value(env, "CRYPTO_TARGET_SYMBOLS"),
+        get_env_value(env, "COINGLASS_SYMBOLS"),
+        file_value=get_env_value(env, "CRYPTO_TARGET_SYMBOLS_FILE")
+        or get_env_value(env, "COINGLASS_SYMBOLS_FILE"),
+        default=SYMBOLS,
+    )
 
 
 def to_datetime_index(values: list | pd.Series) -> pd.DatetimeIndex:
@@ -235,11 +259,11 @@ def fetch_json(path: str, headers: dict[str, str], params: dict[str, str], retri
         f"CoinGlass v4 request failed for {path} params={params}: {last_error}")
 
 
-def build_symbol_params(kind: str, symbol: str, interval: str) -> dict[str, str]:
+def build_symbol_params(kind: str, symbol: str, interval: str, exchange_symbols: dict[str, str]) -> dict[str, str]:
     if kind == "pair_exchange_interval":
         return {
             "exchange": "Binance",
-            "symbol": EXCHANGE_SYMBOLS[symbol],
+            "symbol": exchange_symbols[symbol],
             "interval": interval,
             "limit": "1000",
         }
@@ -259,6 +283,14 @@ def build_symbol_params(kind: str, symbol: str, interval: str) -> dict[str, str]
     raise ValueError(f"Unknown params kind: {kind}")
 
 
+def normalize_timeseries_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    normalized = frame.sort_index()
+    normalized = normalized[~normalized.index.duplicated(keep="last")]
+    return normalized
+
+
 def parse_symbol_frame(parser: str, rows) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
@@ -271,7 +303,7 @@ def parse_symbol_frame(parser: str, rows) -> pd.DataFrame:
             frame["taker_buy_volume_usd"], errors="coerce")
         frame["sell"] = pd.to_numeric(
             frame["taker_sell_volume_usd"], errors="coerce")
-        return frame.set_index("ts")[["buy", "sell"]].sort_index()
+        return normalize_timeseries_frame(frame.set_index("ts")[["buy", "sell"]])
 
     if parser == "taker_agg":
         frame["ts"] = to_datetime_index(frame["time"])
@@ -279,7 +311,7 @@ def parse_symbol_frame(parser: str, rows) -> pd.DataFrame:
             frame["aggregated_buy_volume_usd"], errors="coerce")
         frame["sell"] = pd.to_numeric(
             frame["aggregated_sell_volume_usd"], errors="coerce")
-        return frame.set_index("ts")[["buy", "sell"]].sort_index()
+        return normalize_timeseries_frame(frame.set_index("ts")[["buy", "sell"]])
 
     if parser == "basis":
         frame["ts"] = to_datetime_index(frame["time"])
@@ -288,7 +320,7 @@ def parse_symbol_frame(parser: str, rows) -> pd.DataFrame:
                 frame[column] = pd.to_numeric(frame[column], errors="coerce")
         columns = [column for column in ["open_basis", "close_basis",
                                          "open_change", "close_change"] if column in frame.columns]
-        return frame.set_index("ts")[columns].sort_index()
+        return normalize_timeseries_frame(frame.set_index("ts")[columns])
 
     if parser == "coinbase_premium":
         frame["ts"] = to_datetime_index(frame["time"])
@@ -297,13 +329,13 @@ def parse_symbol_frame(parser: str, rows) -> pd.DataFrame:
                 frame[column] = pd.to_numeric(frame[column], errors="coerce")
         columns = [column for column in ["premium", "premium_rate",
                                          "coinbase_price"] if column in frame.columns]
-        return frame.set_index("ts")[columns].sort_index()
+        return normalize_timeseries_frame(frame.set_index("ts")[columns])
 
     if parser == "ohlc":
         frame["ts"] = to_datetime_index(frame["time"])
         for column in ["open", "high", "low", "close"]:
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
-        return frame.set_index("ts")[["open", "high", "low", "close"]].sort_index()
+        return normalize_timeseries_frame(frame.set_index("ts")[["open", "high", "low", "close"]])
 
     if parser == "bitfinex_margin":
         frame["ts"] = to_datetime_index(frame["time"])
@@ -312,7 +344,7 @@ def parse_symbol_frame(parser: str, rows) -> pd.DataFrame:
                 frame[column] = pd.to_numeric(frame[column], errors="coerce")
         columns = [column for column in ["long_quantity",
                                          "short_quantity"] if column in frame.columns]
-        return frame.set_index("ts")[columns].sort_index()
+        return normalize_timeseries_frame(frame.set_index("ts")[columns])
 
     raise ValueError(f"Unknown parser: {parser}")
 
@@ -328,7 +360,7 @@ def parse_global_frame(parser: str, rows) -> pd.DataFrame:
             frame["flow_usd"], errors="coerce")
         frame["etf_btc_price"] = pd.to_numeric(
             frame["price_usd"], errors="coerce")
-        return frame.set_index("ts")[["etf_btc_flow", "etf_btc_price"]].sort_index()
+        return normalize_timeseries_frame(frame.set_index("ts")[["etf_btc_flow", "etf_btc_price"]])
 
     if parser == "etf_eth":
         frame = pd.DataFrame(rows)
@@ -337,14 +369,14 @@ def parse_global_frame(parser: str, rows) -> pd.DataFrame:
             frame["flow_usd"], errors="coerce")
         frame["etf_eth_price"] = pd.to_numeric(
             frame["price_usd"], errors="coerce")
-        return frame.set_index("ts")[["etf_eth_flow", "etf_eth_price"]].sort_index()
+        return normalize_timeseries_frame(frame.set_index("ts")[["etf_eth_flow", "etf_eth_price"]])
 
     if parser == "cgdi":
         frame = pd.DataFrame(rows)
         frame["ts"] = to_datetime_index(frame["time"])
         frame["cgdi"] = pd.to_numeric(
             frame["cgdi_index_value"], errors="coerce")
-        return frame.set_index("ts")[["cgdi"]].sort_index()
+        return normalize_timeseries_frame(frame.set_index("ts")[["cgdi"]])
 
     if parser == "series_list":
         if not isinstance(rows, dict) or "time_list" not in rows or "data_list" not in rows:
@@ -352,7 +384,7 @@ def parse_global_frame(parser: str, rows) -> pd.DataFrame:
         ts = to_datetime_index(rows["time_list"])
         frame = pd.DataFrame(
             {"ts": ts, "value": pd.to_numeric(rows["data_list"], errors="coerce")})
-        return frame.set_index("ts")[["value"]].sort_index()
+        return normalize_timeseries_frame(frame.set_index("ts")[["value"]])
 
     if parser == "snapshot_list":
         if isinstance(rows, dict):
@@ -376,7 +408,11 @@ def summarize_frame(scope: str, name: str, frame: pd.DataFrame) -> dict[str, obj
     return {"scope": scope, "name": name, "rows": len(frame), "start": pd.NaT, "end": pd.NaT}
 
 
-def freeze_symbol_interval_endpoints(headers: dict[str, str]) -> pd.DataFrame:
+def freeze_symbol_interval_endpoints(
+    headers: dict[str, str],
+    symbols: list[str],
+    exchange_symbols: dict[str, str],
+) -> pd.DataFrame:
     summary_rows: list[dict[str, object]] = []
     rate_limit_sleep = get_rate_limit_sleep()
 
@@ -384,10 +420,10 @@ def freeze_symbol_interval_endpoints(headers: dict[str, str]) -> pd.DataFrame:
         cache_payload: dict[str, pd.DataFrame] = {}
         log(f"\n=== Freeze v4 interval {interval} ===")
         for endpoint in SYMBOL_ENDPOINTS:
-            symbols = endpoint.supported_symbols or tuple(SYMBOLS)
-            for symbol in symbols:
+            endpoint_symbols = endpoint.supported_symbols or tuple(symbols)
+            for symbol in endpoint_symbols:
                 params = build_symbol_params(
-                    endpoint.params_kind, symbol, interval)
+                    endpoint.params_kind, symbol, interval, exchange_symbols)
                 try:
                     rows = fetch_json(endpoint.path, headers, params)
                     frame = parse_symbol_frame(endpoint.parser, rows)
@@ -529,7 +565,7 @@ def freeze_global_endpoints(headers: dict[str, str]) -> pd.DataFrame:
     return pd.DataFrame(summary_rows)
 
 
-def freeze_snapshots(headers: dict[str, str]) -> pd.DataFrame:
+def freeze_snapshots(headers: dict[str, str], symbols: list[str]) -> pd.DataFrame:
     summary_rows: list[dict[str, object]] = []
     snapshot_payload: dict[str, pd.DataFrame] = {}
     rate_limit_sleep = get_rate_limit_sleep()
@@ -537,7 +573,7 @@ def freeze_snapshots(headers: dict[str, str]) -> pd.DataFrame:
     log("\n=== Freeze v4 snapshot endpoints ===")
     for endpoint in SNAPSHOT_ENDPOINTS:
         if endpoint.name == "oi_exchange":
-            for symbol in SYMBOLS:
+            for symbol in symbols:
                 params = {"symbol": symbol}
                 rows = fetch_json(endpoint.path, headers, params)
                 frame = parse_global_frame(endpoint.parser, rows)
@@ -601,12 +637,16 @@ def freeze_snapshots(headers: dict[str, str]) -> pd.DataFrame:
 def main() -> None:
     ensure_data_dirs()
     RAW_HISTORY_ROOT.mkdir(parents=True, exist_ok=True)
-    headers = {"accept": "application/json", "CG-API-KEY": load_api_key()}
+    env = load_env_file(ENV_PATH)
+    symbols = get_symbols(env)
+    exchange_symbols = {symbol: f"{symbol}USDT" for symbol in symbols}
+    log(f"Using target symbols: {', '.join(symbols)}")
+    headers = {"accept": "application/json", "CG-API-KEY": load_api_key(env)}
 
     summary_frames = [
-        freeze_symbol_interval_endpoints(headers),
+        freeze_symbol_interval_endpoints(headers, symbols, exchange_symbols),
         freeze_global_endpoints(headers),
-        freeze_snapshots(headers),
+        freeze_snapshots(headers, symbols),
     ]
     summary = pd.concat(summary_frames, ignore_index=True)
     summary_path = manifest_path("coinglass_v4_cache_summary.csv")

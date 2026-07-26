@@ -6,7 +6,7 @@ signal generation with a clear distinction between rolling (live) and
 fixed (walk-forward) z-score methods.
 """
 
-from typing import Union
+from typing import Sequence, Union
 
 import numpy as np
 import pandas as pd
@@ -60,6 +60,44 @@ def zscore_fixed(
     if sd < 1e-10:
         return pd.Series(np.nan, index=series.index)
     return (series - mu) / sd
+
+
+def rank_standardize_cross_section(
+    series: pd.Series,
+    *,
+    output_range: tuple[float, float] = (-1.0, 1.0),
+) -> pd.Series:
+    """Rank-standardize one cross-section into a bounded numeric range."""
+    values = series.dropna()
+    result = pd.Series(np.nan, index=series.index,
+                       dtype=float, name=series.name)
+    if values.empty:
+        return result
+    lower, upper = output_range
+    if lower >= upper:
+        raise ValueError(
+            "output_range lower bound must be smaller than upper bound")
+    ranks = values.rank(method="average")
+    if len(values) == 1:
+        result.loc[values.index] = 0.0
+        return result
+    scaled = lower + (ranks - 1.0) * ((upper - lower) / (len(values) - 1.0))
+    result.loc[values.index] = scaled.astype(float)
+    return result
+
+
+def rank_standardize_panel_cross_section(
+    frame: pd.DataFrame,
+    columns: Sequence[str],
+    *,
+    decision_level: str | int = "decision_ts",
+) -> pd.DataFrame:
+    """Apply rank standardization column-wise within each decision cross-section."""
+    result = frame.copy()
+    for column in columns:
+        result[column] = result.groupby(level=decision_level)[
+            column].transform(rank_standardize_cross_section)
+    return result
 
 
 def ic(
