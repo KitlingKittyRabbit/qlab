@@ -10,6 +10,11 @@ import numpy as np
 import pandas as pd
 
 from ...signal import rank_standardize_cross_section
+from .binance_um_klines import execution_opens
+from .strategy_time_contract import (
+    ContinuousHoldingTimeContract,
+    execution_timestamps,
+)
 
 
 def load_pickle_payload(path: str | Path) -> dict[str, pd.DataFrame]:
@@ -41,6 +46,27 @@ def normalize_price_frame(frame: pd.DataFrame, *, close_column: str = "c") -> pd
     return normalized
 
 
+def relabel_open_indexed_bars_to_bar_end(
+    frame: pd.DataFrame,
+    interval: pd.Timedelta,
+) -> pd.DataFrame:
+    """Relabel open-indexed bars to their first observable bar-end timestamp."""
+    normalized = frame.copy().sort_index()
+    index = pd.DatetimeIndex(normalized.index)
+    if index.tz is None:
+        index = index.tz_localize("UTC")
+    else:
+        index = index.tz_convert("UTC")
+    interval = pd.Timedelta(interval)
+    if interval <= pd.Timedelta(0):
+        raise ValueError("interval must be positive")
+    normalized.index = index + interval
+    normalized.index.name = "ts"
+    if normalized.index.has_duplicates:
+        raise ValueError("bar-end relabeling produced duplicate timestamps")
+    return normalized
+
+
 def forward_returns_for_symbol(
     decision_index: pd.DatetimeIndex,
     close_series: pd.Series,
@@ -48,6 +74,15 @@ def forward_returns_for_symbol(
     *,
     name: str = "forward_return",
 ) -> pd.Series:
+    """Build exact timestamp close-to-close forward returns for one symbol.
+
+    This is a label/diagnostic helper. It assumes the value at
+    ``decision_index`` and ``decision_index + horizon_delta`` are the entry and
+    exit close timestamps. It does not prove that a signal was observable at
+    the decision timestamp, and it does not model a tradeable entry/exit lag.
+    Strategy PnL that needs live-like semantics must use a point-in-time
+    replay/backtest entry instead of this label helper.
+    """
     horizon_delta = pd.Timedelta(horizon_delta)
     future_index = decision_index + horizon_delta
     entry = close_series.reindex(decision_index)
@@ -67,6 +102,11 @@ def panel_forward_returns(
     *,
     close_column: str = "c",
 ) -> pd.Series:
+    """Attach exact close-to-close forward-return labels to a crypto panel.
+
+    The result is appropriate for IC diagnostics and label construction. It is
+    not a live-like replay and must not be treated as executable strategy PnL.
+    """
     pieces: list[pd.Series] = []
     for symbol in sorted(panel.index.get_level_values("symbol").unique()):
         if symbol not in price_payloads:
@@ -97,6 +137,12 @@ def panel_with_forward_return(
     *,
     close_column: str = "c",
 ) -> pd.DataFrame:
+    """Return panel rows joined with exact close-to-close forward-return labels.
+
+    This preserves the label semantics of ``panel_forward_returns``: useful for
+    IC/research labels, not sufficient for point-in-time executable strategy
+    results.
+    """
     forward_return = panel_forward_returns(
         panel, price_payloads, horizon_delta, close_column=close_column)
     joined = panel.join(forward_return.rename("forward_return"), how="inner")
@@ -104,6 +150,67 @@ def panel_with_forward_return(
         raise ValueError(
             "panel-forward-return join is empty for requested horizon")
     return joined.reset_index().sort_values(["decision_ts", "symbol"]).set_index("decision_ts")
+
+
+def executable_returns_for_symbol(
+    signal_bar_end_index: pd.DatetimeIndex,
+    minute_klines: pd.DataFrame,
+    contract: ContinuousHoldingTimeContract,
+    horizon_deltas: Mapping[str, pd.Timedelta],
+) -> pd.DataFrame:
+    """Build exact open-to-open returns under a validated time contract."""
+    ledger = execution_timestamps(signal_bar_end_index, contract, horizon_deltas)
+    entry = execution_opens(minute_klines, ledger["execution_ts"])
+    exit_prices = execution_opens(minute_klines, ledger["next_execution_ts"])
+    ledger["entry_price"] = entry.to_numpy()
+    ledger["exit_price"] = exit_prices.to_numpy()
+    ledger["execution_price"] = ledger["entry_price"]
+    ledger["next_execution_price"] = ledger["exit_price"]
+    ledger["executable_return"] = ledger["exit_price"] / ledger["entry_price"] - 1.0
+    if not (ledger["next_execution_ts"] - ledger["execution_ts"] == pd.Timedelta(horizon_deltas[contract.return_horizon])).all():
+        raise ValueError("Executable holding interval does not equal declared return horizon")
+    return ledger
+
+
+def panel_with_executable_return(
+    panel: pd.DataFrame,
+    minute_klines_by_symbol: Mapping[str, pd.DataFrame | pd.Series],
+    contract: ContinuousHoldingTimeContract,
+    horizon_deltas: Mapping[str, pd.Timedelta],
+) -> pd.DataFrame:
+    if not isinstance(panel.index, pd.MultiIndex) or set(panel.index.names) < {"decision_ts", "symbol"}:
+        raise ValueError("panel must use a decision_ts/symbol MultiIndex")
+    pieces: list[pd.DataFrame] = []
+    for symbol in sorted(panel.index.get_level_values("symbol").unique()):
+        if symbol not in minute_klines_by_symbol:
+            raise ValueError(f"Missing Binance 1m klines for admitted symbol: {symbol}")
+        decisions = pd.DatetimeIndex(panel.xs(symbol, level="symbol").index)
+        ledger = executable_returns_for_symbol(
+            decisions,
+            minute_klines_by_symbol[str(symbol)],
+            contract,
+            horizon_deltas,
+        )
+        ledger["symbol"] = symbol
+        pieces.append(ledger.set_index(["decision_ts", "symbol"]))
+    executable = pd.concat(pieces).sort_index()
+    base_panel = panel.copy()
+    if "signal_bar_end_ts" in base_panel.columns:
+        declared = pd.to_datetime(base_panel["signal_bar_end_ts"], utc=True)
+        index_values = pd.DatetimeIndex(
+            base_panel.index.get_level_values("decision_ts")
+        )
+        if not (declared.to_numpy() == index_values.to_numpy()).all():
+            raise ValueError("panel signal_bar_end_ts does not match decision_ts")
+        base_panel = base_panel.drop(columns="signal_bar_end_ts")
+    joined = base_panel.join(executable, how="inner")
+    if joined.empty:
+        raise ValueError("panel-executable-return join is empty")
+    return (
+        joined.reset_index()
+        .sort_values(["decision_ts", "symbol"])
+        .set_index("decision_ts")
+    )
 
 
 def rank_standardize_with_nans(series: pd.Series) -> pd.Series:
@@ -114,6 +221,20 @@ def rank_standardize_with_nans(series: pd.Series) -> pd.Series:
         return result
     result.loc[valid.index] = rank_standardize_cross_section(valid)
     return result
+
+
+def rank_standardize_grouped_series(
+    series: pd.Series,
+    *,
+    level: str | int = "decision_ts",
+) -> pd.Series:
+    """Vectorized rank standardization within each decision cross-section."""
+    grouped = series.groupby(level=level, sort=False)
+    ranks = grouped.rank(method="average")
+    counts = grouped.transform("count")
+    scaled = -1.0 + (ranks - 1.0) * (2.0 / (counts - 1.0))
+    scaled = scaled.where(counts > 1, 0.0)
+    return scaled.where(series.notna()).astype(float).rename(series.name)
 
 
 def price_controls_for_symbol(
@@ -149,9 +270,11 @@ def price_controls_for_symbol(
         window=size_lookback_days,
         min_periods=size_min_days,
     ).median()
+    decision_days = pd.DatetimeIndex(decision_index.normalize())
+    unique_decision_days = pd.DatetimeIndex(decision_days.unique())
+    size_by_day = np.log1p(trailing_size.reindex(unique_decision_days, method="ffill"))
     size = pd.Series(
-        np.log1p(trailing_size.reindex(
-            decision_index.normalize(), method="ffill").to_numpy()),
+        size_by_day.reindex(decision_days).to_numpy(),
         index=decision_index,
     )
     return pd.DataFrame(
@@ -205,6 +328,8 @@ def build_control_panel(
     ):
         if target_column not in control_columns:
             continue
-        standardized[target_column] = raw.groupby(level="decision_ts")[
-            raw_column].transform(rank_standardize_with_nans)
+        standardized[target_column] = rank_standardize_grouped_series(
+            raw[raw_column],
+            level="decision_ts",
+        )
     return standardized[list(control_columns)]
