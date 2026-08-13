@@ -4,6 +4,8 @@ import pytest
 
 from qlab import coinglass_substitution as substitution
 from qlab import factor_research
+from qlab.data.crypto import panel as crypto_panel
+from qlab.data.crypto.strategy_time_contract import ContinuousHoldingTimeContract
 from qlab.walkforward import WalkForwardFold
 
 
@@ -58,6 +60,91 @@ def test_price_volume_features_use_cutoff_and_complete_windows():
     )
     assert np.isnan(missing_artifacts.raw_features.iloc[0]["return_1d"])
     assert not bool(missing_artifacts.availability_audit.iloc[0]["all_predictors_available"])
+
+
+def test_registered_estimator_benchmark_is_performance_only():
+    rng = np.random.default_rng(3)
+    features = rng.standard_normal((40, 3))
+    target = features[:, 0] + rng.standard_normal(40) * 0.1
+    result = substitution.benchmark_registered_replica_estimators(
+        features, target, repetitions=1
+    )
+    assert set(result["model_class"]) == {
+        "linear_ridge",
+        "hist_gbm",
+        "random_forest",
+        "poly2_ridge",
+        "poly2_elastic_net",
+    }
+    assert result["performance_only"].all()
+    assert (result["fit_count"] == 1).all()
+    assert (result["cpu_seconds"] > 0).all()
+    with pytest.raises(ValueError, match="between 1 and 3"):
+        substitution.benchmark_registered_replica_estimators(
+            features, target, repetitions=4
+        )
+
+
+def test_registered_capability_preflight_uses_all_five_exact_model_paths(monkeypatch):
+    specs = {
+        "linear_ridge": ({"alpha": 1.0},),
+        "hist_gbm": ({"max_depth": 2, "max_iter": 100, "learning_rate": 0.03},),
+        "random_forest": ({"max_depth": 3, "n_estimators": 200},),
+        "poly2_ridge": ({"alpha": 1.0},),
+        "poly2_elastic_net": (
+            {"alpha": 1.0, "l1_ratio": 0.5, "max_iter": 10_000, "tol": 1e-6},
+        ),
+    }
+    monkeypatch.setattr(
+        substitution, "_registered_model_parameter_specs", lambda: specs
+    )
+    rng = np.random.default_rng(20260811)
+    train_x = rng.normal(size=(80, 24))
+    validation_x = rng.normal(size=(20, 24))
+    train_y = train_x[:, 0] ** 2 + 0.5 * train_x[:, 1] * train_x[:, 2]
+    validation_y = (
+        validation_x[:, 0] ** 2
+        + 0.5 * validation_x[:, 1] * validation_x[:, 2]
+    )
+    result = substitution.evaluate_registered_replica_model_capability_performance(
+        train_x, train_y, validation_x, validation_y
+    )
+    assert result["model_class"].tolist() == list(
+        substitution.REGISTERED_MODEL_CLASS_ORDER
+    )
+    assert result["fit_count"].eq(1).all()
+    assert result["convergence_status"].eq("converged").all()
+    assert result["selection_performed"].eq(False).all()
+    assert result["research_conclusion_allowed"].eq(False).all()
+    assert result["validation_mse"].ge(0.0).all()
+    assert result["wall_seconds"].gt(0.0).all()
+    assert result["peak_memory_bytes"].gt(0).all()
+    assert result["peak_memory_bytes"].equals(result["peak_process_rss_bytes"])
+    assert result["memory_measurement_scope"].eq(
+        "fresh_process_per_configuration"
+    ).all()
+    assert set(result.loc[result["model_class"].str.startswith("poly2_"), "model_feature_count"]) == {324}
+    assert set(result.loc[~result["model_class"].str.startswith("poly2_"), "model_feature_count"]) == {24}
+
+
+def test_registered_capability_preflight_fails_closed_on_model_failure(monkeypatch):
+    specs = {
+        "linear_ridge": ({"alpha": -1.0},),
+        "hist_gbm": ({"max_depth": 2, "max_iter": 100, "learning_rate": 0.03},),
+        "random_forest": ({"max_depth": 3, "n_estimators": 200},),
+        "poly2_ridge": ({"alpha": 1.0},),
+        "poly2_elastic_net": (
+            {"alpha": 1.0, "l1_ratio": 0.5, "max_iter": 10_000, "tol": 1e-6},
+        ),
+    }
+    monkeypatch.setattr(
+        substitution, "_registered_model_parameter_specs", lambda: specs
+    )
+    values = np.ones((80, 24))
+    with pytest.raises(ValueError, match="alpha"):
+        substitution.evaluate_registered_replica_model_capability_performance(
+            values, np.ones(80), values[:20], np.ones(20)
+        )
 
 
 def test_intraday_size_control_uses_latest_completed_day_without_future_data():
@@ -211,6 +298,107 @@ def test_fold_target_exports_full_train_and_test_before_replica_fit():
     assert len(ridge.predictions) == 5 * 10
 
 
+def test_target_reproduction_requires_exact_bidirectional_key_and_value_match():
+    decision = pd.Timestamp("2025-01-01", tz="UTC")
+    rebuilt = pd.DataFrame(
+        {
+            "fold_idx": [0, 0],
+            "decision_ts": [decision, decision],
+            "symbol": ["A", "B"],
+            "combo_signal": [-1.0, 1.0],
+        }
+    )
+    existing = rebuilt.rename(columns={"combo_signal": "signal_value"}).assign(
+        combo_id="combo", weight_scheme="equal"
+    )
+    passed = substitution.audit_target_signal_reproduction(
+        rebuilt,
+        existing,
+        candidate_id="candidate",
+        combo_id="combo",
+        weight_scheme="equal",
+    )
+    assert bool(passed.iloc[0]["reproduction_pass"])
+    assert passed.iloc[0]["unexpected_rebuilt_rows"] == 0
+
+    extra = pd.concat(
+        [
+            rebuilt,
+            pd.DataFrame(
+                {
+                    "fold_idx": [0],
+                    "decision_ts": [decision],
+                    "symbol": ["C"],
+                    "combo_signal": [0.0],
+                }
+            ),
+        ],
+        ignore_index=True,
+    )
+    failed = substitution.audit_target_signal_reproduction(
+        extra,
+        existing,
+        candidate_id="candidate",
+        combo_id="combo",
+        weight_scheme="equal",
+    )
+    assert not bool(failed.iloc[0]["reproduction_pass"])
+    assert failed.iloc[0]["unexpected_rebuilt_rows"] == 1
+    assert "0@2025-01-01T00:00:00+00:00@C" in failed.iloc[0]["unexpected_rebuilt_keys"]
+
+    missing = rebuilt.loc[rebuilt["symbol"] != "B"].copy()
+    failed_missing = substitution.audit_target_signal_reproduction(
+        missing,
+        existing,
+        candidate_id="candidate",
+        combo_id="combo",
+        weight_scheme="equal",
+    )
+    assert not bool(failed_missing.iloc[0]["reproduction_pass"])
+    assert failed_missing.iloc[0]["missing_rebuilt_rows"] == 1
+    assert "0@2025-01-01T00:00:00+00:00@B" in failed_missing.iloc[0]["missing_rebuilt_keys"]
+    assert failed_missing.iloc[0]["unexpected_rebuilt_rows"] == 0
+
+    rebuilt_nan = rebuilt.copy()
+    existing_nan = existing.copy()
+    rebuilt_nan.loc[rebuilt_nan["symbol"] == "B", "combo_signal"] = np.nan
+    existing_nan.loc[existing_nan["symbol"] == "B", "signal_value"] = np.nan
+    passed_nan = substitution.audit_target_signal_reproduction(
+        rebuilt_nan,
+        existing_nan,
+        candidate_id="candidate",
+        combo_id="combo",
+        weight_scheme="equal",
+    )
+    assert bool(passed_nan.iloc[0]["reproduction_pass"])
+    assert passed_nan.iloc[0]["missing_rebuilt_rows"] == 0
+    assert passed_nan.iloc[0]["matched_holding_rows"] == 2
+    assert bool(passed_nan.iloc[0]["nan_pattern_match"])
+
+    unilateral_nan = substitution.audit_target_signal_reproduction(
+        rebuilt_nan,
+        existing,
+        candidate_id="candidate",
+        combo_id="combo",
+        weight_scheme="equal",
+    )
+    assert not bool(unilateral_nan.iloc[0]["reproduction_pass"])
+    assert not bool(unilateral_nan.iloc[0]["nan_pattern_match"])
+
+    wrong_value = rebuilt.copy()
+    wrong_value.loc[wrong_value["symbol"] == "B", "combo_signal"] += 1e-6
+    failed_value = substitution.audit_target_signal_reproduction(
+        wrong_value,
+        existing,
+        candidate_id="candidate",
+        combo_id="combo",
+        weight_scheme="equal",
+        tolerance=1e-12,
+    )
+    assert not bool(failed_value.iloc[0]["reproduction_pass"])
+    assert failed_value.iloc[0]["max_abs_signal_difference"] > 1e-12
+
+
 def _registered_replica_frame() -> tuple[pd.DataFrame, WalkForwardFold]:
     dates = pd.date_range("2025-01-01", periods=30, freq="1D", tz="UTC")
     symbols = [f"S{index:02d}" for index in range(6)]
@@ -333,7 +521,12 @@ def test_registered_replicas_are_deterministic_and_outer_test_target_blind():
                 "n_estimators": 200,
             },
         ),
+        "poly2_ridge": ({"alpha": 1.0},),
+        "poly2_elastic_net": (
+            {"alpha": 1.0, "l1_ratio": 0.5, "max_iter": 10_000, "tol": 1e-6},
+        ),
     }
+    timings = []
     first = substitution.fit_walk_forward_registered_replicas(
         frame,
         [fold],
@@ -342,6 +535,8 @@ def test_registered_replicas_are_deterministic_and_outer_test_target_blind():
         frozen_ridge_inner_scores=ridge.inner_scores,
         allow_model_subset=True,
         model_specs=small_specs,
+        performance_timings=timings,
+        timing_target="signal",
     )
     second = substitution.fit_walk_forward_registered_replicas(
         frame,
@@ -361,15 +556,29 @@ def test_registered_replicas_are_deterministic_and_outer_test_target_blind():
         "linear_ridge",
         "hist_gbm",
         "random_forest",
+        "poly2_ridge",
+        "poly2_elastic_net",
     }
     assert set(first.fold_selection["selection_source"]) == {
         "outer_train_inner_validation"
     }
+    assert {row["stage"] for row in timings} == {
+        "ridge_lineage_audit",
+        "registered_hist_gbm_inner_selection",
+        "registered_hist_gbm_outer_final_fit",
+        "registered_random_forest_inner_selection",
+        "registered_random_forest_outer_final_fit",
+        "registered_poly2_ridge_inner_selection",
+        "registered_poly2_ridge_outer_final_fit",
+        "registered_poly2_elastic_net_inner_selection",
+        "registered_poly2_elastic_net_outer_final_fit",
+    }
+    assert {row["timing_target"] for row in timings} == {"signal"}
     diagnostic_summary = substitution.summarize_registered_model_diagnostics(
         first.model_diagnostics,
         expected_fold_count=1,
     )
-    assert len(diagnostic_summary) == 3
+    assert len(diagnostic_summary) == 5
     assert diagnostic_summary["selected_fold_count"].sum() == 1
     assert set(diagnostic_summary["fold_count"]) == {1}
     assert diagnostic_summary.loc[
@@ -416,6 +625,22 @@ def test_registered_replicas_are_deterministic_and_outer_test_target_blind():
             "replica_signal",
         ].to_numpy()
         np.testing.assert_allclose(original_replica, mutated_replica)
+
+    same_sample = substitution.fit_same_sample_registered_replicas(
+        frame,
+        [fold],
+        first.fold_selection,
+    )
+    mutated_same_sample = substitution.fit_same_sample_registered_replicas(
+        mutated,
+        [fold],
+        first.fold_selection,
+    )
+    assert not np.allclose(
+        same_sample["replica_signal"],
+        mutated_same_sample["replica_signal"],
+    )
+    assert set(same_sample["prediction_scope"]) == {"outer_test_same_sample"}
 
     outside_registry = {
         **small_specs,
@@ -503,6 +728,158 @@ def test_registered_hyperparameter_ties_follow_blueprint_tuple_order():
     ) < substitution._registered_tie_key("hist_gbm", high_depth_low_rate)
 
 
+def test_five_model_registry_matches_frozen_discrete_configuration_table():
+    specs = substitution.registered_replica_model_specs()
+    assert substitution.REGISTERED_MODEL_CLASS_ORDER == (
+        "linear_ridge",
+        "hist_gbm",
+        "random_forest",
+        "poly2_ridge",
+        "poly2_elastic_net",
+    )
+    assert {name: len(configurations) for name, configurations in specs.items()} == {
+        "hist_gbm": 12,
+        "random_forest": 8,
+        "poly2_ridge": 9,
+        "poly2_elastic_net": 27,
+    }
+    assert specs["hist_gbm"][-4:] == (
+        {"max_depth": 5, "max_iter": 300, "learning_rate": 0.05,
+         "l2_regularization": 1.0, "min_samples_leaf": 20, "early_stopping": False},
+        {"max_depth": 5, "max_iter": 800, "learning_rate": 0.03,
+         "l2_regularization": 1.0, "min_samples_leaf": 20, "early_stopping": False},
+        {"max_depth": 8, "max_iter": 500, "learning_rate": 0.03,
+         "l2_regularization": 5.0, "min_samples_leaf": 20, "early_stopping": False},
+        {"max_depth": 8, "max_iter": 800, "learning_rate": 0.03,
+         "l2_regularization": 5.0, "min_samples_leaf": 20, "early_stopping": False},
+    )
+    assert specs["random_forest"][-1] == {
+        "max_depth": None,
+        "n_estimators": 800,
+        "min_samples_leaf": 10,
+        "max_features": 0.5,
+        "bootstrap": True,
+    }
+
+
+def test_poly2_design_has_frozen_order_and_324_features():
+    values = np.arange(48, dtype=float).reshape(2, 24)
+    expanded = substitution._poly2_registered_design(values)
+    assert expanded.shape == (2, 324)
+    np.testing.assert_allclose(expanded[:, :24], values)
+    np.testing.assert_allclose(expanded[:, 24:48], np.square(values))
+    expected_interactions = np.column_stack(
+        [values[:, left] * values[:, right] for left in range(24) for right in range(left + 1, 24)]
+    )
+    np.testing.assert_allclose(expanded[:, 48:], expected_interactions)
+
+
+def test_registered_poly2_represents_frozen_b06_function_without_special_case():
+    rng = np.random.default_rng(9)
+    train_x = rng.normal(size=(1_000, 24))
+    validation_x = rng.normal(size=(500, 24))
+
+    def shared_low_order(values):
+        return (
+            (np.square(values[:, 0]) - 1.0) / np.sqrt(2.0)
+            + 0.8 * (np.square(values[:, 1]) - 1.0) / np.sqrt(2.0)
+            + 0.6 * values[:, 2] * values[:, 3]
+            + 0.4 * values[:, 4] * values[:, 5]
+        ) / np.sqrt(2.16)
+
+    estimator = substitution._fit_registered_estimator(
+        "poly2_ridge", {"alpha": 0.0001}, train_x, shared_low_order(train_x)
+    )
+    mse = np.mean(
+        np.square(shared_low_order(validation_x) - estimator.predict(validation_x))
+    )
+    assert mse < 1e-10
+    assert "B06" not in substitution._poly2_registered_design.__doc__
+
+
+def test_registered_deep_tree_covers_frozen_low_order_structure_better_than_shallow_tree():
+    rng = np.random.default_rng(123)
+    train_x = rng.normal(size=(3_000, 24))
+    validation_x = rng.normal(size=(1_500, 24))
+
+    def low_order_threshold(values):
+        return (
+            2.0
+            * (
+                (values[:, 0] > 0.0)
+                & (values[:, 1] > 0.0)
+                & (values[:, 2] > 0.0)
+                & (values[:, 3] > 0.0)
+            ).astype(float)
+            - 1.0
+        )
+
+    specs = substitution.registered_replica_model_specs()["hist_gbm"]
+    shallow = substitution._fit_registered_estimator(
+        "hist_gbm", specs[0], train_x, low_order_threshold(train_x)
+    )
+    deep = substitution._fit_registered_estimator(
+        "hist_gbm", specs[-1], train_x, low_order_threshold(train_x)
+    )
+    target = low_order_threshold(validation_x)
+    shallow_mse = np.mean(np.square(target - shallow.predict(validation_x)))
+    deep_mse = np.mean(np.square(target - deep.predict(validation_x)))
+    assert deep_mse < 0.03
+    assert deep_mse < 0.25 * shallow_mse
+
+
+def test_poly2_design_is_dimension_general_and_real_level2_stays_21_features():
+    assert len(substitution.PRICE_VOLUME_COLUMNS) == 21
+    assert set(substitution.PRICE_VOLUME_COLUMNS).isdisjoint(
+        substitution.LEVEL0_COLUMNS
+    )
+    real_level2 = np.ones((3, len(substitution.PRICE_VOLUME_COLUMNS)))
+    expanded = substitution._poly2_registered_design(real_level2)
+    assert expanded.shape == (3, 252)
+
+
+@pytest.mark.parametrize("model_class", ["poly2_ridge", "poly2_elastic_net"])
+def test_poly2_inner_preprocessing_does_not_read_validation_rows(model_class):
+    rng = np.random.default_rng(20260811)
+    train_x = rng.normal(size=(80, 4))
+    train_y = (
+        train_x[:, 0] ** 2
+        + 0.7 * train_x[:, 1] * train_x[:, 2]
+        - 0.3 * train_x[:, 3]
+    )
+    validation_x = rng.normal(size=(20, 4))
+    validation_x[0, 0] = 1e6
+    validation_y = np.zeros(20)
+    parameters = (
+        {"alpha": 1.0}
+        if model_class == "poly2_ridge"
+        else {"alpha": 1.0, "l1_ratio": 0.5, "max_iter": 10_000, "tol": 1e-6}
+    )
+    payload = {
+        "inner_split_idx": 0,
+        "inner_train_start": pd.Timestamp("2026-01-01", tz="UTC"),
+        "inner_train_end": pd.Timestamp("2026-01-02", tz="UTC"),
+        "validation_start": pd.Timestamp("2026-01-03", tz="UTC"),
+        "validation_end": pd.Timestamp("2026-01-04", tz="UTC"),
+        "train_x": train_x,
+        "train_y": train_y,
+        "validation_x": validation_x,
+        "validation_y": validation_y,
+    }
+    _, _, score = substitution._fit_registered_inner_split(
+        model_class, parameters, payload
+    )
+    estimator = substitution._fit_registered_estimator(
+        model_class, parameters, train_x, train_y
+    )
+    expected = estimator.predict(validation_x)
+    assert score["validation_sse"] == pytest.approx(float(expected @ expected))
+    scaler = estimator.named_steps["scale"]
+    train_design = substitution._poly2_registered_design(train_x)
+    np.testing.assert_allclose(scaler.mean_, train_design.mean(axis=0))
+    assert abs(scaler.mean_[0]) < 1.0
+
+
 def test_train_selected_composite_preserves_orthogonal_persistent_residual_information():
     decisions = pd.date_range("2025-01-01", periods=45, freq="1D", tz="UTC")
     symbols = [f"S{index:02d}" for index in range(10)]
@@ -580,6 +957,8 @@ def test_registered_replica_exposes_tree_overfit_on_deterministic_noise(monkeypa
         model_specs={
             "hist_gbm": (registered["hist_gbm"][0],),
             "random_forest": (registered["random_forest"][-1],),
+            "poly2_ridge": (registered["poly2_ridge"][0],),
+            "poly2_elastic_net": (registered["poly2_elastic_net"][-1],),
         },
     )
     tree = result.model_diagnostics.loc[
@@ -599,8 +978,143 @@ def test_registered_replica_exposes_tree_overfit_on_deterministic_noise(monkeypa
             model_specs={
                 "hist_gbm": (registered["hist_gbm"][0],),
                 "random_forest": (registered["random_forest"][0],),
+                "poly2_ridge": (registered["poly2_ridge"][0],),
+                "poly2_elastic_net": (registered["poly2_elastic_net"][-1],),
             },
         )
+
+
+def test_same_sample_registered_ridge_matches_hand_calculation_and_fails_closed():
+    dates = pd.date_range("2025-01-01", periods=2, freq="1D", tz="UTC")
+    index = pd.MultiIndex.from_product(
+        [dates, ("A", "B")], names=["decision_ts", "symbol"]
+    )
+    x = np.asarray([-1.0, 0.0, 1.0, 2.0])
+    target = 1.0 + 2.0 * x
+    frame = pd.DataFrame(
+        {
+            "x": x,
+            "combo_signal": target,
+            "forward_return": target / 100.0,
+            "strategy_forward_return": target / 100.0,
+        },
+        index=index,
+    )
+    fold = WalkForwardFold(
+        fold_idx=0,
+        train_start=dates[0] - pd.Timedelta(days=2),
+        train_end=dates[0] - pd.Timedelta(days=1),
+        test_start=dates[0],
+        test_end=dates[-1],
+    )
+    alpha = substitution.ALPHA_GRID[0]
+    selection = pd.DataFrame(
+        [
+            {
+                "candidate_id": "candidate",
+                "fold_idx": 0,
+                "selected_model_class": "linear_ridge",
+                "selected_hyperparameters_json": substitution._registered_parameter_key(
+                    {"alpha": alpha}
+                ),
+                "selection_source": "outer_train_inner_validation",
+            }
+        ]
+    )
+
+    result = substitution.fit_same_sample_registered_replicas(
+        frame,
+        [fold],
+        selection,
+        feature_columns=("x",),
+    )
+
+    centered_x = x - x.mean()
+    expected_beta = float(centered_x @ (target - target.mean())) / float(
+        centered_x @ centered_x + alpha
+    )
+    expected_intercept = float(target.mean() - x.mean() * expected_beta)
+    expected_replica = expected_intercept + expected_beta * x
+    np.testing.assert_allclose(result["replica_signal"], expected_replica)
+    np.testing.assert_allclose(
+        result["residual_signal"], target - expected_replica
+    )
+    assert result[["candidate_id", "fold_idx", "decision_ts", "symbol"]].to_dict(
+        "records"
+    ) == [
+        {
+            "candidate_id": "candidate",
+            "fold_idx": 0,
+            "decision_ts": decision_ts,
+            "symbol": symbol,
+        }
+        for decision_ts in dates
+        for symbol in ("A", "B")
+    ]
+
+    with pytest.raises(ValueError, match="is empty"):
+        substitution.fit_same_sample_registered_replicas(
+            frame, [fold], selection.iloc[0:0], feature_columns=("x",)
+        )
+    duplicate = pd.concat([selection, selection], ignore_index=True)
+    with pytest.raises(ValueError, match="duplicate candidate/fold"):
+        substitution.fit_same_sample_registered_replicas(
+            frame, [fold], duplicate, feature_columns=("x",)
+        )
+    invalid = selection.copy()
+    invalid["selected_hyperparameters_json"] = '{"alpha":999.0}'
+    with pytest.raises(ValueError, match="invalid parameters"):
+        substitution.fit_same_sample_registered_replicas(
+            frame, [fold], invalid, feature_columns=("x",)
+        )
+
+
+@pytest.mark.parametrize(
+    "model_class,parameters",
+    [
+        ("hist_gbm", substitution.registered_replica_model_specs()["hist_gbm"][0]),
+        (
+            "random_forest",
+            substitution.registered_replica_model_specs()["random_forest"][0],
+        ),
+        (
+            "poly2_ridge",
+            substitution.registered_replica_model_specs()["poly2_ridge"][0],
+        ),
+        (
+            "poly2_elastic_net",
+            substitution.registered_replica_model_specs()["poly2_elastic_net"][-1],
+        ),
+    ],
+)
+def test_same_sample_registered_replica_supports_registered_models(
+    model_class,
+    parameters,
+):
+    frame, fold = _registered_replica_frame()
+    selection = pd.DataFrame(
+        [
+            {
+                "candidate_id": "candidate",
+                "fold_idx": 0,
+                "selected_model_class": model_class,
+                "selected_hyperparameters_json": substitution._registered_parameter_key(
+                    parameters
+                ),
+                "selection_source": "outer_train_inner_validation",
+            }
+        ]
+    )
+
+    result = substitution.fit_same_sample_registered_replicas(
+        frame,
+        [fold],
+        selection,
+    )
+
+    assert set(result["model_class"]) == {model_class}
+    assert set(result["prediction_scope"]) == {"outer_test_same_sample"}
+    assert np.isfinite(result["replica_signal"]).all()
 
 
 def _residual_prediction_fixture(
@@ -1465,6 +1979,7 @@ def test_executable_precomputed_replay_matches_five_decision_quantity_ledger():
         taker_fee_rate=0.0,
         frequency_periods_per_year={"1d": 365},
         horizon_deltas={"1d": pd.Timedelta(days=1)},
+        execution_delay_minutes=1,
     )
 
     assert replay.timeseries["gross_return"].tolist() == pytest.approx(
@@ -1505,6 +2020,7 @@ def test_executable_precomputed_replay_matches_five_decision_quantity_ledger():
         cost_multipliers=(1.0,),
         frequency_periods_per_year={"1d": 365},
         horizon_deltas={"1d": pd.Timedelta(days=1)},
+        execution_delay_minutes=1,
     )
     assert l4_detail["gross_return"].tolist() == pytest.approx(replay.timeseries["gross_return"])
     assert l4_detail["charged_turnover"].tolist() == pytest.approx(
@@ -1893,3 +2409,1248 @@ def test_candidate_dependency_adapter_does_not_detect_negative_effect():
         row["candidate_incremental_information_label"]
         == "candidate_incremental_information_not_detected"
     )
+
+
+def _time_randomization_fixture(*, aligned: bool = True) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    rng = np.random.default_rng(20260727)
+    symbols = ("A", "B", "C")
+    decisions_per_day = {"4h": 6, "8h": 3, "12h": 2, "1d": 1}
+    for horizon, per_day in decisions_per_day.items():
+        signal_id = f"signal_{horizon}"
+        candidate_id = f"candidate_{horizon}"
+        for fold_idx in range(2):
+            start = pd.Timestamp("2025-01-01", tz="UTC") + pd.Timedelta(
+                days=60 * fold_idx
+            )
+            times = pd.date_range(
+                start,
+                periods=45 * per_day,
+                freq=pd.Timedelta(days=1) / per_day,
+            )
+            for decision_ts in times:
+                permutation = rng.permutation(np.array([-1.0, 0.0, 1.0]))
+                returns = (
+                    permutation
+                    if aligned
+                    else rng.permutation(np.array([-1.0, 0.0, 1.0]))
+                )
+                for symbol, value, future_return in zip(
+                    symbols, permutation, returns, strict=True
+                ):
+                    rows.append(
+                        {
+                            "candidate_id": candidate_id,
+                            "signal_equivalence_id": signal_id,
+                            "horizon": horizon,
+                            "fold_idx": fold_idx,
+                            "decision_ts": decision_ts,
+                            "symbol": symbol,
+                            "target_signal": value,
+                            "replica_signal": 0.0,
+                            "residual_signal": value,
+                            "strategy_forward_return": future_return,
+                        }
+                    )
+    return pd.DataFrame(rows)
+
+
+def test_l5_time_randomization_end_to_end_preserves_support_and_breaks_alignment():
+    predictions = _time_randomization_fixture()
+    expected_unique = {"4h": 1, "8h": 1, "12h": 1, "1d": 1}
+    expected_effects = pd.Series(
+        1.0,
+        index=["signal_4h", "signal_8h", "signal_12h", "signal_1d"],
+    )
+    prepared = substitution.prepare_l5_residual_time_shift_effects(
+        predictions,
+        expected_unique_signals=expected_unique,
+        expected_fold_count=2,
+        expected_fold_days=45,
+        min_cross_section=2,
+        expected_observed_effects=expected_effects,
+    )
+    assert set(prepared.observed_effects["observed_effect"]) == {1.0}
+    assert set(prepared.support_audit["support_status"]) == {"pass"}
+    assert (
+        prepared.support_audit["observed_ic_count"]
+        == prepared.support_audit["offset_ic_count_min"]
+    ).all()
+    assert (
+        prepared.support_audit["observed_ic_count"]
+        == prepared.support_audit["offset_ic_count_max"]
+    ).all()
+    fold = predictions.loc[
+        (predictions["horizon"] == "4h")
+        & (predictions["fold_idx"] == 0)
+    ].copy()
+    residual = fold.pivot(
+        index="decision_ts", columns="symbol", values="residual_signal"
+    ).sort_index()
+    returns = fold.pivot(
+        index="decision_ts",
+        columns="symbol",
+        values="strategy_forward_return",
+    ).reindex_like(residual)
+    shifted = np.roll(returns.to_numpy(dtype=float), -6, axis=0)
+    manual_ic = [
+        pd.Series(residual.iloc[index].to_numpy(dtype=float))
+        .rank(method="average")
+        .corr(pd.Series(shifted[index]).rank(method="average"))
+        for index in range(len(residual))
+    ]
+    prepared_offset = prepared.offset_fold_effects.loc[
+        (prepared.offset_fold_effects["signal_equivalence_id"] == "signal_4h")
+        & (prepared.offset_fold_effects["fold_idx"] == 0)
+        & (prepared.offset_fold_effects["offset_days"] == 1)
+    ].iloc[0]
+    assert prepared_offset["ic_sum"] == pytest.approx(sum(manual_ic))
+    assert prepared_offset["ic_count"] == len(manual_ic)
+    assert (
+        prepared_offset["observation_key_sha256"]
+        == prepared_offset["shifted_observation_key_sha256"]
+    )
+    assert (
+        prepared_offset["source_return_multiset_sha256"]
+        == prepared_offset["shifted_return_multiset_sha256"]
+    )
+
+    seeds = substitution.l5_time_randomization_seed_manifest()
+    child_seed = int(
+        seeds.loc[seeds["guard_days"] == 7, "child_seed_uint64"].iloc[0]
+    )
+    result = substitution.evaluate_l5_residual_time_randomization(
+        prepared,
+        guard_days=7,
+        child_seed=child_seed,
+        expected_unique_signals=expected_unique,
+    )
+    assert len(result.summary) == 4
+    assert set(result.summary["time_alignment_label"]) == {
+        "time_alignment_detected"
+    }
+    assert (
+        result.summary["stepdown_max_t_adjusted_p_value"] <= 0.05
+    ).all()
+    assert len(result.null_effects) == 9_999
+    assert result.null_effects.shape[1] == 4
+    assert set(result.schedule["offset_days"]).issubset(set(range(7, 39)))
+    assert (
+        result.schedule.groupby(
+            ["randomization_idx", "horizon", "fold_idx"]
+        )["offset_days"].nunique()
+        == 1
+    ).all()
+
+
+def test_l5_time_randomization_contract_rejects_bad_parameters_and_lineage():
+    predictions = _time_randomization_fixture()
+    expected_unique = {"4h": 1, "8h": 1, "12h": 1, "1d": 1}
+    prepared = substitution.prepare_l5_residual_time_shift_effects(
+        predictions,
+        expected_unique_signals=expected_unique,
+        expected_fold_count=2,
+        expected_fold_days=45,
+        min_cross_section=2,
+    )
+    seed = int(
+        substitution.l5_time_randomization_seed_manifest()
+        .loc[lambda frame: frame["guard_days"] == 7, "child_seed_uint64"]
+        .iloc[0]
+    )
+    with pytest.raises(ValueError, match="one of 3, 7, or 14"):
+        substitution.evaluate_l5_residual_time_randomization(
+            prepared,
+            guard_days=1,
+            child_seed=seed,
+            expected_unique_signals=expected_unique,
+        )
+    with pytest.raises(ValueError, match="must be 9999"):
+        substitution.evaluate_l5_residual_time_randomization(
+            prepared,
+            guard_days=7,
+            child_seed=seed,
+            n_randomizations=100,
+            expected_unique_signals=expected_unique,
+        )
+    broken = predictions.copy()
+    duplicate = broken.iloc[[0]].copy()
+    with pytest.raises(ValueError, match="duplicate hypothesis keys"):
+        substitution.prepare_l5_residual_time_shift_effects(
+            pd.concat([broken, duplicate], ignore_index=True),
+            expected_unique_signals=expected_unique,
+            expected_fold_count=2,
+            expected_fold_days=45,
+            min_cross_section=2,
+        )
+
+
+def test_l5_time_randomization_accepts_only_csv_round_trip_return_noise():
+    predictions = _time_randomization_fixture()
+    duplicate = predictions.loc[predictions["horizon"] == "4h"].copy()
+    duplicate["candidate_id"] = "candidate_4h_duplicate"
+    duplicate["signal_equivalence_id"] = "signal_4h_duplicate"
+    duplicate.loc[duplicate.index[0], "strategy_forward_return"] += 5e-16
+    combined = pd.concat([predictions, duplicate], ignore_index=True)
+    expected_unique = {"4h": 2, "8h": 1, "12h": 1, "1d": 1}
+
+    prepared = substitution.prepare_l5_residual_time_shift_effects(
+        combined,
+        expected_unique_signals=expected_unique,
+        expected_fold_count=2,
+        expected_fold_days=45,
+        min_cross_section=2,
+    )
+
+    assert (
+        prepared.support_audit["duplicate_return_max_abs_difference"] <= 1e-15
+    ).all()
+    broken = combined.copy()
+    broken.loc[broken["candidate_id"] == "candidate_4h_duplicate", "strategy_forward_return"] += 1e-8
+    with pytest.raises(ValueError, match="round-trip tolerance"):
+        substitution.prepare_l5_residual_time_shift_effects(
+            broken,
+            expected_unique_signals=expected_unique,
+            expected_fold_count=2,
+            expected_fold_days=45,
+            min_cross_section=2,
+        )
+
+
+def test_l5_time_randomization_seed_manifest_is_frozen_and_reproducible():
+    first = substitution.l5_time_randomization_seed_manifest()
+    second = substitution.l5_time_randomization_seed_manifest()
+    pd.testing.assert_frame_equal(first, second)
+    assert first["guard_days"].tolist() == [3, 7, 14]
+    assert first["child_seed_uint64"].nunique() == 3
+    assert set(first["bit_generator"]) == {"PCG64DXSM"}
+    with pytest.raises(ValueError, match="master_seed"):
+        substitution.l5_time_randomization_seed_manifest(master_seed=1)
+
+
+def test_l5_time_randomization_legal_offset_manifest_is_complete():
+    manifest = substitution.l5_time_randomization_legal_offset_manifest()
+    for guard, expected in {
+        3: set(range(3, 43)),
+        7: set(range(7, 39)),
+        14: set(range(14, 32)),
+    }.items():
+        actual = set(
+            manifest.loc[manifest["guard_days"] == guard, "offset_days"]
+        )
+        assert actual == expected
+        assert (
+            manifest.loc[
+                manifest["guard_days"] == guard, "circular_distance_days"
+            ]
+            >= guard
+        ).all()
+
+
+def test_l5_time_randomization_allows_explicit_single_horizon_smoke():
+    predictions = _time_randomization_fixture()
+    predictions = predictions.loc[predictions["horizon"] == "4h"].copy()
+    expected_unique = {"4h": 1}
+    prepared = substitution.prepare_l5_residual_time_shift_effects(
+        predictions,
+        expected_unique_signals=expected_unique,
+        expected_fold_count=2,
+        expected_fold_days=45,
+        min_cross_section=2,
+    )
+    seed = int(
+        substitution.l5_time_randomization_seed_manifest()
+        .loc[lambda frame: frame["guard_days"] == 7, "child_seed_uint64"]
+        .iloc[0]
+    )
+    result = substitution.evaluate_l5_residual_time_randomization(
+        prepared,
+        guard_days=7,
+        child_seed=seed,
+        expected_unique_signals=expected_unique,
+    )
+    assert len(result.summary) == 1
+    assert set(result.summary["horizon"]) == {"4h"}
+
+
+def test_l5_time_randomization_does_not_detect_unaligned_synthetic_signal():
+    predictions = _time_randomization_fixture(aligned=False)
+    predictions = predictions.loc[predictions["horizon"] == "4h"].copy()
+    expected_unique = {"4h": 1}
+    prepared = substitution.prepare_l5_residual_time_shift_effects(
+        predictions,
+        expected_unique_signals=expected_unique,
+        expected_fold_count=2,
+        expected_fold_days=45,
+        min_cross_section=2,
+    )
+    seed = int(
+        substitution.l5_time_randomization_seed_manifest()
+        .loc[lambda frame: frame["guard_days"] == 7, "child_seed_uint64"]
+        .iloc[0]
+    )
+    result = substitution.evaluate_l5_residual_time_randomization(
+        prepared,
+        guard_days=7,
+        child_seed=seed,
+        expected_unique_signals=expected_unique,
+    )
+    assert result.summary.loc[0, "time_alignment_label"] == (
+        "time_alignment_not_detected"
+    )
+
+
+def test_l5_time_randomization_fails_when_guard_leaves_no_legal_offset():
+    predictions = _time_randomization_fixture()
+    predictions = predictions.loc[predictions["horizon"] == "1d"].copy()
+    predictions = (
+        predictions.sort_values("decision_ts")
+        .groupby("fold_idx", group_keys=False)
+        .head(20 * 3)
+    )
+    expected_unique = {"1d": 1}
+    prepared = substitution.prepare_l5_residual_time_shift_effects(
+        predictions,
+        expected_unique_signals=expected_unique,
+        expected_fold_count=2,
+        expected_fold_days=20,
+        min_cross_section=2,
+    )
+    seed = int(
+        substitution.l5_time_randomization_seed_manifest()
+        .loc[lambda frame: frame["guard_days"] == 14, "child_seed_uint64"]
+        .iloc[0]
+    )
+    with pytest.raises(ValueError, match="guard leaves no legal circular offsets"):
+        substitution.evaluate_l5_residual_time_randomization(
+            prepared,
+            guard_days=14,
+            child_seed=seed,
+            expected_fold_days=20,
+            expected_unique_signals=expected_unique,
+        )
+
+
+def test_l5_time_randomization_fails_when_offset_schedule_is_incomplete():
+    predictions = _time_randomization_fixture()
+    predictions = predictions.loc[predictions["horizon"] == "4h"].copy()
+    expected_unique = {"4h": 1}
+    prepared = substitution.prepare_l5_residual_time_shift_effects(
+        predictions,
+        expected_unique_signals=expected_unique,
+        expected_fold_count=2,
+        expected_fold_days=45,
+        min_cross_section=2,
+    )
+    broken = substitution.ResidualTimeShiftPreparationArtifacts(
+        observed_effects=prepared.observed_effects,
+        offset_fold_effects=prepared.offset_fold_effects.loc[
+            ~(
+                (prepared.offset_fold_effects["fold_idx"] == 0)
+                & (prepared.offset_fold_effects["offset_days"] == 7)
+            )
+        ],
+        support_audit=prepared.support_audit,
+    )
+    seed = int(
+        substitution.l5_time_randomization_seed_manifest()
+        .loc[lambda frame: frame["guard_days"] == 7, "child_seed_uint64"]
+        .iloc[0]
+    )
+    with pytest.raises(ValueError, match="offset effects are incomplete"):
+        substitution.evaluate_l5_residual_time_randomization(
+            broken,
+            guard_days=7,
+            child_seed=seed,
+            expected_unique_signals=expected_unique,
+        )
+
+
+def test_l5_time_randomization_shares_schedule_for_exact_fold_calendars():
+    predictions = _time_randomization_fixture()
+    expected_unique = {"4h": 1, "8h": 1, "12h": 1, "1d": 1}
+    prepared = substitution.prepare_l5_residual_time_shift_effects(
+        predictions,
+        expected_unique_signals=expected_unique,
+        expected_fold_count=2,
+        expected_fold_days=45,
+        min_cross_section=2,
+    )
+    support = prepared.support_audit.copy()
+    for fold_idx in (0, 1):
+        fold_mask = support["fold_idx"] == fold_idx
+        support.loc[fold_mask, "fold_start"] = pd.Timestamp(
+            "2025-01-01", tz="UTC"
+        ) + pd.Timedelta(days=60 * fold_idx)
+        support.loc[fold_mask, "fold_end"] = pd.Timestamp(
+            "2025-02-14", tz="UTC"
+        ) + pd.Timedelta(days=60 * fold_idx)
+    shared = substitution.ResidualTimeShiftPreparationArtifacts(
+        observed_effects=prepared.observed_effects,
+        offset_fold_effects=prepared.offset_fold_effects,
+        support_audit=support,
+    )
+    seed = int(
+        substitution.l5_time_randomization_seed_manifest()
+        .loc[lambda frame: frame["guard_days"] == 7, "child_seed_uint64"]
+        .iloc[0]
+    )
+    result = substitution.evaluate_l5_residual_time_randomization(
+        shared,
+        guard_days=7,
+        child_seed=seed,
+        expected_unique_signals=expected_unique,
+    )
+    assert set(result.schedule["schedule_scope"]) == {
+        "shared_exact_fold_calendar"
+    }
+    assert (
+        result.schedule.groupby(["randomization_idx", "fold_idx"])[
+            "offset_days"
+        ].nunique()
+        == 1
+    ).all()
+
+
+def test_l5_time_randomization_summary_is_a_formal_candidate_level_output():
+    horizon_counts = {"4h": 14, "8h": 16, "12h": 25, "1d": 17}
+    identities = [
+        (f"signal_{index:03d}", horizon)
+        for index, horizon in enumerate(
+            [
+                horizon
+                for horizon, count in horizon_counts.items()
+                for _ in range(count)
+            ],
+            start=1,
+        )
+    ]
+    results = {}
+    for guard in (3, 7, 14):
+        summary = pd.DataFrame(
+            [
+                {
+                    "signal_equivalence_id": signal_id,
+                    "candidate_id": f"candidate_{signal_id}",
+                    "horizon": horizon,
+                    "observed_effect": 0.02,
+                    "observed_ic_count": 100,
+                    "null_mean": 0.0,
+                    "null_std": 0.01,
+                    "null_median": 0.0,
+                    "null_q95": 0.015,
+                    "null_q99": 0.02,
+                    "observed_null_percentile": 0.99,
+                    "observed_t": 2.0,
+                    "raw_one_sided_p_value": 0.01,
+                    "raw_p_mcse": 0.001,
+                    "stepdown_max_t_adjusted_p_value": (
+                        0.06
+                        if signal_id == "signal_001" and guard == 14
+                        else 0.04
+                    ),
+                    "n_randomizations": 9_999,
+                    "guard_days": guard,
+                    "effect_sign": "positive",
+                    "time_alignment_label": (
+                        "time_alignment_not_detected"
+                        if signal_id == "signal_001" and guard == 14
+                        else "time_alignment_detected"
+                    ),
+                }
+                for signal_id, horizon in identities
+            ]
+        )
+        results[guard] = substitution.ResidualTimeRandomizationArtifacts(
+            summary=summary,
+            null_effects=pd.DataFrame(),
+            null_t_values=pd.DataFrame(),
+            schedule=pd.DataFrame(),
+        )
+    metadata = pd.DataFrame(
+        [
+            {
+                "signal_equivalence_id": signal_id,
+                "canonical_candidate_id": f"candidate_{signal_id}",
+                "alias_count": 1,
+                "track": "track",
+                "weight_scheme": "weight",
+                "component_features": "a|b",
+            }
+            for signal_id, _ in identities
+        ]
+    )
+    prior = pd.DataFrame(
+        {
+            "signal_equivalence_id": [signal_id for signal_id, _ in identities],
+            "observed_effect": [0.019] * len(identities),
+        }
+    )
+
+    artifacts = substitution.summarize_l5_residual_time_randomization(
+        results,
+        candidate_metadata=metadata,
+        prior_observed_effects=prior,
+        support_audit=pd.DataFrame(
+            [
+                {
+                    "signal_equivalence_id": signal_id,
+                    "horizon": horizon,
+                    "fold_grid_decision_count": 45,
+                    "decision_count": 44,
+                    "min_residual_support": 20,
+                    "max_residual_support": 20,
+                    "duplicate_return_max_abs_difference": 0.0,
+                    "duplicate_return_tolerance": 1e-15,
+                    "support_status": "pass",
+                }
+                for signal_id, horizon in identities
+            ]
+        ),
+    )
+
+    assert len(artifacts.candidate_results) == 72
+    assert artifacts.candidate_results["test_status"].eq("valid").all()
+    assert artifacts.candidate_results["guard_label_stable"].sum() == 71
+    assert artifacts.sensitivity_summary.set_index("guard_days")[
+        "legal_offset_count"
+    ].to_dict() == {3: 40, 7: 32, 14: 18}
+    assert artifacts.horizon_summary.set_index("horizon")[
+        "candidate_count"
+    ].to_dict() == horizon_counts
+    assert artifacts.support_summary["support_status"].eq("pass").all()
+    assert artifacts.candidate_results[
+        "serialized_input_effect_difference"
+    ].tolist() == pytest.approx([0.001] * 72)
+
+    with pytest.raises(ValueError, match="guards 3, 7, and 14"):
+        substitution.summarize_l5_residual_time_randomization(
+            {3: results[3], 7: results[7]},
+            candidate_metadata=metadata,
+            prior_observed_effects=prior,
+            support_audit=pd.DataFrame(),
+        )
+
+
+def _selected_residual_fixture(residuals: list[float]) -> pd.DataFrame:
+    times = pd.to_datetime(
+        ["2026-01-01 00:00", "2026-01-01 00:00", "2026-01-01 12:00", "2026-01-01 12:00"],
+        utc=True,
+    )
+    target = np.asarray(residuals, dtype=float) + 0.5
+    return pd.DataFrame(
+        {
+            "fold_idx": 0,
+            "decision_ts": times,
+            "symbol": ["BTC", "ETH", "BTC", "ETH"],
+            "target_signal": target,
+            "replica_signal": 0.5,
+            "residual_signal": residuals,
+            "source_model_class": "linear_ridge",
+        }
+    )
+
+
+def test_double_residual_minimal_hand_calculation_and_exact_key_contract():
+    signal = _selected_residual_fixture([1.0, -1.0, 2.0, -2.0])
+    outcome = _selected_residual_fixture([0.2, -0.2, -0.5, 0.5])
+    result = substitution.evaluate_cross_fitted_double_residuals(
+        signal,
+        outcome,
+        hypothesis_id="h0",
+        horizon="12h",
+        min_cross_section=2,
+    )
+
+    assert result.decision_moments["double_residual_moment"].tolist() == pytest.approx(
+        [0.2, -1.0]
+    )
+    assert result.summary.iloc[0]["mean_double_residual_moment"] == pytest.approx(-0.4)
+    assert result.observations["residual_product"].tolist() == pytest.approx(
+        [0.2, 0.2, -1.0, -1.0]
+    )
+
+    missing = outcome.iloc[:-1].copy()
+    with pytest.raises(ValueError, match="exact OOS keys"):
+        substitution.evaluate_cross_fitted_double_residuals(
+            signal,
+            missing,
+            hypothesis_id="h0",
+            horizon="12h",
+            min_cross_section=2,
+        )
+
+
+def test_double_residual_daily_family_requires_complete_shared_calendar():
+    rows = []
+    for hypothesis_id, scale in (("a", 1.0), ("b", 2.0)):
+        for day in pd.date_range("2026-01-01", periods=3, freq="D", tz="UTC"):
+            for hour in (0, 12):
+                rows.append(
+                    {
+                        "hypothesis_id": hypothesis_id,
+                        "horizon": "12h",
+                        "fold_idx": 0,
+                        "decision_ts": day + pd.Timedelta(hours=hour),
+                        "double_residual_moment": scale * (day.day + hour / 12),
+                    }
+                )
+    moments = pd.DataFrame(rows)
+    result = substitution.build_double_residual_daily_family(
+        moments, expected_decisions_per_day={"12h": 2}
+    )
+
+    assert result.daily_effects.shape == (3, 2)
+    assert result.daily_counts.eq(1).all().all()
+    np.testing.assert_allclose(result.daily_centered_sums.sum(axis=0), 0.0)
+    assert result.observed_effects["a"] == pytest.approx(2.5)
+    assert result.observed_effects["b"] == pytest.approx(5.0)
+
+    incomplete = moments.loc[
+        ~(
+            moments["hypothesis_id"].eq("b")
+            & moments["decision_ts"].eq(pd.Timestamp("2026-01-02 12:00", tz="UTC"))
+        )
+    ]
+    with pytest.raises(ValueError, match="internal missing day"):
+        substitution.build_double_residual_daily_family(
+            incomplete, expected_decisions_per_day={"12h": 2}
+        )
+
+
+def test_double_residual_daily_family_allows_adjacent_fold_update_within_day():
+    rows = []
+    for day_index, day in enumerate(
+        pd.date_range("2026-01-01", periods=3, freq="D", tz="UTC")
+    ):
+        for hour in (0, 12):
+            fold_idx = 0 if day_index < 1 or (day_index == 1 and hour == 0) else 1
+            rows.append(
+                {
+                    "hypothesis_id": "a",
+                    "horizon": "12h",
+                    "fold_idx": fold_idx,
+                    "decision_ts": day + pd.Timedelta(hours=hour),
+                    "double_residual_moment": float(2 * day_index + hour // 12 + 1),
+                }
+            )
+
+    result = substitution.build_double_residual_daily_family(
+        pd.DataFrame(rows), expected_decisions_per_day={"12h": 2}
+    )
+
+    assert result.daily_effects["a"].tolist() == pytest.approx([1.5, 3.5, 5.5])
+    boundary = result.coverage_audit.loc[
+        result.coverage_audit["utc_day"].eq(pd.Timestamp("2026-01-02", tz="UTC"))
+    ].iloc[0]
+    assert boundary["status"] == "complete"
+    assert boundary["fold_count"] == 2
+    assert boundary["fold_ids"] == "0,1"
+
+    for boundary_ts in (
+        "2026-01-01 12:00",
+        "2026-01-02 12:00",
+        "2026-01-03 12:00",
+    ):
+        non_adjacent = pd.DataFrame(rows)
+        non_adjacent.loc[
+            non_adjacent["decision_ts"].eq(pd.Timestamp(boundary_ts, tz="UTC")),
+            "fold_idx",
+        ] = 3
+        with pytest.raises(ValueError, match="non-adjacent outer folds"):
+            substitution.build_double_residual_daily_family(
+                non_adjacent, expected_decisions_per_day={"12h": 2}
+            )
+
+
+def test_double_residual_time_randomization_preserves_fold_phase_and_symbols():
+    rows = []
+    moment_rows = []
+    for hypothesis_id, scale in (("a", 1.0), ("b", -1.0)):
+        for day_index, day in enumerate(
+            pd.date_range("2026-01-01", periods=30, freq="D", tz="UTC")
+        ):
+            products = []
+            for symbol_index, symbol in enumerate(("BTC", "ETH")):
+                u = scale * (1.0 if symbol_index == 0 else -1.0)
+                v = float(day_index + 1) * (1.0 if symbol_index == 0 else -1.0)
+                products.append(u * v)
+                rows.append(
+                    {
+                        "hypothesis_id": hypothesis_id,
+                        "horizon": "1d",
+                        "fold_idx": 0,
+                        "decision_ts": day,
+                        "symbol": symbol,
+                        "signal_residual": u,
+                        "outcome_residual": v,
+                    }
+                )
+            moment_rows.append(
+                {
+                    "hypothesis_id": hypothesis_id,
+                    "horizon": "1d",
+                    "fold_idx": 0,
+                    "decision_ts": day,
+                    "double_residual_moment": float(np.mean(products)),
+                }
+            )
+    family = substitution.build_double_residual_daily_family(
+        pd.DataFrame(moment_rows), expected_decisions_per_day={"1d": 1}
+    )
+    result = substitution.evaluate_double_residual_time_randomization(
+        pd.DataFrame(rows), family.daily_effects
+    )
+
+    assert len(result.schedule) == 3 * 2_000
+    assert result.null_effects.shape == (3 * 2_000, 2)
+    assert len(result.summary) == 6
+    assert set(result.summary["guard_days"]) == {3, 7, 14}
+    distance = np.minimum(
+        result.schedule["shift_days"],
+        result.schedule["fold_day_count"] - result.schedule["shift_days"],
+    )
+    assert (distance >= result.schedule["guard_days"]).all()
+
+
+def test_double_residual_time_randomization_allows_midday_fold_update():
+    rows = []
+    moment_rows = []
+    days = pd.date_range("2026-01-01", periods=70, freq="D", tz="UTC")
+    boundary = pd.Timestamp("2026-02-05 12:00", tz="UTC")
+    for day_index, day in enumerate(days):
+        for hour in (0, 12):
+            decision_ts = day + pd.Timedelta(hours=hour)
+            fold_idx = int(decision_ts >= boundary)
+            products = []
+            for symbol_index, symbol in enumerate(("BTC", "ETH")):
+                signal_residual = 1.0 if symbol_index == 0 else -1.0
+                outcome_residual = float(day_index + 1 + hour / 12) * signal_residual
+                products.append(signal_residual * outcome_residual)
+                rows.append(
+                    {
+                        "hypothesis_id": "a",
+                        "horizon": "12h",
+                        "fold_idx": fold_idx,
+                        "decision_ts": decision_ts,
+                        "symbol": symbol,
+                        "signal_residual": signal_residual,
+                        "outcome_residual": outcome_residual,
+                    }
+                )
+            moment_rows.append(
+                {
+                    "hypothesis_id": "a",
+                    "horizon": "12h",
+                    "fold_idx": fold_idx,
+                    "decision_ts": decision_ts,
+                    "double_residual_moment": float(np.mean(products)),
+                }
+            )
+    family = substitution.build_double_residual_daily_family(
+        pd.DataFrame(moment_rows), expected_decisions_per_day={"12h": 2}
+    )
+
+    result = substitution.evaluate_double_residual_time_randomization(
+        pd.DataFrame(rows), family.daily_effects
+    )
+
+    assert len(result.summary) == 3
+    assert set(result.schedule["horizon"]) == {"12h"}
+    assert set(result.schedule["fold_idx"]) == {0, 1}
+    assert set(result.schedule["phase_count"]) == {2}
+    assert len(result.schedule) == 3 * 2_000 * 2
+    np.testing.assert_allclose(
+        result.summary["observed_effect"], float(family.daily_effects["a"].mean())
+    )
+
+
+def test_double_residual_time_randomization_preserves_sparse_support_mask():
+    rows = []
+    moment_rows = []
+    days = pd.date_range("2026-01-01", periods=30, freq="D", tz="UTC")
+    for day_index, day in enumerate(days):
+        products = []
+        for symbol_index, symbol in enumerate(("BTC", "DOGE")):
+            if day_index == 9 and symbol == "DOGE":
+                continue
+            signal_residual = 1.0 if symbol_index == 0 else -1.0
+            outcome_residual = float(day_index + 1) * signal_residual
+            products.append(signal_residual * outcome_residual)
+            rows.append(
+                {
+                    "hypothesis_id": "a",
+                    "horizon": "1d",
+                    "fold_idx": 0,
+                    "decision_ts": day,
+                    "symbol": symbol,
+                    "signal_residual": signal_residual,
+                    "outcome_residual": outcome_residual,
+                }
+            )
+        moment_rows.append(
+            {
+                "hypothesis_id": "a",
+                "horizon": "1d",
+                "fold_idx": 0,
+                "decision_ts": day,
+                "double_residual_moment": float(np.mean(products)),
+            }
+        )
+    family = substitution.build_double_residual_daily_family(
+        pd.DataFrame(moment_rows), expected_decisions_per_day={"1d": 1}
+    )
+
+    result = substitution.evaluate_double_residual_time_randomization(
+        pd.DataFrame(rows), family.daily_effects
+    )
+
+    assert len(result.summary) == 3
+    assert np.isfinite(result.null_effects.to_numpy(dtype=float)).all()
+    assert result.summary["observed_effect"].notna().all()
+    np.testing.assert_allclose(result.summary["observed_effect"], 15.5)
+    np.testing.assert_allclose(
+        result.summary["observed_effect"], float(family.daily_effects["a"].mean())
+    )
+
+
+def test_cross_sectional_outcome_target_is_exact_and_fails_closed():
+    index = pd.MultiIndex.from_product(
+        [[0], ["train", "test"], pd.to_datetime(["2026-01-01"], utc=True), ["A", "B"]],
+        names=["fold_idx", "split", "decision_ts", "symbol"],
+    )
+    frame = pd.DataFrame(
+        {"strategy_forward_return": [0.01, 0.03, -0.02, 0.02]}, index=index
+    )
+    result = substitution.build_cross_sectional_outcome_target(
+        frame, min_cross_section=2
+    )
+    assert result["outcome_target"].tolist() == pytest.approx(
+        [-0.01, 0.01, -0.02, 0.02]
+    )
+    np.testing.assert_allclose(
+        result.groupby(level=["fold_idx", "split", "decision_ts"])[
+            "outcome_target"
+        ].sum(),
+        0.0,
+        rtol=0.0,
+        atol=1e-12,
+    )
+    with pytest.raises(ValueError, match="minimum size"):
+        substitution.build_cross_sectional_outcome_target(
+            frame.iloc[[0, 2]], min_cross_section=2
+        )
+
+
+def test_l5_5_formal_path_uses_one_47_hypothesis_family_and_maps_100_candidates():
+    observations = []
+    moments = []
+    hypotheses = [f"signal_{index:03d}" for index in range(47)]
+    days = pd.date_range("2026-01-01", periods=30, freq="D", tz="UTC")
+    for hypothesis_number, hypothesis_id in enumerate(hypotheses):
+        signal_rows = []
+        outcome_rows = []
+        for day_number, day in enumerate(days):
+            signal_residuals = np.asarray([1.0, -1.0])
+            signed_level = np.sin((day_number + 1) / 3.0) + (hypothesis_number - 23) / 50.0
+            outcome_residuals = np.asarray([signed_level, -signed_level])
+            for symbol_index, symbol in enumerate(("A", "B")):
+                signal_rows.append(
+                    {
+                        "fold_idx": 0,
+                        "decision_ts": day,
+                        "symbol": symbol,
+                        "target_signal": signal_residuals[symbol_index],
+                        "replica_signal": 0.0,
+                        "residual_signal": signal_residuals[symbol_index],
+                        "source_model_class": "ridge",
+                    }
+                )
+                outcome_rows.append(
+                    {
+                        "fold_idx": 0,
+                        "decision_ts": day,
+                        "symbol": symbol,
+                        "target_signal": outcome_residuals[symbol_index],
+                        "replica_signal": 0.0,
+                        "residual_signal": outcome_residuals[symbol_index],
+                        "source_model_class": "hist_gbm",
+                    }
+                )
+        evaluated = substitution.evaluate_cross_fitted_double_residuals(
+            pd.DataFrame(signal_rows),
+            pd.DataFrame(outcome_rows),
+            hypothesis_id=hypothesis_id,
+            horizon="1d",
+            min_cross_section=2,
+        )
+        observations.append(evaluated.observations)
+        moments.append(evaluated.decision_moments)
+
+    mapping_rows = []
+    for candidate_number in range(100):
+        mapping_rows.append(
+            {
+                "candidate_id": f"candidate_{candidate_number:03d}",
+                "signal_equivalence_id": hypotheses[candidate_number % len(hypotheses)],
+            }
+        )
+    formal = substitution.infer_double_residual_family(
+        pd.concat(moments, ignore_index=True),
+        pd.DataFrame(mapping_rows),
+        expected_decisions_per_day={"1d": 1},
+    )
+    assert formal.daily_effects.shape == (30, 47)
+    assert len(formal.unique_results) == 47
+    assert len(formal.candidate_results) == 100
+    assert formal.bootstrap_starts["block_length_days"].unique().tolist() == [7, 14, 28]
+    assert formal.unique_results["formal_common_calendar_effect"].notna().all()
+    detected = formal.unique_results["l5_5_label"].eq(
+        "double_residual_incremental_association_detected"
+    )
+    assert detected.equals(formal.unique_results["main_stepdown_p"].le(0.05))
+    assert (formal.unique_results["formal_common_calendar_effect"] < 0.0).any()
+
+    randomized = substitution.evaluate_double_residual_time_randomization(
+        pd.concat(observations, ignore_index=True), formal.daily_effects
+    )
+    assert len(randomized.summary) == 47 * 3
+
+    missing = pd.DataFrame(mapping_rows).loc[
+        lambda frame: frame["signal_equivalence_id"] != hypotheses[-1]
+    ]
+    with pytest.raises(ValueError, match="disagree on hypotheses"):
+        substitution.infer_double_residual_family(
+            pd.concat(moments, ignore_index=True),
+            missing,
+            expected_decisions_per_day={"1d": 1},
+        )
+
+
+def test_l5_5_positive_inference_preserves_family_and_rejects_negative_effects():
+    days = pd.date_range("2026-01-01", periods=30, freq="D", tz="UTC")
+    rows = []
+    for hypothesis_id, sign in (("positive", 1.0), ("negative", -1.0)):
+        for day_number, day in enumerate(days):
+            rows.append(
+                {
+                    "hypothesis_id": hypothesis_id,
+                    "horizon": "1d",
+                    "fold_idx": 0,
+                    "decision_ts": day,
+                    "double_residual_moment": sign * (1.0 + day_number / 100.0),
+                    "residual_correlation": sign * 0.5,
+                    "residual_slope": sign * 0.5,
+                }
+            )
+    mapping = pd.DataFrame(
+        {
+            "candidate_id": ["candidate_positive", "candidate_negative"],
+            "signal_equivalence_id": ["positive", "negative"],
+        }
+    )
+    moments = pd.DataFrame(rows)
+    one_sided = substitution.infer_double_residual_family(
+        moments,
+        mapping,
+        expected_decisions_per_day={"1d": 1},
+        alternative="greater",
+    )
+    two_sided = substitution.infer_double_residual_family(
+        moments,
+        mapping,
+        expected_decisions_per_day={"1d": 1},
+    )
+
+    one = one_sided.unique_results.set_index("hypothesis_id")
+    two = two_sided.unique_results.set_index("hypothesis_id")
+    assert one.loc["positive", "l5_5_label"] == (
+        "positive_double_residual_incremental_information_detected"
+    )
+    assert one.loc["negative", "l5_5_label"] == (
+        "positive_double_residual_incremental_information_not_detected"
+    )
+    assert one.loc["positive", "main_stepdown_p"] <= two.loc[
+        "positive", "main_stepdown_p"
+    ]
+    assert one_sided.candidate_results["candidate_id"].nunique() == 2
+
+    with pytest.raises(ValueError, match="alternative"):
+        substitution.infer_double_residual_family(
+            moments,
+            mapping,
+            expected_decisions_per_day={"1d": 1},
+            alternative="less",
+        )
+
+
+def test_double_residual_time_randomization_supports_right_tail_without_changing_null():
+    rows = []
+    moment_rows = []
+    for day_number, day in enumerate(
+        pd.date_range("2026-01-01", periods=30, freq="D", tz="UTC")
+    ):
+        products = []
+        for symbol, sign in (("A", 1.0), ("B", -1.0)):
+            signal_residual = sign
+            outcome_residual = sign * (1.0 + day_number / 10.0)
+            products.append(signal_residual * outcome_residual)
+            rows.append(
+                {
+                    "hypothesis_id": "positive",
+                    "horizon": "1d",
+                    "fold_idx": 0,
+                    "decision_ts": day,
+                    "symbol": symbol,
+                    "signal_residual": signal_residual,
+                    "outcome_residual": outcome_residual,
+                }
+            )
+        moment_rows.append(
+            {
+                "hypothesis_id": "positive",
+                "horizon": "1d",
+                "fold_idx": 0,
+                "decision_ts": day,
+                "double_residual_moment": float(np.mean(products)),
+            }
+        )
+    family = substitution.build_double_residual_daily_family(
+        pd.DataFrame(moment_rows), expected_decisions_per_day={"1d": 1}
+    )
+    two_sided = substitution.evaluate_double_residual_time_randomization(
+        pd.DataFrame(rows), family.daily_effects
+    )
+    one_sided = substitution.evaluate_double_residual_time_randomization(
+        pd.DataFrame(rows), family.daily_effects, alternative="greater"
+    )
+
+    pd.testing.assert_frame_equal(one_sided.schedule, two_sided.schedule)
+    pd.testing.assert_frame_equal(one_sided.null_effects, two_sided.null_effects)
+    assert one_sided.summary["raw_one_sided_randomization_p_value"].notna().all()
+    assert one_sided.summary["raw_two_sided_randomization_p_value"].isna().all()
+    assert (
+        one_sided.summary["raw_one_sided_randomization_p_value"].to_numpy()
+        <= two_sided.summary["raw_two_sided_randomization_p_value"].to_numpy()
+    ).all()
+    with pytest.raises(ValueError, match="alternative"):
+        substitution.evaluate_double_residual_time_randomization(
+            pd.DataFrame(rows), family.daily_effects, alternative="less"
+        )
+
+
+def test_l5_5_minimal_end_to_end_execution_models_residuals_and_inference():
+    dates = pd.date_range("2026-01-01", periods=70, freq="D", tz="UTC")
+    symbols = ("A", "B", "C", "D")
+    panel_index = pd.MultiIndex.from_product(
+        [dates, symbols], names=["decision_ts", "symbol"]
+    )
+    panel = pd.DataFrame({"factor": 1.0}, index=panel_index)
+    opens = {}
+    for symbol_number, symbol in enumerate(symbols):
+        execution_times = dates + pd.Timedelta(minutes=4)
+        all_times = execution_times.append(
+            pd.DatetimeIndex([execution_times[-1] + pd.Timedelta(days=1)])
+        )
+        day_number = np.arange(len(all_times), dtype=float)
+        opens[symbol] = pd.Series(
+            100.0
+            + day_number * (0.2 + symbol_number * 0.03)
+            + np.sin(day_number / 4.0 + symbol_number) * 0.5,
+            index=all_times,
+        )
+    contract = ContinuousHoldingTimeContract(
+        return_horizon="1d",
+        decision_interval="1d",
+        holding_interval="1d",
+        strategy_return_interval="1d",
+        signal_timeframes=("1d",),
+        execution_delay_minutes=4,
+        data_observed_rule="test_exact_t_plus_4m",
+    )
+    executed = crypto_panel.panel_with_executable_return(
+        panel,
+        opens,
+        contract,
+        {"1d": pd.Timedelta(days=1)},
+    ).reset_index()
+    assert executed["execution_ts"].eq(executed["decision_ts"] + pd.Timedelta(minutes=4)).all()
+    assert executed["exit_ts"].eq(
+        executed["decision_ts"] + pd.Timedelta(days=1, minutes=4)
+    ).all()
+
+    fold = WalkForwardFold(
+        fold_idx=0,
+        train_start=dates[0],
+        train_end=dates[38],
+        test_start=dates[40],
+        test_end=dates[-1],
+    )
+    target = executed.loc[
+        executed["decision_ts"].le(fold.train_end)
+        | executed["decision_ts"].ge(fold.test_start)
+    ].copy()
+    target["fold_idx"] = 0
+    target["split"] = np.where(
+        target["decision_ts"].le(fold.train_end), "train", "test"
+    )
+    symbol_number = target["symbol"].map(dict(zip(symbols, range(4), strict=True))).astype(float)
+    day_number = (target["decision_ts"] - dates[0]).dt.days.astype(float)
+    target["combo_signal"] = (symbol_number - 1.5) * (1.0 + np.sin(day_number / 5.0))
+    target.loc[
+        target["decision_ts"].eq(dates[49]) & target["symbol"].eq("D"),
+        "combo_signal",
+    ] = np.nan
+    target["forward_return"] = target["executable_return"]
+    target["strategy_forward_return"] = target["executable_return"]
+
+    raw = pd.DataFrame(index=panel_index)
+    full_day = np.repeat(np.arange(len(dates), dtype=float), len(symbols))
+    full_symbol = np.tile(np.arange(len(symbols), dtype=float), len(dates))
+    for column_number, column in enumerate(substitution.ALL_RAW_PREDICTOR_COLUMNS):
+        raw[column] = np.sin(
+            full_day / (3.0 + column_number % 5)
+            + full_symbol * (0.2 + column_number * 0.01)
+        )
+    common = substitution.build_fold_canonical_common_support(
+        target[
+            [
+                "fold_idx", "split", "decision_ts", "symbol", "combo_signal",
+                "forward_return", "strategy_forward_return",
+            ]
+        ],
+        raw,
+        min_cross_section=3,
+    )
+    outcome_frame = substitution.build_cross_sectional_outcome_target(
+        common.frame, min_cross_section=3
+    )
+    small_specs = {
+        "hist_gbm": ({"max_depth": 2, "max_iter": 100, "learning_rate": 0.03},),
+        "random_forest": ({"max_depth": 3, "n_estimators": 200},),
+        "poly2_ridge": ({"alpha": 1.0},),
+        "poly2_elastic_net": (
+            {"alpha": 1.0, "l1_ratio": 0.5, "max_iter": 10_000, "tol": 1e-6},
+        ),
+    }
+
+    signal_ridge = substitution.fit_walk_forward_ridge_replicas(
+        common.frame, [fold], candidate_id="signal"
+    )
+    signal_models = substitution.fit_walk_forward_registered_replicas(
+        common.frame,
+        [fold],
+        candidate_id="signal",
+        frozen_ridge_predictions=signal_ridge.predictions,
+        frozen_ridge_inner_scores=signal_ridge.inner_scores,
+        allow_model_subset=True,
+        model_specs=small_specs,
+    )
+    outcome_ridge = substitution.fit_walk_forward_ridge_replicas(
+        outcome_frame,
+        [fold],
+        candidate_id="outcome",
+        target_column="outcome_target",
+    )
+    outcome_models = substitution.fit_walk_forward_registered_replicas(
+        outcome_frame,
+        [fold],
+        candidate_id="outcome",
+        frozen_ridge_predictions=outcome_ridge.predictions,
+        frozen_ridge_inner_scores=outcome_ridge.inner_scores,
+        target_column="outcome_target",
+        allow_model_subset=True,
+        model_specs=small_specs,
+    )
+    residual = substitution.evaluate_cross_fitted_double_residuals(
+        signal_models.selected_predictions,
+        outcome_models.selected_predictions,
+        hypothesis_id="signal_001",
+        horizon="1d",
+        min_cross_section=3,
+    )
+    formal = substitution.infer_double_residual_family(
+        residual.decision_moments,
+        pd.DataFrame(
+            {"candidate_id": ["candidate"], "signal_equivalence_id": ["signal_001"]}
+        ),
+        expected_decisions_per_day={"1d": 1},
+    )
+    randomized = substitution.evaluate_double_residual_time_randomization(
+        residual.observations, formal.daily_effects
+    )
+    assert len(residual.decision_moments) == 30
+    assert len(formal.unique_results) == 1
+    assert len(formal.candidate_results) == 1
+    assert len(randomized.summary) == 3
+def test_parallelism_benchmark_returns_timing_only(monkeypatch):
+    monkeypatch.setattr(
+        substitution,
+        "_evaluate_registered_inner_tasks",
+        lambda model_class, tasks, fit_workers: [None] * len(tasks),
+    )
+    rng = np.random.default_rng(7)
+    result = substitution.benchmark_registered_replica_parallelism(
+        rng.normal(size=(60, 6)), rng.normal(size=60), fit_workers=2, repetitions=2
+    )
+    assert set(result["model_class"]) == {"hist_gbm", "random_forest"}
+    assert result["fit_workers"].eq(2).all()
+    assert result.set_index("model_class")["configuration_evaluation_count"].to_dict() == {
+        "hist_gbm": 24,
+        "random_forest": 16,
+    }
+    assert result.set_index("model_class")["estimator_fit_count"].to_dict() == {
+        "hist_gbm": 16,
+        "random_forest": 12,
+    }
+    assert result["performance_only"].all()
+    forbidden = {"prediction", "validation_sse", "r2", "p_value", "selected_model"}
+    assert not any(any(token in column.lower() for token in forbidden) for column in result.columns)
+
+
+@pytest.mark.parametrize("model_class", ["hist_gbm", "random_forest"])
+def test_registered_prefix_reuse_matches_independent_fits(model_class):
+    rng = np.random.default_rng(29)
+    train_x = rng.normal(size=(80, 6))
+    train_y = rng.normal(size=80)
+    validation_x = rng.normal(size=(20, 6))
+    payload = {
+        "inner_split_idx": 0,
+        "inner_train_start": pd.Timestamp("2024-01-01", tz="UTC"),
+        "inner_train_end": pd.Timestamp("2024-01-02", tz="UTC"),
+        "validation_start": pd.Timestamp("2024-01-03", tz="UTC"),
+        "validation_end": pd.Timestamp("2024-01-04", tz="UTC"),
+        "train_x": train_x,
+        "train_y": train_y,
+        "validation_x": validation_x,
+        "validation_y": rng.normal(size=20),
+    }
+    configurations = substitution.registered_replica_model_specs()[model_class]
+    independent = [
+        substitution._fit_registered_inner_split(model_class, parameters, payload)
+        for parameters in configurations
+    ]
+    reused = substitution._evaluate_registered_inner_tasks(
+        model_class,
+        [(parameters, payload) for parameters in configurations],
+        fit_workers=1,
+    )
+    reused_parallel = substitution._evaluate_registered_inner_tasks(
+        model_class,
+        [(parameters, payload) for parameters in configurations],
+        fit_workers=16,
+    )
+    independent_sse = {key: row["validation_sse"] for key, _, row in independent}
+    reused_sse = {key: row["validation_sse"] for key, _, row in reused}
+    reused_parallel_sse = {
+        key: row["validation_sse"] for key, _, row in reused_parallel
+    }
+    assert independent_sse.keys() == reused_sse.keys()
+    assert independent_sse.keys() == reused_parallel_sse.keys()
+    for key in independent_sse:
+        assert reused_sse[key] == pytest.approx(
+            independent_sse[key], rel=0.0, abs=1e-12
+        )
+        assert reused_parallel_sse[key] == pytest.approx(
+            independent_sse[key], rel=0.0, abs=1e-12
+        )

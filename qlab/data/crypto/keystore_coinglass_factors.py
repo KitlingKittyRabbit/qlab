@@ -16,7 +16,7 @@ from .keystore_coinglass_endpoints import ENDPOINTS_BY_NAME
 
 PANEL_FREQUENCIES = ("1h",)
 SIGNAL_SOURCE_FREQUENCIES_BY_PANEL_FREQUENCY = {
-    "1h": ("1h", "2h", "4h", "6h", "8h", "12h", "1d"),
+    "1h": ("1h", "12h", "1d"),
 }
 SOURCE_SCOPES_BY_PANEL_FREQUENCY = {
     panel_frequency: {
@@ -53,6 +53,33 @@ REQUIRED_COLUMNS = {
     "notes",
 }
 
+TIMESTAMP_KIND_BY_ENDPOINT = {
+    "basis": "bar_start",
+    "fr": "bar_start",
+    "fr_oi_weight": "bar_start",
+    "fr_vol_weight": "bar_start",
+    "futures_cvd_agg": "bar_start",
+    "futures_net_pos_v2": "bar_start",
+    "futures_whale_index": "bar_end",
+    "global_ls": "bar_end",
+    "liq": "bar_start",
+    "ob_agg": "bar_end",
+    "ob_pair": "bar_end",
+    "oi": "bar_start",
+    "oi_stablecoin": "bar_start",
+    "spot_cvd_agg": "bar_start",
+    "spot_taker_pair": "bar_start",
+    "taker_agg": "bar_start",
+    "taker_pair": "bar_start",
+    "top_acct": "bar_end",
+    "top_pos": "bar_end",
+}
+VALUE_STATUS_BY_ENDPOINT = {
+    endpoint: "snapshot" if endpoint in {"ob_agg", "ob_pair"} else "bar"
+    for endpoint in TIMESTAMP_KIND_BY_ENDPOINT
+}
+UNAVAILABLE_ENDPOINT_TIMEFRAMES = {("futures_net_pos_v2", "12h")}
+
 
 @dataclass(frozen=True)
 class FactorEligibilitySpec:
@@ -81,9 +108,8 @@ class FactorEligibilitySpec:
 
 def decision_rule(signal_timeframe: str) -> str:
     return (
-        f"use completed {signal_timeframe} KeyStore v4 bars only on their native UTC-aligned "
-        f"decision timestamps after label + {signal_timeframe} + 1m; do not carry forward "
-        "to intermediate 1h grid rows"
+        f"map each {signal_timeframe} source label to its audited native bar end; use only "
+        "that exact UTC-aligned research decision timestamp and do not carry forward"
     )
 
 
@@ -229,14 +255,6 @@ MAIN_CANDIDATE_TEMPLATES = (
         "notes": "Aggregated futures CVD first difference.",
     },
     {
-        "feature_name": "spot_cvd_delta1",
-        "family": "spot_cvd",
-        "endpoint": "spot_cvd",
-        "panel_transform": "delta1_raw_column",
-        "required_columns": "cum_vol_delta",
-        "notes": "Spot pair CVD first difference.",
-    },
-    {
         "feature_name": "spot_cvd_agg_delta1",
         "family": "spot_cvd",
         "endpoint": "spot_cvd_agg",
@@ -305,11 +323,14 @@ def build_base_panel_specs() -> tuple[FactorEligibilitySpec, ...]:
     specs: list[FactorEligibilitySpec] = []
     for signal_timeframe in SIGNAL_SOURCE_FREQUENCIES_BY_PANEL_FREQUENCY["1h"]:
         for template in BASE_PANEL_TEMPLATES:
+            endpoint = str(template["endpoint"])
+            if (endpoint, signal_timeframe) in UNAVAILABLE_ENDPOINT_TIMEFRAMES:
+                continue
             specs.append(
                 FactorEligibilitySpec(
                     feature_name=canonical_feature_name(template["feature_name"], signal_timeframe),
                     family=template["family"],
-                    endpoint=template["endpoint"],
+                    endpoint=endpoint,
                     source_scope=f"ksv4_{signal_timeframe}",
                     frequency="1h",
                     signal_timeframe=signal_timeframe,
@@ -319,8 +340,8 @@ def build_base_panel_specs() -> tuple[FactorEligibilitySpec, ...]:
                     panel_transform=template["panel_transform"],
                     cross_section_standardization="rank_to_minus1_1",
                     required_columns=template["required_columns"],
-                    timestamp_kind="bar_start",
-                    value_status="final_historical_aggregate",
+                    timestamp_kind=TIMESTAMP_KIND_BY_ENDPOINT[endpoint],
+                    value_status=VALUE_STATUS_BY_ENDPOINT[endpoint],
                     earliest_safe_decision_rule=decision_rule(signal_timeframe),
                     notes=template["notes"],
                 )
@@ -395,9 +416,34 @@ def validate_factor_eligibility_registry(frame: pd.DataFrame) -> pd.DataFrame:
     if not missing_semantics.empty:
         raise ValueError("ksv4 registry contains factors without explicit semantics")
 
-    disallowed = base_panel.loc[base_panel["endpoint"].isin({"futures_cvd", "futures_net_pos"}), "feature_name"].tolist()
+    invalid_timestamp_kinds = sorted(
+        set(base_panel["timestamp_kind"]).difference({"bar_start", "bar_end"})
+    )
+    if invalid_timestamp_kinds:
+        raise ValueError(
+            "invalid ksv4 timestamp_kind values: " + ", ".join(invalid_timestamp_kinds)
+        )
+
+    disallowed = base_panel.loc[
+        base_panel["endpoint"].isin({"futures_cvd", "futures_net_pos"}),
+        "feature_name",
+    ].tolist()
     if disallowed:
-        raise ValueError("ksv4 base-panel includes conditional/side endpoints: " + ", ".join(disallowed))
+        raise ValueError(
+            "ksv4 base-panel includes conditional/side endpoints: "
+            + ", ".join(disallowed)
+        )
+
+    expected_timestamp_kinds = base_panel["endpoint"].map(TIMESTAMP_KIND_BY_ENDPOINT)
+    if expected_timestamp_kinds.isna().any() or not (
+        base_panel["timestamp_kind"] == expected_timestamp_kinds
+    ).all():
+        raise ValueError("ksv4 registry timestamp_kind does not match endpoint contract")
+    expected_value_status = base_panel["endpoint"].map(VALUE_STATUS_BY_ENDPOINT)
+    if expected_value_status.isna().any() or not (
+        base_panel["value_status"] == expected_value_status
+    ).all():
+        raise ValueError("ksv4 registry value_status does not match endpoint contract")
 
     return registry.sort_values(["frequency", "signal_timeframe", "family", "feature_name"]).reset_index(drop=True)
 

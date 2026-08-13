@@ -6,14 +6,17 @@ from pathlib import Path
 
 import pandas as pd
 import requests
+from requests import HTTPError
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from qlab.data.crypto.binance_um_klines import (
     BinanceKlinePartition,
     audit_klines,
+    canonical_partition_paths,
     download_day_partition,
     download_month_partition,
+    download_rest_day_partition,
     partition_path,
     read_partitions,
     write_source_manifest,
@@ -26,6 +29,20 @@ CANONICAL_SYMBOLS_20 = [
     "ADA", "APT", "AVAX", "BCH", "BNB", "BTC", "DOGE", "DOT", "ETC", "ETH",
     "FET", "FIL", "LINK", "LTC", "NEAR", "SOL", "SUI", "TRX", "UNI", "XRP",
 ]
+
+
+def is_ignorable_latest_day_404(
+    error: HTTPError,
+    *,
+    period: str,
+    requested_days: list[str],
+) -> bool:
+    return bool(
+        requested_days
+        and period == requested_days[-1]
+        and error.response is not None
+        and error.response.status_code == 404
+    )
 
 
 def build_session() -> requests.Session:
@@ -83,9 +100,36 @@ def refresh(
         for period in days:
             path = partition_path(symbol, "1m", period, root=root)
             if refresh_existing or not path.exists():
-                downloaded.append(download_day_partition(session, symbol=symbol, interval="1m", period=period, root=root))
+                try:
+                    downloaded.append(
+                        download_day_partition(
+                            session,
+                            symbol=symbol,
+                            interval="1m",
+                            period=period,
+                            root=root,
+                        )
+                    )
+                except HTTPError as exc:
+                    if not is_ignorable_latest_day_404(
+                        exc, period=period, requested_days=days
+                    ):
+                        raise
+                    downloaded.append(
+                        download_rest_day_partition(
+                            session,
+                            symbol=symbol,
+                            interval="1m",
+                            period=period,
+                            root=root,
+                        )
+                    )
                 time.sleep(sleep_seconds)
-        paths = sorted((root / "interval=1m" / f"symbol={symbol}USDT").glob("period=*.parquet"))
+        paths = canonical_partition_paths(
+            (root / "interval=1m" / f"symbol={symbol}USDT").glob(
+                "period=*.parquet"
+            )
+        )
         frame = read_partitions(paths, interval="1m")
         row = audit_klines(frame, symbol=symbol, interval="1m")
         requested_start = pd.Timestamp(start).tz_convert("UTC") if pd.Timestamp(start).tzinfo else pd.Timestamp(start).tz_localize("UTC")

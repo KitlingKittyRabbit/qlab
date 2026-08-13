@@ -13,6 +13,7 @@ from qlab.factor_research import (
     candidate_combo_specs_from_gate_summary,
     candidate_structured_combo_specs_from_gate_summary,
     combo_decision_frequency,
+    combo_signal_target_membership,
     correlation_discount_weights,
     decision_timestamps_aligned_to_frequency,
     evaluate_combo_signal_diagnostics,
@@ -61,6 +62,62 @@ def _panel_frame() -> pd.DataFrame:
         },
         index=index,
     )
+
+
+def test_combo_signal_target_membership_assigns_exact_tail_weights() -> None:
+    decision_ts = pd.Timestamp("2026-01-01 00:00:00Z")
+    symbols = [f"C{index:02d}" for index in range(10)]
+    frame = pd.DataFrame(
+        {
+            "combo_id": "combo_a",
+            "track": "all_two_gate",
+            "weight_scheme": "equal",
+            "panel_frequency": "4h",
+            "return_horizon": "4h",
+            "component_features": "f1 | f2",
+            "fold_idx": 0,
+            "decision_ts": decision_ts,
+            "symbol": symbols,
+            "combo_signal": np.arange(10, dtype=float),
+            "forward_return": np.linspace(-0.01, 0.01, 10),
+        }
+    )
+
+    targets = combo_signal_target_membership(frame, n_buckets=5)
+
+    assert targets.loc[targets["leg"] == "short", "symbol"].tolist() == ["C00", "C01"]
+    assert targets.loc[targets["leg"] == "long", "symbol"].tolist() == ["C08", "C09"]
+    assert targets.loc[targets["leg"] == "short", "target_weight"].tolist() == [-0.25, -0.25]
+    assert targets.loc[targets["leg"] == "long", "target_weight"].tolist() == [0.25, 0.25]
+    assert targets["target_weight"].sum() == pytest.approx(0.0)
+
+
+def test_combo_signal_target_membership_matches_array_split_for_uneven_cross_section() -> None:
+    decision_ts = pd.Timestamp("2026-01-01 00:00:00Z")
+    frame = pd.DataFrame(
+        {
+            "combo_id": "combo_a",
+            "track": "all_two_gate",
+            "weight_scheme": "equal",
+            "panel_frequency": "4h",
+            "return_horizon": "4h",
+            "component_features": "f1 | f2",
+            "fold_idx": 0,
+            "decision_ts": decision_ts,
+            "symbol": [f"C{index:02d}" for index in range(12)],
+            "combo_signal": np.arange(12, dtype=float),
+            "forward_return": np.linspace(-0.01, 0.01, 12),
+        }
+    )
+
+    targets = combo_signal_target_membership(frame, n_buckets=5)
+
+    assert targets.loc[targets["leg"] == "short", "symbol"].tolist() == ["C00", "C01", "C02"]
+    assert targets.loc[targets["leg"] == "long", "symbol"].tolist() == ["C10", "C11"]
+    assert targets.loc[targets["leg"] == "short", "target_weight"].tolist() == pytest.approx(
+        [-1.0 / 6.0] * 3
+    )
+    assert targets.loc[targets["leg"] == "long", "target_weight"].tolist() == [0.25, 0.25]
 
 
 def test_rank_ic_diagnostics_scores_each_decision():

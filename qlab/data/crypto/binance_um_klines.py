@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,7 @@ from qlab.data.crypto.paths import CACHE_DIR, MANIFEST_DIR, ensure_data_dirs
 
 
 DATA_VISION_BASE = "https://data.binance.vision/data/futures/um"
+USD_M_REST_BASE = "https://fapi.binance.com"
 KLINE_COLUMNS = [
     "open_time",
     "open",
@@ -115,6 +117,37 @@ def parse_data_vision_zip(content: bytes, *, interval: str, source: str) -> pd.D
     return normalize_klines(parsed, interval)
 
 
+def parse_rest_klines(
+    payload: object,
+    *,
+    interval: str,
+    source: str,
+) -> pd.DataFrame:
+    if not isinstance(payload, list):
+        raise ValueError("Binance REST kline response must be a list")
+    if not payload:
+        return _empty_frame()
+    if any(not isinstance(row, list) or len(row) < 7 for row in payload):
+        raise ValueError("Binance REST kline response contains an invalid row")
+    parsed = pd.DataFrame(
+        {
+            "open_time": pd.to_datetime(
+                [int(row[0]) for row in payload], unit="ms", utc=True
+            ),
+            "open": [row[1] for row in payload],
+            "high": [row[2] for row in payload],
+            "low": [row[3] for row in payload],
+            "close": [row[4] for row in payload],
+            "volume": [row[5] for row in payload],
+            "close_time": pd.to_datetime(
+                [int(row[6]) for row in payload], unit="ms", utc=True
+            ),
+            "source": source,
+        }
+    )
+    return normalize_klines(parsed, interval)
+
+
 def partition_path(
     symbol: str,
     interval: str,
@@ -126,6 +159,22 @@ def partition_path(
     return base / f"interval={interval}" / f"symbol={symbol.upper()}USDT" / f"period={period}.parquet"
 
 
+def canonical_partition_paths(paths: Iterable[Path]) -> list[Path]:
+    """Prefer a complete monthly archive over daily tail files for that month."""
+    candidates = sorted(Path(path) for path in paths)
+    monthly_periods = {
+        path.stem.removeprefix("period=")
+        for path in candidates
+        if len(path.stem.removeprefix("period=")) == 7
+    }
+    return [
+        path
+        for path in candidates
+        if len(path.stem.removeprefix("period=")) == 7
+        or path.stem.removeprefix("period=")[:7] not in monthly_periods
+    ]
+
+
 def write_partition(frame: pd.DataFrame, path: Path, *, interval: str) -> None:
     normalized = normalize_klines(frame, interval)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -135,10 +184,78 @@ def write_partition(frame: pd.DataFrame, path: Path, *, interval: str) -> None:
 
 
 def read_partitions(paths: Iterable[Path], *, interval: str) -> pd.DataFrame:
-    frames = [pd.read_parquet(path) for path in paths]
+    frames = [pd.read_parquet(path) for path in canonical_partition_paths(paths)]
     if not frames:
         return _empty_frame()
     return normalize_klines(pd.concat(frames, ignore_index=True), interval)
+
+
+def aggregate_complete_klines(
+    frame: pd.DataFrame,
+    *,
+    source_interval: str,
+    target_interval: str,
+) -> pd.DataFrame:
+    """Aggregate only complete, UTC-aligned source-bar groups."""
+    source = interval_delta(source_interval)
+    target = interval_delta(target_interval)
+    if target <= source or target % source != pd.Timedelta(0):
+        raise ValueError("target_interval must be an integer multiple above source_interval")
+    normalized = normalize_klines(frame, source_interval)
+    if normalized.empty:
+        return _empty_frame()
+    expected_rows = int(target / source)
+    working = normalized.assign(
+        __bucket=pd.DatetimeIndex(normalized["open_time"]).floor(target)
+    )
+    grouped = working.groupby("__bucket", sort=True)
+    aggregated = grouped.agg(
+        open=("open", "first"),
+        high=("high", "max"),
+        low=("low", "min"),
+        close=("close", "last"),
+        volume=("volume", "sum"),
+        source_rows=("open_time", "size"),
+        first_open_time=("open_time", "first"),
+        last_open_time=("open_time", "last"),
+    )
+    complete = (
+        aggregated["source_rows"].eq(expected_rows)
+        & aggregated["first_open_time"].eq(aggregated.index)
+        & aggregated["last_open_time"].eq(aggregated.index + target - source)
+    )
+    aggregated = aggregated.loc[complete].drop(
+        columns=["source_rows", "first_open_time", "last_open_time"]
+    )
+    if aggregated.empty:
+        return _empty_frame()
+    aggregated = aggregated.reset_index(names="open_time")
+    aggregated["close_time"] = (
+        aggregated["open_time"] + target - pd.Timedelta(milliseconds=1)
+    )
+    aggregated["source"] = "aggregated_complete_" + source_interval
+    return normalize_klines(aggregated, target_interval)
+
+
+def price_volume_payload_from_klines(
+    frame: pd.DataFrame,
+    *,
+    source_interval: str = "1m",
+    target_interval: str = "15m",
+) -> pd.DataFrame:
+    """Return an open-indexed close/volume payload for price-volume features."""
+    aggregated = aggregate_complete_klines(
+        frame,
+        source_interval=source_interval,
+        target_interval=target_interval,
+    )
+    if aggregated.empty:
+        raise ValueError("no complete target klines available")
+    payload = aggregated.set_index("open_time")[["close", "volume"]].rename(
+        columns={"close": "c", "volume": "v"}
+    )
+    payload.index.name = "ts"
+    return payload
 
 
 def audit_klines(frame: pd.DataFrame, *, symbol: str, interval: str) -> dict[str, object]:
@@ -203,7 +320,10 @@ def execution_opens(frame: pd.DataFrame | pd.Series, timestamps: Iterable[pd.Tim
 
 
 def read_execution_open_partitions(paths: Iterable[Path]) -> pd.Series:
-    frames = [pd.read_parquet(path, columns=["open_time", "open"]) for path in paths]
+    frames = [
+        pd.read_parquet(path, columns=["open_time", "open"])
+        for path in canonical_partition_paths(paths)
+    ]
     if not frames:
         return pd.Series(dtype=float, name="open")
     combined = pd.concat(frames, ignore_index=True)
@@ -286,6 +406,70 @@ def download_day_partition(
         rows=int(len(frame)),
         start_open_time=None if frame.empty else frame["open_time"].iloc[0],
         end_open_time=None if frame.empty else frame["open_time"].iloc[-1],
+    )
+
+
+def download_rest_day_partition(
+    session: requests.Session,
+    *,
+    symbol: str,
+    interval: str,
+    period: str,
+    root: Path | None = None,
+    base_url: str = USD_M_REST_BASE,
+    timeout: float = 60.0,
+) -> BinanceKlinePartition:
+    day_start = pd.Timestamp(period, tz="UTC")
+    day_end = day_start + pd.Timedelta(days=1)
+    delta = interval_delta(interval)
+    expected_rows = int(pd.Timedelta(days=1) / delta)
+    if expected_rows > 1500:
+        raise ValueError(
+            f"One-day Binance REST refresh exceeds the 1500-row limit for {interval}"
+        )
+    endpoint = f"{base_url.rstrip('/')}/fapi/v1/klines"
+    params = {
+        "symbol": f"{symbol.upper()}USDT",
+        "interval": interval,
+        "startTime": int(day_start.timestamp() * 1000),
+        "endTime": int((day_end - pd.Timedelta(milliseconds=1)).timestamp() * 1000),
+        "limit": expected_rows,
+    }
+    response = session.get(endpoint, params=params, timeout=timeout)
+    response.raise_for_status()
+    try:
+        payload = response.json()
+    except requests.JSONDecodeError as exc:
+        raise ValueError("Binance REST kline response is not valid JSON") from exc
+    source = f"{endpoint}?{requests.compat.urlencode(params)}"
+    frame = parse_rest_klines(payload, interval=interval, source=source)
+    expected_opens = pd.date_range(
+        day_start,
+        day_end - delta,
+        freq=delta,
+    )
+    actual_opens = pd.DatetimeIndex(frame["open_time"])
+    if len(frame) != expected_rows or not actual_opens.equals(expected_opens):
+        raise ValueError(
+            f"Binance REST day is incomplete for {symbol.upper()} {period}: "
+            f"expected {expected_rows} rows, got {len(frame)}"
+        )
+    raw_payload = response.content or json.dumps(
+        payload, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    checksum = hashlib.sha256(raw_payload).hexdigest()
+    path = partition_path(symbol, interval, period, root=root)
+    write_partition(frame, path, interval=interval)
+    return BinanceKlinePartition(
+        symbol=symbol.upper(),
+        interval=interval,
+        period=period,
+        path=path,
+        source_url=source,
+        source_sha256=checksum,
+        rows=int(len(frame)),
+        start_open_time=frame["open_time"].iloc[0],
+        end_open_time=frame["open_time"].iloc[-1],
     )
 
 

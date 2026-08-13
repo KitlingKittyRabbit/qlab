@@ -13,16 +13,6 @@ from .symbol_universe import (
     parse_symbol_csv,
     resolve_target_symbols,
 )
-from .panel import (
-    build_control_panel,
-    forward_returns_for_symbol,
-    normalize_price_frame,
-    panel_forward_returns,
-    panel_with_forward_return,
-    price_controls_for_symbol,
-    rank_standardize_with_nans,
-)
-
 _PATH_EXPORTS = {
     "CACHE_DIR",
     "DATA_ROOT",
@@ -34,21 +24,25 @@ _PATH_EXPORTS = {
     "manifest_path",
 }
 
+_PANEL_EXPORTS = {
+    "build_control_panel",
+    "forward_returns_for_symbol",
+    "normalize_price_frame",
+    "panel_forward_returns",
+    "panel_with_forward_return",
+    "price_controls_for_symbol",
+    "rank_standardize_with_nans",
+}
+
 __all__ = sorted(
     _PATH_EXPORTS
+    | _PANEL_EXPORTS
     | {
         "CORE_SYMBOLS",
         "RESEARCH_SYMBOLS_12",
         "load_symbol_list_file",
         "normalize_symbol_list",
         "parse_symbol_csv",
-        "build_control_panel",
-        "forward_returns_for_symbol",
-        "normalize_price_frame",
-        "panel_forward_returns",
-        "panel_with_forward_return",
-        "price_controls_for_symbol",
-        "rank_standardize_with_nans",
         "resolve_target_symbols",
     }
 )
@@ -59,6 +53,12 @@ def __getattr__(name: str):
         from . import paths
 
         value = getattr(paths, name)
+        globals()[name] = value
+        return value
+    if name in _PANEL_EXPORTS:
+        from . import panel
+
+        value = getattr(panel, name)
         globals()[name] = value
         return value
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

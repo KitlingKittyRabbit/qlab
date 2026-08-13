@@ -8,3 +8,5 @@ build/
 data/crypto/caches/
 data/crypto/manifests/
 data/crypto/raw_history/
+
+qlab_research_private/
