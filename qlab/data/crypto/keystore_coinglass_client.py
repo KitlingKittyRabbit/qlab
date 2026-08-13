@@ -8,9 +8,13 @@ universe. Archive if KeyStore is no longer the replacement data source.
 """
 
 import os
+import threading
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+
+UTC = timezone.utc
+import json
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -20,6 +24,34 @@ import requests
 WORKSPACE_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_BASE_URL = "https://proxy.keystore.com.cn/api/v1/proxy/coinglass/v4"
 DEFAULT_RATE_LIMIT_SLEEP = 6.2
+
+
+def serialized_request_wait_seconds(
+    previous_request_ts: str | datetime | None,
+    current_ts: str | datetime,
+    *,
+    min_start_interval_seconds: float = DEFAULT_RATE_LIMIT_SLEEP,
+) -> float:
+    """Return the remaining wait needed between serialized request starts."""
+    if min_start_interval_seconds < 0:
+        raise ValueError("min_start_interval_seconds must be non-negative")
+    if previous_request_ts is None:
+        return 0.0
+
+    def parse(value: str | datetime) -> datetime:
+        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(
+            str(value).replace("Z", "+00:00")
+        )
+        if parsed.tzinfo is None:
+            raise ValueError("serialized request timestamps must be timezone-aware")
+        return parsed.astimezone(UTC)
+
+    previous = parse(previous_request_ts)
+    current = parse(current_ts)
+    if current < previous:
+        raise ValueError("current request time precedes the previous request start")
+    elapsed = (current - previous).total_seconds()
+    return max(0.0, float(min_start_interval_seconds) - elapsed)
 
 
 def load_env_file(path: Path) -> dict[str, str]:
@@ -166,6 +198,21 @@ class HistoryPage:
         return format_timestamp_ms(self.latest_ms)
 
 
+@dataclass(frozen=True)
+class RawKeystoreResponse:
+    path: str
+    request_params: dict[str, Any]
+    request_ts: str
+    response_ts: str
+    raw_payload: bytes
+
+    def json_payload(self) -> Any:
+        try:
+            return json.loads(self.raw_payload)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"KeyStore response is not valid JSON: {exc}") from exc
+
+
 class KeystoreCoinglassClient:
     def __init__(
         self,
@@ -179,19 +226,41 @@ class KeystoreCoinglassClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.rate_limit_sleep = get_rate_limit_sleep() if rate_limit_sleep is None else max(0.0, rate_limit_sleep)
+        self._request_start_lock = threading.Lock()
+        self._last_request_start_monotonic: float | None = None
 
-    def request_json(self, path: str, params: dict[str, Any] | None = None, retries: int = 4) -> Any:
+    def _wait_for_request_start_slot(self) -> None:
+        with self._request_start_lock:
+            now = time.monotonic()
+            if self._last_request_start_monotonic is not None:
+                remaining = self.rate_limit_sleep - (
+                    now - self._last_request_start_monotonic
+                )
+                if remaining > 0:
+                    time.sleep(remaining)
+            self._last_request_start_monotonic = time.monotonic()
+
+    def request_raw(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        retries: int = 4,
+    ) -> RawKeystoreResponse:
         clean_params = {key: value for key, value in (params or {}).items() if value not in (None, "")}
         url = f"{self.base_url}/{path.lstrip('/')}"
         headers = {"accept": "application/json", "X-Api-Key": self.api_key}
         last_error: Exception | None = None
 
         for attempt in range(retries):
+            self._wait_for_request_start_slot()
+            request_ts = datetime.now(UTC)
             try:
                 response = requests.get(url, headers=headers, params=clean_params, timeout=self.timeout)
+                response_ts = datetime.now(UTC)
+                raw_payload = bytes(response.content)
                 try:
-                    payload: Any = response.json()
-                except ValueError as exc:
+                    payload: Any = json.loads(raw_payload)
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                     last_error = RuntimeError(f"JSON decode failed: {exc}")
                     time.sleep(3 * (attempt + 1))
                     continue
@@ -204,10 +273,27 @@ class KeystoreCoinglassClient:
             if isinstance(payload, dict):
                 code = str(payload.get("code", payload.get("status", "")))
             if response.status_code == 429 or code in {"429", "40003"}:
+                last_error = RuntimeError(
+                    f"HTTP={response.status_code}, code={code}, rate limit"
+                )
                 time.sleep(max(10.0, self.rate_limit_sleep))
                 continue
+            if response.status_code >= 500 or code in {"500", "50000"}:
+                last_error = RuntimeError(
+                    f"HTTP={response.status_code}, code={code}, transient server error"
+                )
+                if attempt + 1 < retries:
+                    time.sleep(3 * (attempt + 1))
+                    continue
+                break
             if response.status_code == 200 and code in {"", "0", "success"}:
-                return payload
+                return RawKeystoreResponse(
+                    path=path,
+                    request_params=dict(clean_params),
+                    request_ts=request_ts.isoformat(),
+                    response_ts=response_ts.isoformat(),
+                    raw_payload=raw_payload,
+                )
 
             message = ""
             if isinstance(payload, dict):
@@ -216,6 +302,9 @@ class KeystoreCoinglassClient:
             break
 
         raise RuntimeError(f"KeyStore CoinGlass request failed for {path} params={clean_params}: {last_error}")
+
+    def request_json(self, path: str, params: dict[str, Any] | None = None, retries: int = 4) -> Any:
+        return self.request_raw(path, params=params, retries=retries).json_payload()
 
     def fetch_rows(self, path: str, params: dict[str, Any] | None = None) -> list[Any]:
         return find_data_rows(self.request_json(path, params=params))

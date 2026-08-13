@@ -11,7 +11,7 @@ def test_ksv4_registry_is_independent_1h_surface_with_native_signal_suffixes():
 
     assert not frame.empty
     assert set(base["frequency"]) == {"1h"}
-    assert set(base["signal_timeframe"]) == {"1h", "2h", "4h", "6h", "8h", "12h", "1d"}
+    assert set(base["signal_timeframe"]) == {"1h", "12h", "1d"}
     assert base["feature_name"].str.contains("__", regex=False).all()
     assert base["source_scope"].str.startswith("ksv4_").all()
     assert base["earliest_safe_decision_rule"].str.contains("do not carry forward", regex=False).all()
@@ -22,7 +22,7 @@ def test_ksv4_registry_includes_only_approved_main_candidates():
     features = set(base["feature_name"])
 
     assert "futures_cvd_agg_delta1__1h" in features
-    assert "spot_cvd_delta1__1h" in features
+    assert "spot_cvd_agg_delta1__1h" in features
     assert "ob_pair_imbalance__1h" in features
     assert "net_pos_delta1__1h" in features
     assert "whale_index_raw__1h" in features

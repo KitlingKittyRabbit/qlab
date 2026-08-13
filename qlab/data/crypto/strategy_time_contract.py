@@ -52,8 +52,8 @@ def validate_continuous_holding_contract(
         )
     if contract.exit_rule != "rebalance_at_next_decision":
         raise ValueError("Continuous holding requires rebalance_at_next_decision")
-    if contract.execution_delay_minutes != 1:
-        raise ValueError("Historical execution contract requires a one-minute delay")
+    if not isinstance(contract.execution_delay_minutes, int) or contract.execution_delay_minutes < 1:
+        raise ValueError("Historical execution delay must be a positive whole number of minutes")
     decision_delta = _delta(contract.decision_interval, horizon_deltas)
     if not contract.signal_timeframes:
         raise ValueError("signal_timeframes must not be empty")
@@ -141,8 +141,6 @@ def factor_eligibility_manifest(
                 timeframe_column: timeframe,
                 "return_horizon": horizon,
                 "decision_interval": horizon,
-                "availability_delay_minutes": 1,
-                "common_release_phase": "utc_horizon_boundary",
                 "admitted": admitted,
                 "reason": "admitted_exact_divisor" if admitted else "excluded_not_exact_divisor",
             }

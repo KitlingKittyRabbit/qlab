@@ -83,6 +83,7 @@ def test_four_symbol_one_fold_executable_strategy_matches_hand_ledger() -> None:
         taker_fee_rate=0.001,
         horizon_deltas={"1d": pd.Timedelta(days=1)},
         supported_signal_timeframes=("1d",),
+        execution_delay_minutes=1,
     )
 
     # Gross exposure is 1x: long C,D and short A,B at +/-0.25 each.
@@ -138,6 +139,7 @@ def test_cross_fold_unchanged_members_keep_quantities_without_reopen() -> None:
         target_gross_notional=100.0,
         taker_fee_rate=0.001,
         cost_multipliers=(1.0,),
+        execution_delay_minutes=1,
     )
 
     middle = orders.loc[
@@ -190,6 +192,7 @@ def test_exchange_rules_use_historical_price_and_round_quantity_toward_zero() ->
         taker_fee_rate=0.0,
         cost_multipliers=(1.0,),
         exchange_rules=rules,
+        execution_delay_minutes=1,
     )
 
     opened = orders.loc[orders["status"] == "open"].set_index("symbol")
@@ -197,6 +200,64 @@ def test_exchange_rules_use_historical_price_and_round_quantity_toward_zero() ->
     assert opened.loc["B", "executed_quantity"] == pytest.approx(-2.5)
     quantities = holdings.set_index("symbol")["signed_quantity"].to_dict()
     assert quantities == pytest.approx({"A": 1.6, "B": -2.5})
+
+
+def test_four_minute_execution_delay_handles_membership_change_exactly() -> None:
+    decisions = pd.to_datetime(["2026-01-01 00:00", "2026-01-01 04:00"], utc=True)
+    targets = pd.DataFrame(
+        [
+            {"combo_id": "demo", "fold_idx": 0, "decision_ts": decisions[0], "symbol": "A", "leg": "long"},
+            {"combo_id": "demo", "fold_idx": 0, "decision_ts": decisions[0], "symbol": "B", "leg": "short"},
+            {"combo_id": "demo", "fold_idx": 0, "decision_ts": decisions[1], "symbol": "C", "leg": "long"},
+            {"combo_id": "demo", "fold_idx": 0, "decision_ts": decisions[1], "symbol": "D", "leg": "short"},
+        ]
+    )
+    ledger = pd.DataFrame(
+        [
+            {
+                "decision_ts": decisions[0],
+                "symbol": symbol,
+                "execution_ts": decisions[0] + pd.Timedelta(minutes=4),
+                "next_execution_ts": decisions[1] + pd.Timedelta(minutes=4),
+                "entry_price": 100.0,
+                "exit_price": 110.0,
+                "executable_return": 0.1,
+            }
+            for symbol in ("A", "B")
+        ]
+        + [
+            {
+                "decision_ts": decisions[1],
+                "symbol": symbol,
+                "execution_ts": decisions[1] + pd.Timedelta(minutes=4),
+                "next_execution_ts": decisions[1] + pd.Timedelta(hours=4, minutes=4),
+                "entry_price": 110.0,
+                "exit_price": 121.0,
+                "executable_return": 0.1,
+            }
+            for symbol in ("C", "D")
+        ]
+    )
+
+    detail, orders, holdings = continuous_membership_quantity_replay(
+        targets,
+        ledger,
+        target_gross_notional=100.0,
+        taker_fee_rate=0.0,
+        cost_multipliers=(1.0,),
+        execution_delay_minutes=4,
+    )
+
+    second = orders.loc[
+        orders["decision_ts"].eq(decisions[1]) & orders["status"].ne("terminal_close")
+    ].set_index("symbol")
+    assert second.loc[["A", "B"], "status"].tolist() == ["close", "close"]
+    assert second.loc[["C", "D"], "status"].tolist() == ["open", "open"]
+    assert set(second["execution_ts"]) == {decisions[1] + pd.Timedelta(minutes=4)}
+    assert set(second["order_submit_ts"]) == {decisions[1] + pd.Timedelta(minutes=4)}
+    # Close the appreciated old book (110) and open the new book (100).
+    assert detail["rebalance_turnover"].tolist() == pytest.approx([1.0, 2.1])
+    assert set(holdings.loc[holdings["decision_ts"].eq(decisions[1]), "symbol"]) == {"C", "D"}
 
 
 def test_formal_l4_entry_keeps_one_path_across_folds() -> None:
@@ -256,6 +317,7 @@ def test_formal_l4_entry_keeps_one_path_across_folds() -> None:
         cost_multipliers=(1.0,),
         frequency_periods_per_year={"1d": 365},
         horizon_deltas={"1d": pd.Timedelta(days=1)},
+        execution_delay_minutes=1,
     )
 
     assert len(summary) == 2

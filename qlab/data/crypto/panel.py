@@ -67,6 +67,34 @@ def relabel_open_indexed_bars_to_bar_end(
     return normalized
 
 
+def boundary_reference_prices_from_execution_opens(
+    open_series: pd.Series,
+    interval: pd.Timedelta = pd.Timedelta(minutes=15),
+    *,
+    column_name: str = "c",
+) -> pd.DataFrame:
+    """Select exact UTC boundary prices for non-executable research labels.
+
+    The input is a Binance minute-open series. Only observations whose timestamp
+    lies exactly on ``interval`` are retained; missing boundaries remain missing
+    rather than being replaced by a later minute.
+    """
+    interval = pd.Timedelta(interval)
+    if interval <= pd.Timedelta(0):
+        raise ValueError("interval must be positive")
+    series = pd.Series(open_series, copy=True).astype(float).sort_index()
+    index = pd.DatetimeIndex(pd.to_datetime(series.index, utc=True))
+    series.index = index
+    series = series[~series.index.duplicated(keep="last")]
+    midnight = series.index.normalize()
+    exact_boundary = ((series.index - midnight) % interval) == pd.Timedelta(0)
+    sampled = series.loc[exact_boundary].rename(column_name)
+    if sampled.empty:
+        raise ValueError("execution-open series has no exact reference boundaries")
+    sampled.index.name = "ts"
+    return sampled.to_frame()
+
+
 def forward_returns_for_symbol(
     decision_index: pd.DatetimeIndex,
     close_series: pd.Series,
@@ -164,6 +192,7 @@ def executable_returns_for_symbol(
     exit_prices = execution_opens(minute_klines, ledger["next_execution_ts"])
     ledger["entry_price"] = entry.to_numpy()
     ledger["exit_price"] = exit_prices.to_numpy()
+    ledger["exit_ts"] = ledger["next_execution_ts"]
     ledger["execution_price"] = ledger["entry_price"]
     ledger["next_execution_price"] = ledger["exit_price"]
     ledger["executable_return"] = ledger["exit_price"] / ledger["entry_price"] - 1.0

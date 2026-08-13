@@ -200,6 +200,35 @@ def load_cache_payloads(
     return payloads
 
 
+def overlay_observed_cache_frames(
+    cache_payloads: dict[str, dict[str, pd.DataFrame]],
+    observed_frames: dict[tuple[str, str], pd.DataFrame],
+) -> dict[str, dict[str, pd.DataFrame]]:
+    """Overlay verified observations without mutating active cache payloads."""
+    result = {
+        str(scope): {
+            str(cache_key): normalize_cache_frame(frame)
+            for cache_key, frame in payload.items()
+        }
+        for scope, payload in cache_payloads.items()
+    }
+    for (scope, cache_key), observed in observed_frames.items():
+        if scope not in result:
+            raise ValueError(f"observed frame references unknown cache scope: {scope}")
+        if cache_key not in result[scope]:
+            raise ValueError(
+                f"observed frame references unknown cache entry: {scope}/{cache_key}"
+            )
+        incoming = normalize_cache_frame(observed)
+        if incoming.empty:
+            raise ValueError(f"observed frame is empty: {scope}/{cache_key}")
+        combined = pd.concat([result[scope][cache_key], incoming]).sort_index()
+        result[scope][cache_key] = combined[
+            ~combined.index.duplicated(keep="last")
+        ]
+    return result
+
+
 def extract_symbol_feature_series(
     symbol: str,
     spec_row: pd.Series,
@@ -214,6 +243,20 @@ def extract_symbol_feature_series(
     return extract_feature_series(spec_row, cache_payloads[scope][cache_key])
 
 
+def source_index_to_native_bar_end(
+    index: pd.DatetimeIndex,
+    *,
+    signal_timeframe: str,
+    timestamp_kind: str,
+) -> pd.DatetimeIndex:
+    source_index = pd.DatetimeIndex(pd.to_datetime(index, utc=True)).as_unit("ns")
+    if timestamp_kind == "bar_start":
+        return source_index + RAW_SOURCE_BAR_DURATION[signal_timeframe]
+    if timestamp_kind == "bar_end":
+        return source_index
+    raise ValueError(f"unsupported timestamp_kind: {timestamp_kind}")
+
+
 def build_decision_grid_index(start_ts: pd.Timestamp, end_ts: pd.Timestamp) -> pd.DatetimeIndex:
     anchor = start_ts.normalize()
     if start_ts > anchor:
@@ -226,7 +269,9 @@ def build_decision_grid_index(start_ts: pd.Timestamp, end_ts: pd.Timestamp) -> p
     grid_end = end_anchor + steps * pd.Timedelta(hours=1)
     if grid_end < grid_start:
         return pd.DatetimeIndex([], tz="UTC", name="decision_ts")
-    return pd.date_range(grid_start, grid_end, freq="1h", tz="UTC", name="decision_ts")
+    return pd.date_range(
+        grid_start, grid_end, freq="1h", tz="UTC", name="decision_ts"
+    ).as_unit("ns")
 
 
 def route_common_decision_index(
@@ -242,11 +287,15 @@ def route_common_decision_index(
         for _, spec_row in registry_frame.iterrows():
             series = extract_symbol_feature_series(symbol, spec_row, cache_payloads)
             signal_timeframe = signal_timeframe_from_scope(spec_row["source_scope"])
-            availability = pd.DatetimeIndex(series.index) + RAW_SOURCE_BAR_DURATION[signal_timeframe]
-            if availability.empty:
+            native_bar_ends = source_index_to_native_bar_end(
+                pd.DatetimeIndex(series.index),
+                signal_timeframe=signal_timeframe,
+                timestamp_kind=str(spec_row["timestamp_kind"]),
+            )
+            if native_bar_ends.empty:
                 raise ValueError(f"feature {spec_row['feature_name']} has no available ksv4 decisions for {symbol}")
-            symbol_starts.append(availability.min())
-            symbol_ends.append(availability.max())
+            symbol_starts.append(native_bar_ends.min())
+            symbol_ends.append(native_bar_ends.max())
         starts.append(max(symbol_starts))
         ends.append(min(symbol_ends))
     return build_decision_grid_index(max(starts), min(ends))
@@ -256,22 +305,37 @@ def align_series_to_decision_grid(
     series: pd.Series,
     decision_index: pd.DatetimeIndex,
     signal_timeframe: str,
+    timestamp_kind: str,
 ) -> pd.Series:
-    availability = pd.DataFrame(
+    normalized_decision_index = pd.DatetimeIndex(
+        pd.to_datetime(decision_index, utc=True), name=decision_index.name
+    ).as_unit("ns")
+    native_bar_ends = pd.DataFrame(
         {
-            "available_ts": pd.DatetimeIndex(series.index) + RAW_SOURCE_BAR_DURATION[signal_timeframe],
+            "native_bar_end_ts": source_index_to_native_bar_end(
+                pd.DatetimeIndex(series.index),
+                signal_timeframe=signal_timeframe,
+                timestamp_kind=timestamp_kind,
+            ),
             series.name: series.to_numpy(),
         }
-    ).sort_values("available_ts")
+    ).sort_values("native_bar_end_ts")
     aligned = pd.merge_asof(
-        pd.DataFrame({"decision_ts": decision_index}),
-        availability,
+        pd.DataFrame({"decision_ts": normalized_decision_index}),
+        native_bar_ends,
         left_on="decision_ts",
-        right_on="available_ts",
+        right_on="native_bar_end_ts",
         direction="backward",
     )
-    aligned.loc[~aligned["decision_ts"].isin(availability["available_ts"]), series.name] = np.nan
-    return pd.Series(aligned[series.name].to_numpy(), index=decision_index, name=series.name)
+    aligned.loc[
+        ~aligned["decision_ts"].isin(native_bar_ends["native_bar_end_ts"]),
+        series.name,
+    ] = np.nan
+    return pd.Series(
+        aligned[series.name].to_numpy(),
+        index=normalized_decision_index,
+        name=series.name,
+    )
 
 
 def build_symbol_frame_on_grid(
@@ -289,6 +353,7 @@ def build_symbol_frame_on_grid(
                 raw_series.rename(spec_row["feature_name"]),
                 decision_index,
                 signal_timeframe,
+                str(spec_row["timestamp_kind"]),
             )
         )
     frame = pd.concat(pieces, axis=1)
@@ -329,7 +394,7 @@ def build_panel_from_payloads(
     )
     for symbol in symbols:
         aligned = build_symbol_frame_on_grid(symbol, active_registry, cache_payloads, decision_index)
-        aligned["label_ts"] = aligned.index - RAW_SOURCE_BAR_DURATION["1h"]
+        aligned["label_ts"] = aligned.index
         aligned["signal_bar_end_ts"] = aligned.index
         aligned["symbol"] = symbol
         aligned = aligned.reset_index(names="decision_ts").set_index(["decision_ts", "symbol"]).sort_index()
@@ -395,9 +460,11 @@ __all__ = [
     "load_admitted_symbols_from_audit",
     "load_cache_payloads",
     "normalize_cache_frame",
+    "overlay_observed_cache_frames",
     "resolve_admitted_symbols",
     "resolve_data_root",
     "route_common_decision_index",
     "signal_timeframe_from_scope",
+    "source_index_to_native_bar_end",
     "standardize_panel_cross_section",
 ]

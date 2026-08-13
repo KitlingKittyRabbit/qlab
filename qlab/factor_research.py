@@ -1097,7 +1097,9 @@ def fama_macbeth_diagnostics_for_frame_slice(
             coefficients = np.full((len(batch_index), xtx.shape[1]), np.nan)
             if nonsingular.any():
                 coefficients[nonsingular] = np.linalg.solve(
-                    xtx[nonsingular], xty[nonsingular])
+                    xtx[nonsingular],
+                    xty[nonsingular, :, np.newaxis],
+                )[:, :, 0]
             fitted = np.einsum("tnp,tp->tn", design, coefficients)
             total_sum_squares = np.square(
                 returns_matrix - returns_matrix.mean(axis=1, keepdims=True)).sum(axis=1)
@@ -2492,6 +2494,90 @@ def assigned_bucket_membership(
     for bucket_idx, positions in enumerate(np.array_split(np.arange(cross_section_size), n_buckets), start=1):
         assigned.loc[positions, "bucket"] = bucket_idx
     return assigned, diagnostic
+
+
+def combo_signal_target_membership(
+    composite_detail: pd.DataFrame,
+    *,
+    n_buckets: int,
+) -> pd.DataFrame:
+    """Convert OOS combo signals into deterministic equal-weight tail targets.
+
+    This entry only assigns cross-sectional buckets and target weights. It does
+    not calculate returns, turnover, costs, or execution metrics.
+    """
+    identity_columns = [
+        "combo_id",
+        "track",
+        "weight_scheme",
+        "panel_frequency",
+        "return_horizon",
+        "component_features",
+        "fold_idx",
+        "decision_ts",
+    ]
+    required = {*identity_columns, "symbol", "combo_signal", "forward_return"}
+    missing = sorted(required.difference(composite_detail.columns))
+    if missing:
+        raise ValueError(
+            "composite_detail missing target-membership columns: "
+            + ", ".join(missing)
+        )
+    if composite_detail.empty:
+        raise ValueError("composite_detail must not be empty")
+    if int(n_buckets) < 2:
+        raise ValueError("n_buckets must be at least 2")
+
+    working = composite_detail[
+        [*identity_columns, "symbol", "combo_signal", "forward_return"]
+    ].dropna().copy()
+    group_key = identity_columns
+    group_size = working.groupby(group_key, sort=False)["symbol"].transform("size")
+    unique_signal = working.groupby(group_key, sort=False)["combo_signal"].transform("nunique")
+    if group_size.lt(int(n_buckets)).any():
+        raise ValueError("combo target membership contains a small cross-section")
+    if unique_signal.le(1).any():
+        raise ValueError("combo target membership contains a constant signal")
+
+    working = working.sort_values(
+        [*group_key, "combo_signal", "symbol"], kind="mergesort"
+    ).reset_index(drop=True)
+    group_size = working.groupby(group_key, sort=False)["symbol"].transform("size").to_numpy(dtype=int)
+    position = working.groupby(group_key, sort=False).cumcount().to_numpy(dtype=int)
+    quotient = group_size // int(n_buckets)
+    remainder = group_size % int(n_buckets)
+    larger_prefix = (quotient + 1) * remainder
+    in_larger_prefix = position < larger_prefix
+    bucket = np.where(
+        in_larger_prefix,
+        position // (quotient + 1) + 1,
+        remainder + (position - larger_prefix) // quotient + 1,
+    )
+    working["bucket"] = bucket.astype(int)
+    result = working.loc[working["bucket"].isin({1, int(n_buckets)})].rename(
+        columns={"combo_signal": "signal_value"}
+    ).copy()
+    result["leg"] = np.where(result["bucket"].eq(int(n_buckets)), "long", "short")
+    side_counts = result.groupby([*group_key, "leg"], sort=False)["symbol"].transform("count").astype(float)
+    result["target_weight"] = np.where(
+        result["leg"].eq("long"),
+        0.5 / side_counts,
+        -0.5 / side_counts,
+    )
+    result = result[
+        [
+            *identity_columns,
+            "symbol",
+            "signal_value",
+            "bucket",
+            "leg",
+            "target_weight",
+        ]
+    ]
+    return result.sort_values(
+        ["combo_id", "weight_scheme", "fold_idx", "decision_ts", "leg", "symbol"],
+        kind="mergesort",
+    ).reset_index(drop=True)
 
 
 def name_turnover_share(current: set[str], previous: set[str]) -> float:
@@ -4606,6 +4692,7 @@ def validated_executable_return_adapter(
     return_horizon: str,
     decision_frequency: str,
     horizon_deltas: Mapping[str, pd.Timedelta],
+    execution_delay_minutes: int,
 ) -> pd.DataFrame:
     """Adapt a validated execution ledger to legacy internal column names.
 
@@ -4641,9 +4728,11 @@ def validated_executable_return_adapter(
         "execution_open_time", "next_execution_ts",
     ]:
         working[column] = pd.to_datetime(working[column], utc=True)
-    expected_delay = pd.Timedelta(minutes=1)
+    if int(execution_delay_minutes) <= 0:
+        raise ValueError("execution_delay_minutes must be positive")
+    expected_delay = pd.Timedelta(minutes=int(execution_delay_minutes))
     if not (working["execution_ts"] - working["decision_ts"] == expected_delay).all():
-        raise ValueError("execution_ts must be exactly one minute after decision_ts")
+        raise ValueError("execution_ts does not match the declared execution delay")
     if not (working["signal_bar_end_ts"] == working["decision_ts"]).all():
         raise ValueError("signal_bar_end_ts must equal decision_ts")
     if not (working["native_bar_end_ts"] == working["signal_bar_end_ts"]).all():
@@ -4698,6 +4787,7 @@ def continuous_membership_quantity_replay(
     target_gross_notional: float,
     taker_fee_rate: float,
     cost_multipliers: Sequence[float],
+    execution_delay_minutes: int,
     account_equity: float | None = None,
     exchange_leverage: float | None = None,
     exchange_rules: pd.DataFrame | None = None,
@@ -4718,6 +4808,9 @@ def continuous_membership_quantity_replay(
         raise ValueError("invalid cost configuration")
     if any(float(value) <= 0.0 for value in cost_multipliers):
         raise ValueError("cost_multipliers must be positive")
+    if int(execution_delay_minutes) <= 0:
+        raise ValueError("execution_delay_minutes must be positive")
+    execution_delay = pd.Timedelta(minutes=int(execution_delay_minutes))
     required_target = {"decision_ts", "symbol", "leg"}
     missing_target = sorted(required_target.difference(target_holdings.columns))
     if missing_target:
@@ -4786,7 +4879,7 @@ def continuous_membership_quantity_replay(
         key = (row.decision_ts, str(row.symbol))
         ledger_by_key[key] = row
         price_at_execution[key] = float(row.entry_price)
-        next_decision = pd.Timestamp(row.next_execution_ts) - pd.Timedelta(minutes=1)
+        next_decision = pd.Timestamp(row.next_execution_ts) - execution_delay
         price_at_execution[(next_decision, str(row.symbol))] = float(row.exit_price)
 
     decision_rows: list[dict[str, object]] = []
@@ -4895,9 +4988,9 @@ def continuous_membership_quantity_replay(
                         **decision_context,
                         "fold_idx": fold_idx,
                         "decision_ts": decision_ts,
-                        "order_submit_ts": pd.Timestamp(decision_ts) + pd.Timedelta(minutes=1),
-                        "execution_ts": pd.Timestamp(decision_ts) + pd.Timedelta(minutes=1),
-                        "execution_open_time": pd.Timestamp(decision_ts) + pd.Timedelta(minutes=1),
+                        "order_submit_ts": pd.Timestamp(decision_ts) + execution_delay,
+                        "execution_ts": pd.Timestamp(decision_ts) + execution_delay,
+                        "execution_open_time": pd.Timestamp(decision_ts) + execution_delay,
                         "symbol": symbol,
                         "execution_price": price,
                         "previous_signed_quantity": previous,
@@ -5024,6 +5117,7 @@ def evaluate_executable_long_short_strategy_with_orders(
     taker_fee_rate: float,
     horizon_deltas: Mapping[str, pd.Timedelta],
     supported_signal_timeframes: Sequence[str],
+    execution_delay_minutes: int,
     min_pair_corr_observations: int | None = None,
 ) -> tuple[dict[str, object], pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Build train-only targets, then replay one continuous quantity path."""
@@ -5032,6 +5126,7 @@ def evaluate_executable_long_short_strategy_with_orders(
         return_horizon=combo_spec.return_horizon,
         decision_frequency=decision_frequency,
         horizon_deltas=horizon_deltas,
+        execution_delay_minutes=execution_delay_minutes,
     )
     _, legacy_detail, target_holdings = evaluate_long_short_strategy(
         combo_spec,
@@ -5078,6 +5173,7 @@ def evaluate_executable_long_short_strategy_with_orders(
         target_gross_notional=1.0,
         taker_fee_rate=taker_fee_rate,
         cost_multipliers=cost_multipliers,
+        execution_delay_minutes=execution_delay_minutes,
     )
     financial_columns = {
         "gross_return", "active_return", "rebalance_turnover",
@@ -5174,6 +5270,7 @@ def live_like_executable_min_notional_replay(
     cost_multipliers: Sequence[float],
     frequency_periods_per_year: Mapping[str, int | float],
     horizon_deltas: Mapping[str, pd.Timedelta],
+    execution_delay_minutes: int,
     epsilon: float = 1e-9,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Replay L4 with historical prices and a frozen exchange-rule snapshot."""
@@ -5188,6 +5285,7 @@ def live_like_executable_min_notional_replay(
         return_horizon=str(route["return_horizon"]),
         decision_frequency=str(route["panel_frequency"]),
         horizon_deltas=horizon_deltas,
+        execution_delay_minutes=execution_delay_minutes,
     )
     ledger_columns = [
         "decision_ts", "symbol", "execution_ts", "next_execution_ts",
@@ -5206,6 +5304,7 @@ def live_like_executable_min_notional_replay(
         target_gross_notional=target_gross_notional,
         taker_fee_rate=taker_fee_rate,
         cost_multipliers=cost_multipliers,
+        execution_delay_minutes=execution_delay_minutes,
         account_equity=account_equity,
         exchange_leverage=exchange_leverage,
         exchange_rules=exchange_rules,
