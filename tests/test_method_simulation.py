@@ -12,6 +12,172 @@ from sklearn.linear_model import Ridge
 from qlab import method_simulation
 
 
+def _empirical_family_fixture(day_count: int = 40):
+    index = pd.date_range("2025-01-01", periods=day_count, freq="D", tz="UTC")
+    angle = np.arange(day_count, dtype=float)
+    null = pd.DataFrame(
+        {
+            "source_a": np.sin(angle / 3.0),
+            "source_b": 0.6 * np.sin(angle / 3.0) + np.cos(angle / 5.0),
+        },
+        index=index,
+    )
+    null = null.subtract(null.mean(axis=0), axis="columns")
+    effects = null + pd.Series({"source_a": 0.25, "source_b": 0.15})
+    counts = pd.DataFrame(1, index=index, columns=null.columns)
+    return effects, null, counts
+
+
+def test_empirical_family_preflight_separates_null_noise_and_effect_pool():
+    effects, centered, counts = _empirical_family_fixture(day_count=5)
+    artifacts = method_simulation.prepare_empirical_block_family(
+        effects,
+        centered,
+        counts,
+        ["source_b", "source_a"],
+        expected_day_count=5,
+    )
+    assert list(artifacts.null_daily_effects.columns) == ["H01", "H02"]
+    np.testing.assert_allclose(artifacts.null_daily_effects.mean(), 0.0, atol=1e-15)
+    expected = effects[["source_b", "source_a"]].mean() / effects[
+        ["source_b", "source_a"]
+    ].std(ddof=1)
+    np.testing.assert_allclose(
+        artifacts.empirical_standardized_effects.to_numpy(), expected.to_numpy()
+    )
+    assert artifacts.hypothesis_manifest["source_hypothesis_id"].tolist() == [
+        "source_b", "source_a"
+    ]
+
+
+def test_circular_block_indices_are_hand_calculable_and_wrap_synchronously():
+    indices = method_simulation.circular_block_indices_from_starts(
+        5, 2, [4, 1, 3]
+    )
+    assert indices.tolist() == [4, 0, 1, 2, 3]
+    values = np.column_stack([np.arange(5), 10 + np.arange(5)])
+    sampled = values[indices]
+    assert sampled[:, 0].tolist() == [4, 0, 1, 2, 3]
+    assert (sampled[:, 1] - sampled[:, 0]).tolist() == [10] * 5
+
+
+def test_synchronized_sampling_preserves_identical_columns_but_independent_does_not():
+    values = np.arange(8, dtype=float)
+    family = np.column_stack([values, values])
+    shared = method_simulation.synchronized_circular_block_indices(
+        8, 2, draw_count=1, seed=10
+    )[0]
+    np.testing.assert_array_equal(family[shared, 0], family[shared, 1])
+    left = method_simulation.synchronized_circular_block_indices(
+        8, 2, draw_count=1, seed=10
+    )[0]
+    right = method_simulation.synchronized_circular_block_indices(
+        8, 2, draw_count=1, seed=11
+    )[0]
+    assert not np.array_equal(family[left, 0], family[right, 1])
+
+
+def test_seed_namespaces_fail_closed_on_calibration_evaluation_collision():
+    method_simulation.validate_disjoint_seed_namespaces({
+        "calibration": [1, 2], "evaluation": [3, 4]
+    })
+    with pytest.raises(ValueError, match="shared"):
+        method_simulation.validate_disjoint_seed_namespaces({
+            "calibration": [1, 2], "evaluation": [2, 3]
+        })
+
+
+def test_empirical_calibration_and_paired_effect_injection_are_separate():
+    effects, centered, counts = _empirical_family_fixture()
+    family = method_simulation.prepare_empirical_block_family(
+        effects, centered, counts, ["source_a", "source_b"], expected_day_count=40
+    )
+    calibration = method_simulation.calibrate_empirical_block_mean_standard_errors(
+        family.null_daily_effects,
+        block_length=4,
+        n_draws=200,
+        seed=17,
+        batch_size=25,
+    )
+    reference = calibration.hypothesis_standard_errors.set_index(
+        "hypothesis_id"
+    )["reference_standard_error"]
+    results = method_simulation.simulate_empirical_block_task_family(
+        family.null_daily_effects,
+        family.empirical_standardized_effects,
+        family.null_daily_standard_deviations,
+        reference,
+        [
+            {"scenario_id": "Z", "block_length": 4, "active_count": 0, "shrinkage_multiplier": 0.0},
+            {"scenario_id": "R_HALF", "block_length": 4, "active_count": 1, "shrinkage_multiplier": 0.5},
+            {"scenario_id": "R_FULL", "block_length": 4, "active_count": 1, "shrinkage_multiplier": 1.0},
+        ],
+        replicate=3,
+        block_length=4,
+        noise_seed=101,
+        truth_seed=202,
+    )
+    half = results.loc[results["scenario_id"].eq("R_HALF")].set_index("hypothesis_id")
+    full = results.loc[results["scenario_id"].eq("R_FULL")].set_index("hypothesis_id")
+    null = results.loc[results["scenario_id"].eq("Z")].set_index("hypothesis_id")
+    assert half["true_effect"].gt(0).sum() == 1
+    np.testing.assert_allclose(full["true_effect"], 2.0 * half["true_effect"])
+    np.testing.assert_allclose(
+        half["observed_effect"] - half["true_effect"], null["observed_effect"]
+    )
+    np.testing.assert_allclose(
+        results.groupby("hypothesis_id")["uncalibrated_standard_error"].nunique(), 1
+    )
+    np.testing.assert_allclose(
+        results.groupby("hypothesis_id")["reference_standard_error"].nunique(), 1
+    )
+    np.testing.assert_allclose(
+        full["observed_effect"] - null["observed_effect"], full["true_effect"]
+    )
+
+
+def test_empirical_reference_bh_and_randomized_truth_summary_use_full_family():
+    fixture = _bh_fdr_fixture().copy()
+    fixture["reference_standard_error"] = 1.0
+    artifacts = method_simulation.evaluate_bh_fdr_variants(
+        fixture,
+        dataset_id="empirical_fixture",
+        family_size=5,
+        scenario_temporal_dependence=None,
+        include_cross_scenario_summary=False,
+    )
+    assert set(artifacts.hypothesis_results["method_variant"]) == {
+        "AR_BIC_1000_BH", "AR_BIC_1125_BH", "MC_REFERENCE_BH"
+    }
+    conditional = method_simulation.summarize_randomized_true_hypotheses(
+        artifacts.hypothesis_results
+    )
+    assert conditional["assigned_task_count"].gt(0).all()
+    assert conditional["conditional_discovery_rate"].between(0.0, 1.0).all()
+
+
+def test_empirical_family_fails_closed_on_nonzero_centered_input():
+    effects, centered, counts = _empirical_family_fixture(day_count=5)
+    centered.iloc[:, 0] += 0.01
+    with pytest.raises(ValueError, match="not zero mean"):
+        method_simulation.prepare_empirical_block_family(
+            effects, centered, counts, ["source_a", "source_b"], expected_day_count=5
+        )
+
+
+def test_empirical_family_fails_closed_on_wrong_days_and_nonfinite_values():
+    effects, centered, counts = _empirical_family_fixture(day_count=5)
+    with pytest.raises(ValueError, match="exactly 6 days"):
+        method_simulation.prepare_empirical_block_family(
+            effects, centered, counts, ["source_a", "source_b"], expected_day_count=6
+        )
+    effects.iloc[0, 0] = np.nan
+    with pytest.raises(ValueError, match="finite and complete"):
+        method_simulation.prepare_empirical_block_family(
+            effects, centered, counts, ["source_a", "source_b"], expected_day_count=5
+        )
+
+
 def test_load_design_fails_closed_until_approved(tmp_path):
     path = tmp_path / "design.json"
     path.write_text(json.dumps({"schema_version": "ksv4_method_simulation_design_v6", "lifecycle": "candidate", "approved": False, "layer_a": {}, "layer_b": {}}))
@@ -30,6 +196,26 @@ def test_layer_a_generator_reproducible_and_truth_is_fixed():
     second = method_simulation.generate_layer_a_dataset(scenario, day_count=20, group_sizes=(3, 3), seed=9)
     pd.testing.assert_frame_equal(first.daily_values, second.daily_values)
     assert first.true_effects.tolist() == [0.2] * 5 + [0.0]
+
+
+def test_layer_a_generator_supports_fresh_33_hypothesis_dense_family():
+    scenario = {
+        "hypothesis_dependence": "within_0.70_between_0.20",
+        "temporal_dependence": "ar1_0.50",
+        "effect": "first_17_positive_0.13",
+    }
+    dataset = method_simulation.generate_layer_a_dataset(
+        scenario,
+        day_count=494,
+        group_sizes=(5, 4, 4, 4, 4, 4, 4, 4),
+        seed=33,
+    )
+    assert dataset.daily_values.shape == (494, 33)
+    assert dataset.daily_values.columns.tolist() == [
+        f"H{index:02d}" for index in range(1, 34)
+    ]
+    assert dataset.true_effects.iloc[:17].eq(0.13).all()
+    assert dataset.true_effects.iloc[17:].eq(0.0).all()
 
 
 def test_exact_gaussian_mean_variance_uses_finite_pair_counts():
@@ -310,8 +496,222 @@ def test_bh_fdr_entry_computes_task_fdp_then_scenario_mean_by_hand():
     ].iloc[0]
     assert scenario["fdr"] == pytest.approx(1 / 6)
     assert scenario["mean_true_positive_rate"] == pytest.approx(0.75)
+    assert scenario["true_positive_rate_monte_carlo_standard_error"] == pytest.approx(0.25)
+    assert scenario["true_positive_rate_ci95_lower"] == pytest.approx(0.26)
+    assert scenario["true_positive_rate_ci95_upper"] == pytest.approx(1.0)
     assert (1 / 6) != pytest.approx(1 / 4)  # pooled V/R is not the FDR estimand
     assert artifacts.cross_scenario_summary["scenario_count"].eq(1).all()
+
+    without_cross = method_simulation.evaluate_bh_fdr_variants(
+        _bh_fdr_fixture(),
+        dataset_id="fixture_no_cross",
+        scenario_temporal_dependence={"A06": "iid"},
+        day_count=4,
+        family_size=5,
+        include_cross_scenario_summary=False,
+    )
+    assert without_cross.cross_scenario_summary.empty
+    assert len(without_cross.scenario_summary) == 3
+
+
+def _effect_retargeting_fixture():
+    rows = []
+    for replicate in range(2):
+        for index in range(3):
+            true_effect = 0.2 if index == 0 else 0.0
+            rows.append(
+                {
+                    "registered_task_idx": 10 + replicate,
+                    "scenario_id": "BASE",
+                    "analysis_specification": "BASE__right_tail_primary__fixture",
+                    "replicate": replicate,
+                    "hypothesis_id": f"H{index + 1:02d}",
+                    "observed_effect": true_effect + replicate + index / 10,
+                    "uncalibrated_standard_error": 0.5 + index / 10,
+                    "alternative": "greater",
+                    "true_effect": true_effect,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def test_effect_retargeting_is_paired_and_preserves_nulls_and_standard_errors():
+    base = _effect_retargeting_fixture()
+    transformed = method_simulation.retarget_additive_effect_scenarios(
+        base,
+        [
+            {"scenario_id": "R01", "base_scenario_id": "BASE", "target_effect": 0.09, "active_count": 1},
+            {"scenario_id": "R02", "base_scenario_id": "BASE", "target_effect": 0.13, "active_count": 1},
+        ],
+        family_size=3,
+        expected_tasks_per_base=2,
+    )
+    r01 = transformed.loc[transformed["scenario_id"].eq("R01")].reset_index(drop=True)
+    r02 = transformed.loc[transformed["scenario_id"].eq("R02")].reset_index(drop=True)
+    active = r01["hypothesis_id"].eq("H01")
+    np.testing.assert_allclose(
+        r02.loc[active, "observed_effect"] - r01.loc[active, "observed_effect"],
+        0.04,
+    )
+    np.testing.assert_allclose(
+        r01.loc[~active, "observed_effect"],
+        r02.loc[~active, "observed_effect"],
+    )
+    np.testing.assert_allclose(
+        r01["uncalibrated_standard_error"],
+        r02["uncalibrated_standard_error"],
+    )
+    assert r01.loc[active, "true_effect"].eq(0.09).all()
+    assert r02.loc[active, "true_effect"].eq(0.13).all()
+    assert transformed["registered_task_idx"].nunique() == 4
+
+
+def test_effect_retargeting_creates_sparse_and_dense_families_from_all_null_noise():
+    base = _effect_retargeting_fixture()
+    base["observed_effect"] = base["observed_effect"] - base["true_effect"]
+    base["true_effect"] = 0.0
+    transformed = method_simulation.retarget_additive_effect_scenarios(
+        base,
+        [
+            {"scenario_id": "NULL", "base_scenario_id": "BASE", "target_effect": 0.0, "active_count": 0},
+            {"scenario_id": "SPARSE", "base_scenario_id": "BASE", "target_effect": 0.09, "active_count": 1},
+            {"scenario_id": "DENSE", "base_scenario_id": "BASE", "target_effect": 0.18, "active_count": 2},
+        ],
+        family_size=3,
+        expected_tasks_per_base=2,
+    )
+    sparse = transformed.loc[transformed["scenario_id"].eq("SPARSE")]
+    dense = transformed.loc[transformed["scenario_id"].eq("DENSE")]
+    null = transformed.loc[transformed["scenario_id"].eq("NULL")]
+    assert null["true_effect"].eq(0.0).all()
+    assert sparse.groupby("replicate")["true_effect"].apply(
+        lambda values: values.gt(0).sum()
+    ).eq(1).all()
+    assert dense.groupby("replicate")["true_effect"].apply(
+        lambda values: values.gt(0).sum()
+    ).eq(2).all()
+    np.testing.assert_allclose(
+        (sparse["observed_effect"] - sparse["true_effect"]).to_numpy(),
+        (dense["observed_effect"] - dense["true_effect"]).to_numpy(),
+    )
+    np.testing.assert_allclose(
+        sparse["uncalibrated_standard_error"].to_numpy(),
+        dense["uncalibrated_standard_error"].to_numpy(),
+    )
+
+
+def test_effect_retargeting_fails_closed_on_wrong_pattern_or_task_count():
+    base = _effect_retargeting_fixture()
+    spec = [{"scenario_id": "R01", "base_scenario_id": "BASE", "target_effect": 0.09, "active_count": 1}]
+    with pytest.raises(ValueError, match="task count"):
+        method_simulation.retarget_additive_effect_scenarios(
+            base, spec, family_size=3, expected_tasks_per_base=3
+        )
+    malformed = base.copy()
+    malformed.loc[
+        (malformed["replicate"].eq(1)) & malformed["hypothesis_id"].eq("H02"),
+        "true_effect",
+    ] = 0.2
+    with pytest.raises(ValueError, match="active pattern"):
+        method_simulation.retarget_additive_effect_scenarios(
+            malformed, spec, family_size=3, expected_tasks_per_base=2
+        )
+
+
+def test_realistic_effect_power_entry_is_end_to_end_and_paired():
+    base = _effect_retargeting_fixture()
+    specs = [
+        {
+            "scenario_id": scenario_id,
+            "base_scenario_id": "BASE",
+            "structure_id": "sparse_iid",
+            "effect_label": label,
+            "target_effect": effect,
+            "active_count": 1,
+            "temporal_dependence": "iid",
+        }
+        for scenario_id, label, effect in (
+            ("R01", "p10", 0.09),
+            ("R02", "median", 0.13),
+            ("R03", "p90", 0.18),
+        )
+    ]
+    artifacts = method_simulation.evaluate_realistic_effect_power(
+        base,
+        specs,
+        day_count=4,
+        family_size=3,
+        expected_tasks_per_base=2,
+    )
+    assert len(artifacts.scenario_summary) == 9
+    assert len(artifacts.paired_effect_contrasts) == 6
+    assert len(artifacts.paired_method_contrasts) == 6
+    assert artifacts.paired_effect_contrasts["task_count"].eq(2).all()
+    assert artifacts.paired_method_contrasts["task_count"].eq(2).all()
+    assert set(artifacts.scenario_summary["target_effect"]) == {0.09, 0.13, 0.18}
+
+
+def test_realistic_effect_power_complete_47_family_matches_hand_counted_path():
+    rows = []
+    for replicate in range(2):
+        for index in range(47):
+            active = index == 0
+            true_effect = 0.2 if active else 0.0
+            noise_mean = 2.93 if active and replicate == 0 else 0.0 if active else -5.0
+            rows.append(
+                {
+                    "registered_task_idx": replicate,
+                    "scenario_id": "BASE47",
+                    "analysis_specification": "BASE47__right_tail_primary__fixture",
+                    "replicate": replicate,
+                    "hypothesis_id": f"H{index + 1:02d}",
+                    "observed_effect": noise_mean + true_effect,
+                    "uncalibrated_standard_error": 1.0,
+                    "alternative": "greater",
+                    "true_effect": true_effect,
+                }
+            )
+    base = pd.DataFrame(rows)
+    specs = [
+        {
+            "scenario_id": scenario_id,
+            "base_scenario_id": "BASE47",
+            "structure_id": "complete_47",
+            "effect_label": label,
+            "target_effect": effect,
+            "active_count": 1,
+            "temporal_dependence": "iid",
+        }
+        for scenario_id, label, effect in (
+            ("R01", "p10", 0.09),
+            ("R02", "median", 0.13),
+            ("R03", "p90", 0.18),
+        )
+    ]
+    artifacts = method_simulation.evaluate_realistic_effect_power(
+        base,
+        specs,
+        day_count=4,
+        family_size=47,
+        expected_tasks_per_base=2,
+    )
+    practical = artifacts.scenario_summary.loc[
+        artifacts.scenario_summary["method_variant"].eq("AR_BIC_1000_BH")
+    ].sort_values("target_effect")
+    assert practical["fdr"].tolist() == [0.0, 0.0, 0.0]
+    assert practical["mean_true_positive_rate"].tolist() == [0.0, 0.0, 0.5]
+    assert practical["mean_true_discovery_count"].tolist() == [0.0, 0.0, 0.5]
+    assert practical["mean_false_discovery_count"].tolist() == [0.0, 0.0, 0.0]
+    high = practical.iloc[-1]
+    assert high["true_positive_rate_monte_carlo_standard_error"] == pytest.approx(0.5)
+    assert high["true_positive_rate_ci95_lower"] == pytest.approx(0.0)
+    assert high["true_positive_rate_ci95_upper"] == pytest.approx(1.0)
+    contrast = artifacts.paired_effect_contrasts.loc[
+        artifacts.paired_effect_contrasts["method_variant"].eq("AR_BIC_1000_BH")
+        & artifacts.paired_effect_contrasts["lower_effect"].eq(0.13)
+    ].iloc[0]
+    assert contrast["mean_true_positive_rate_difference"] == pytest.approx(0.5)
+    assert contrast["monte_carlo_standard_error"] == pytest.approx(0.5)
 
 
 def test_bh_fdr_entry_fails_closed_instead_of_shrinking_nan_family():

@@ -309,6 +309,49 @@ def test_ar_spectral_holm_applies_one_frozen_family_wide_se_multiplier():
         )
 
 
+def test_ar_spectral_bh_end_to_end_uses_complete_family_and_exact_bh_values():
+    rng = np.random.default_rng(904)
+    index = pd.date_range("2025-01-01", periods=100, freq="D", tz="UTC")
+    raw = pd.DataFrame(
+        rng.normal(size=(100, 3)), index=index, columns=["h1", "h2", "h3"]
+    )
+    centered = raw - raw.mean(axis=0)
+    counts = pd.DataFrame(1, index=index, columns=raw.columns)
+    effects = pd.Series({"h1": 0.25, "h2": 0.10, "h3": -0.05})
+
+    artifacts = research_stats.autoregressive_spectral_bh_test(
+        centered,
+        counts,
+        effects,
+        order_criterion="BIC",
+        expected_hypothesis_count=3,
+    )
+    summary = artifacts.summary
+    expected = research_stats.benjamini_hochberg_q_values(
+        summary["raw_one_sided_p_value"]
+    )
+    np.testing.assert_allclose(summary["bh_adjusted_q_value"], expected)
+    np.testing.assert_allclose(summary["family_adjusted_p_value"], expected)
+    assert set(summary["inference_engine"]) == {
+        "autoregressive_spectral_normal_bh"
+    }
+    assert summary["discovered"].equals(summary["bh_adjusted_q_value"].le(0.05))
+    assert artifacts.family_summary.iloc[0]["hypothesis_count"] == 3
+    assert artifacts.family_summary.iloc[0]["discovery_count"] == summary[
+        "discovered"
+    ].sum()
+    assert "holm_adjusted_p_value" not in summary
+
+    with pytest.raises(ValueError, match="wrong hypothesis count"):
+        research_stats.autoregressive_spectral_bh_test(
+            centered,
+            counts,
+            effects,
+            order_criterion="BIC",
+            expected_hypothesis_count=2,
+        )
+
+
 def test_annualized_sharpe_uses_explicit_periods_per_year():
     values = pd.Series([0.01, 0.02, -0.01, 0.03])
     expected = values.mean() / values.std(ddof=1) * math.sqrt(365)

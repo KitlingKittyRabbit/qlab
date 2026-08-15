@@ -133,6 +133,535 @@ class BhFdrEvaluationArtifacts:
 
 
 @dataclass(frozen=True)
+class EmpiricalBlockFamilyArtifacts:
+    null_daily_effects: pd.DataFrame
+    empirical_standardized_effects: pd.Series
+    null_daily_standard_deviations: pd.Series
+    hypothesis_manifest: pd.DataFrame
+
+
+@dataclass(frozen=True)
+class EmpiricalMeanSeCalibrationArtifacts:
+    hypothesis_standard_errors: pd.DataFrame
+    calibration_summary: pd.DataFrame
+
+
+@dataclass(frozen=True)
+class EmpiricalBhDiagnosticArtifacts:
+    paired_method_differences: pd.DataFrame
+    block_length_sensitivity: pd.DataFrame
+
+
+@dataclass(frozen=True)
+class RealisticEffectPowerArtifacts:
+    counterfactual_inputs: pd.DataFrame
+    bh_evaluation: BhFdrEvaluationArtifacts
+    scenario_summary: pd.DataFrame
+    paired_effect_contrasts: pd.DataFrame
+    paired_method_contrasts: pd.DataFrame
+
+
+def prepare_empirical_block_family(
+    daily_effects: pd.DataFrame,
+    daily_centered_sums: pd.DataFrame,
+    daily_counts: pd.DataFrame,
+    representative_hypothesis_ids: Sequence[str],
+    *,
+    expected_day_count: int = 494,
+    centering_tolerance: float = 1e-12,
+) -> EmpiricalBlockFamilyArtifacts:
+    """Prepare a synchronized empirical null family and observed effect pool."""
+    frames = {
+        "daily_effects": daily_effects,
+        "daily_centered_sums": daily_centered_sums,
+        "daily_counts": daily_counts,
+    }
+    for name, frame in frames.items():
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            raise ValueError(f"{name} must be a non-empty DataFrame")
+        if not isinstance(frame.index, pd.DatetimeIndex):
+            raise ValueError(f"{name} must use a DatetimeIndex")
+        if frame.index.has_duplicates or frame.columns.has_duplicates:
+            raise ValueError(f"{name} must have unique dates and hypotheses")
+    first_index = daily_effects.index
+    first_columns = daily_effects.columns.astype(str)
+    for name, frame in frames.items():
+        if not frame.index.equals(first_index):
+            raise ValueError("empirical family inputs must share one date index")
+        if tuple(frame.columns.astype(str)) != tuple(first_columns):
+            raise ValueError("empirical family inputs must share ordered hypotheses")
+    day_count = int(expected_day_count)
+    if len(first_index) != day_count:
+        raise ValueError(f"empirical family requires exactly {day_count} days")
+    utc_index = pd.DatetimeIndex(pd.to_datetime(first_index, utc=True))
+    expected_index = pd.date_range(utc_index[0], periods=day_count, freq="D", tz="UTC")
+    if not utc_index.equals(expected_index):
+        raise ValueError("empirical family dates must be consecutive UTC days")
+
+    representatives = tuple(str(value) for value in representative_hypothesis_ids)
+    if len(representatives) < 2 or len(set(representatives)) != len(representatives):
+        raise ValueError("representative hypotheses must be unique and contain at least two ids")
+    missing = sorted(set(representatives).difference(first_columns))
+    if missing:
+        raise ValueError("empirical family is missing representatives: " + ", ".join(missing))
+    selected_effects = daily_effects.loc[:, list(representatives)].astype(float)
+    selected_sums = daily_centered_sums.loc[:, list(representatives)].astype(float)
+    selected_counts = daily_counts.loc[:, list(representatives)].astype(float)
+    for name, frame in (
+        ("daily_effects", selected_effects),
+        ("daily_centered_sums", selected_sums),
+        ("daily_counts", selected_counts),
+    ):
+        if not np.isfinite(frame.to_numpy(dtype=float)).all():
+            raise ValueError(f"{name} must be finite and complete")
+    if (selected_counts.to_numpy(dtype=float) <= 0.0).any():
+        raise ValueError("daily_counts must be strictly positive")
+    null_values = selected_sums / selected_counts
+    maximum_mean = float(np.max(np.abs(null_values.mean(axis=0).to_numpy(dtype=float))))
+    tolerance = float(centering_tolerance)
+    if not np.isfinite(tolerance) or tolerance <= 0.0:
+        raise ValueError("centering_tolerance must be finite and positive")
+    if maximum_mean > tolerance:
+        raise ValueError("empirical centered family is not zero mean")
+    null_values = null_values.subtract(null_values.mean(axis=0), axis="columns")
+    standard_deviations = selected_effects.std(axis=0, ddof=1)
+    if (
+        not np.isfinite(standard_deviations.to_numpy(dtype=float)).all()
+        or (standard_deviations <= 0.0).any()
+    ):
+        raise ValueError("empirical family contains a constant hypothesis")
+    standardized = selected_effects.mean(axis=0) / standard_deviations
+    if not np.isfinite(standardized.to_numpy(dtype=float)).all() or (standardized <= 0.0).any():
+        raise ValueError("empirical standardized effect pool must be finite and positive")
+
+    synthetic_ids = tuple(f"H{index:02d}" for index in range(1, len(representatives) + 1))
+    rename = dict(zip(representatives, synthetic_ids, strict=True))
+    manifest = pd.DataFrame(
+        {
+            "hypothesis_id": synthetic_ids,
+            "source_hypothesis_id": representatives,
+            "observed_standardized_effect": standardized.to_numpy(dtype=float),
+            "null_daily_standard_deviation": null_values.std(axis=0, ddof=1).to_numpy(dtype=float),
+        }
+    )
+    prepared = null_values.rename(columns=rename)
+    prepared.index = utc_index
+    prepared.index.name = "utc_day"
+    effect_pool = pd.Series(
+        standardized.to_numpy(dtype=float), index=synthetic_ids,
+        name="observed_standardized_effect",
+    )
+    null_sd = pd.Series(
+        prepared.std(axis=0, ddof=1).to_numpy(dtype=float), index=synthetic_ids,
+        name="null_daily_standard_deviation",
+    )
+    return EmpiricalBlockFamilyArtifacts(prepared, effect_pool, null_sd, manifest)
+
+
+def circular_block_indices_from_starts(
+    day_count: int,
+    block_length: int,
+    block_starts: Sequence[int],
+) -> np.ndarray:
+    """Expand explicit circular-block starts into one fixed-length draw."""
+    count = int(day_count)
+    length = int(block_length)
+    starts = np.asarray(tuple(block_starts), dtype=int)
+    if count <= 1 or length <= 0 or length > count:
+        raise ValueError("invalid circular-block dimensions")
+    required = int(np.ceil(count / length))
+    if starts.ndim != 1 or len(starts) != required:
+        raise ValueError("circular-block draw has the wrong number of starts")
+    if ((starts < 0) | (starts >= count)).any():
+        raise ValueError("circular-block starts lie outside the sample")
+    indices = (starts[:, None] + np.arange(length, dtype=int)[None, :]) % count
+    return indices.reshape(-1)[:count]
+
+
+def synchronized_circular_block_indices(
+    day_count: int,
+    block_length: int,
+    *,
+    draw_count: int,
+    seed: int,
+) -> np.ndarray:
+    """Generate reproducible synchronized circular-block index draws."""
+    count = int(day_count)
+    length = int(block_length)
+    draws = int(draw_count)
+    if count <= 1 or length <= 0 or length > count or draws <= 0:
+        raise ValueError("invalid synchronized circular-block request")
+    blocks = int(np.ceil(count / length))
+    generator = np.random.default_rng(int(seed))
+    starts = generator.integers(0, count, size=(draws, blocks), endpoint=False)
+    offsets = np.arange(length, dtype=int)
+    return ((starts[..., None] + offsets) % count).reshape(draws, -1)[:, :count]
+
+
+def validate_disjoint_seed_namespaces(
+    seed_namespaces: Mapping[str, Sequence[int]],
+) -> None:
+    """Fail when independently registered Monte Carlo stages reuse a seed."""
+    if len(seed_namespaces) < 2:
+        raise ValueError("at least two seed namespaces are required")
+    seen: dict[int, str] = {}
+    for name, values in seed_namespaces.items():
+        label = str(name)
+        seeds = tuple(int(value) for value in values)
+        if not label or not seeds or len(set(seeds)) != len(seeds):
+            raise ValueError("seed namespaces must be named, non-empty, and internally unique")
+        for seed in seeds:
+            prior = seen.get(seed)
+            if prior is not None:
+                raise ValueError(f"seed {seed} is shared by {prior} and {label}")
+            seen[seed] = label
+
+
+def calibrate_empirical_block_mean_standard_errors(
+    null_daily_effects: pd.DataFrame,
+    *,
+    block_length: int,
+    n_draws: int,
+    seed: int,
+    batch_size: int = 100,
+) -> EmpiricalMeanSeCalibrationArtifacts:
+    """Estimate marginal mean standard errors from independent empirical-null draws."""
+    if not isinstance(null_daily_effects, pd.DataFrame) or null_daily_effects.empty:
+        raise ValueError("null_daily_effects must be a non-empty DataFrame")
+    if null_daily_effects.columns.has_duplicates:
+        raise ValueError("null_daily_effects hypotheses must be unique")
+    values = null_daily_effects.to_numpy(dtype=float)
+    if not np.isfinite(values).all():
+        raise ValueError("null_daily_effects must be finite")
+    if not np.allclose(values.mean(axis=0), 0.0, atol=1e-12, rtol=0.0):
+        raise ValueError("null_daily_effects must be zero mean")
+    draws = int(n_draws)
+    batch = int(batch_size)
+    if draws < 2 or batch <= 0:
+        raise ValueError("n_draws must exceed one and batch_size must be positive")
+    mean_sum = np.zeros(values.shape[1], dtype=float)
+    mean_square_sum = np.zeros(values.shape[1], dtype=float)
+    completed = 0
+    while completed < draws:
+        current = min(batch, draws - completed)
+        indices = synchronized_circular_block_indices(
+            len(values), int(block_length), draw_count=current,
+            seed=int(seed) + completed,
+        )
+        means = values[indices].mean(axis=1)
+        mean_sum += means.sum(axis=0)
+        mean_square_sum += np.square(means).sum(axis=0)
+        completed += current
+    variance = (mean_square_sum - np.square(mean_sum) / draws) / (draws - 1)
+    if not np.isfinite(variance).all() or (variance <= 0.0).any():
+        raise RuntimeError("empirical calibration produced invalid mean variances")
+    standard_errors = np.sqrt(variance)
+    relative_mc_error = float(1.0 / np.sqrt(2.0 * (draws - 1)))
+    hypothesis = pd.DataFrame(
+        {
+            "hypothesis_id": null_daily_effects.columns.astype(str),
+            "reference_standard_error": standard_errors,
+            "calibration_draw_count": draws,
+            "approximate_relative_monte_carlo_error": relative_mc_error,
+        }
+    )
+    summary = pd.DataFrame(
+        [{
+            "block_length_days": int(block_length),
+            "calibration_draw_count": draws,
+            "seed": int(seed),
+            "batch_size": batch,
+            "hypothesis_count": values.shape[1],
+            "approximate_relative_monte_carlo_error": relative_mc_error,
+            "minimum_reference_standard_error": float(np.min(standard_errors)),
+            "maximum_reference_standard_error": float(np.max(standard_errors)),
+        }]
+    )
+    return EmpiricalMeanSeCalibrationArtifacts(hypothesis, summary)
+
+
+def simulate_empirical_block_task_family(
+    null_daily_effects: pd.DataFrame,
+    empirical_standardized_effects: pd.Series,
+    null_daily_standard_deviations: pd.Series,
+    reference_standard_errors: pd.Series,
+    scenario_specs: Sequence[Mapping[str, object]],
+    *,
+    replicate: int,
+    block_length: int,
+    noise_seed: int,
+    truth_seed: int,
+) -> pd.DataFrame:
+    """Simulate one paired empirical-block task and all registered scenarios."""
+    hypotheses = tuple(null_daily_effects.columns.astype(str))
+    expected = tuple(f"H{index:02d}" for index in range(1, len(hypotheses) + 1))
+    if hypotheses != expected:
+        raise ValueError("empirical task requires ordered H01-Hnn hypotheses")
+    for name, values in (
+        ("empirical_standardized_effects", empirical_standardized_effects),
+        ("null_daily_standard_deviations", null_daily_standard_deviations),
+        ("reference_standard_errors", reference_standard_errors),
+    ):
+        if not isinstance(values, pd.Series) or tuple(values.index.astype(str)) != hypotheses:
+            raise ValueError(f"{name} must match the empirical hypothesis family")
+        if not np.isfinite(values.to_numpy(dtype=float)).all() or (values <= 0.0).any():
+            raise ValueError(f"{name} must be finite and positive")
+    specs = [dict(value) for value in scenario_specs]
+    if not specs:
+        raise ValueError("scenario_specs must not be empty")
+    required = {"scenario_id", "block_length", "active_count", "shrinkage_multiplier"}
+    scenario_ids: set[str] = set()
+    for spec in specs:
+        missing = sorted(required.difference(spec))
+        if missing:
+            raise ValueError("empirical scenario spec missing: " + ", ".join(missing))
+        scenario_id = str(spec["scenario_id"])
+        if not scenario_id or scenario_id in scenario_ids:
+            raise ValueError("empirical scenario ids must be unique and non-empty")
+        if int(spec["block_length"]) != int(block_length):
+            raise ValueError("scenario block length differs from task block length")
+        active_count = int(spec["active_count"])
+        shrinkage = float(spec["shrinkage_multiplier"])
+        if active_count == 0:
+            if shrinkage != 0.0:
+                raise ValueError("all-null scenarios require zero shrinkage")
+        elif not 0 < active_count < len(hypotheses) or not 0.0 < shrinkage <= 1.0:
+            raise ValueError("mixed scenario truth settings are invalid")
+        scenario_ids.add(scenario_id)
+
+    indices = synchronized_circular_block_indices(
+        len(null_daily_effects), int(block_length), draw_count=1, seed=int(noise_seed)
+    )[0]
+    sampled = null_daily_effects.iloc[indices].copy()
+    sampled.index = pd.date_range(
+        "2000-01-01", periods=len(sampled), freq="D", tz="UTC",
+        name="simulated_day",
+    )
+    observed_null = sampled.mean(axis=0)
+    centered = sampled.subtract(observed_null, axis="columns")
+    counts = pd.DataFrame(1, index=centered.index, columns=centered.columns)
+    marginal = research_stats.autoregressive_spectral_bh_test(
+        centered,
+        counts,
+        observed_null,
+        order_criterion="BIC",
+        expected_hypothesis_count=len(hypotheses),
+        alternative="greater",
+    ).summary.set_index("hypothesis_id")
+    uncalibrated = marginal.loc[list(hypotheses), "uncalibrated_standard_error"]
+
+    truth_cache: dict[int, np.ndarray] = {}
+    output: list[pd.DataFrame] = []
+    pool = empirical_standardized_effects.to_numpy(dtype=float)
+    null_sd = null_daily_standard_deviations.to_numpy(dtype=float)
+    reference = reference_standard_errors.to_numpy(dtype=float)
+    for spec in specs:
+        active_count = int(spec["active_count"])
+        shrinkage = float(spec["shrinkage_multiplier"])
+        if active_count not in truth_cache:
+            assigned = np.zeros(len(hypotheses), dtype=float)
+            if active_count:
+                generator = np.random.default_rng(int(truth_seed) + active_count * 1_000_003)
+                active_positions = generator.choice(
+                    len(hypotheses), size=active_count, replace=False
+                )
+                pool_positions = generator.permutation(len(hypotheses))[:active_count]
+                assigned[active_positions] = pool[pool_positions] * null_sd[active_positions]
+            truth_cache[active_count] = assigned
+        true_effect = shrinkage * truth_cache[active_count]
+        scenario_id = str(spec["scenario_id"])
+        frame = pd.DataFrame(
+            {
+                "registered_task_idx": int(replicate),
+                "scenario_id": scenario_id,
+                "analysis_specification": f"{scenario_id}__right_tail_primary__empirical_block",
+                "replicate": int(replicate),
+                "hypothesis_id": hypotheses,
+                "observed_effect": observed_null.to_numpy(dtype=float) + true_effect,
+                "uncalibrated_standard_error": uncalibrated.to_numpy(dtype=float),
+                "reference_standard_error": reference,
+                "alternative": "greater",
+                "true_effect": true_effect,
+                "block_length_days": int(block_length),
+                "active_count": active_count,
+                "shrinkage_multiplier": shrinkage,
+                "noise_seed": int(noise_seed),
+                "truth_seed": int(truth_seed),
+            }
+        )
+        output.append(frame)
+    return pd.concat(output, ignore_index=True)
+
+
+def retarget_additive_effect_scenarios(
+    results: pd.DataFrame,
+    scenario_specs: Sequence[Mapping[str, object]],
+    *,
+    family_size: int = 47,
+    expected_tasks_per_base: int | None = None,
+) -> pd.DataFrame:
+    """Retarget additive Layer-A effects while preserving frozen noise fits.
+
+    The Layer-A DGP adds a constant true effect to each active daily series.
+    Subtracting the old true effect and adding a new one therefore changes only
+    the sample mean.  Centered observations and every standard-error fit remain
+    identical.  This entry validates that contract before returning paired
+    counterfactual task families.
+    """
+    required = {
+        "registered_task_idx",
+        "scenario_id",
+        "analysis_specification",
+        "replicate",
+        "hypothesis_id",
+        "observed_effect",
+        "uncalibrated_standard_error",
+        "alternative",
+        "true_effect",
+    }
+    missing = sorted(required.difference(results.columns))
+    if missing:
+        raise ValueError("effect-retargeting input missing columns: " + ", ".join(missing))
+    if int(family_size) <= 1:
+        raise ValueError("family_size must exceed one")
+    if not scenario_specs:
+        raise ValueError("scenario_specs must not be empty")
+
+    frame = results.loc[:, sorted(required)].copy()
+    if frame.isna().any().any():
+        raise ValueError("effect-retargeting input must be complete")
+    numeric = frame[
+        ["observed_effect", "uncalibrated_standard_error", "true_effect"]
+    ].to_numpy(dtype=float)
+    if not np.isfinite(numeric).all():
+        raise ValueError("effect-retargeting numeric inputs must be finite")
+    if (frame["uncalibrated_standard_error"].astype(float) <= 0.0).any():
+        raise ValueError("effect-retargeting standard errors must be positive")
+    if set(frame["alternative"].astype(str)) != {"greater"}:
+        raise ValueError("effect-retargeting requires one-sided greater alternatives")
+
+    expected_ids = tuple(f"H{index:02d}" for index in range(1, int(family_size) + 1))
+    task_keys = ["scenario_id", "registered_task_idx", "replicate"]
+    if frame.duplicated(task_keys + ["hypothesis_id"]).any():
+        raise ValueError("effect-retargeting input contains duplicate task hypotheses")
+    identity = frame.groupby(task_keys, sort=False).agg(
+        hypothesis_count=("hypothesis_id", "size"),
+        hypothesis_ids=("hypothesis_id", lambda values: tuple(values)),
+        analysis_count=("analysis_specification", "nunique"),
+    )
+    if (
+        identity["hypothesis_count"].ne(int(family_size)).any()
+        or (~identity["hypothesis_ids"].map(lambda value: value == expected_ids)).any()
+        or identity["analysis_count"].ne(1).any()
+    ):
+        raise ValueError("effect-retargeting requires complete, ordered fixed-size families")
+
+    normalized_specs: list[dict[str, object]] = []
+    seen_ids: set[str] = set()
+    for raw in scenario_specs:
+        keys = {"scenario_id", "base_scenario_id", "target_effect", "active_count"}
+        missing_spec = sorted(keys.difference(raw))
+        if missing_spec:
+            raise ValueError("effect-retargeting scenario spec missing: " + ", ".join(missing_spec))
+        scenario_id = str(raw["scenario_id"])
+        base_id = str(raw["base_scenario_id"])
+        target = float(raw["target_effect"])
+        active_count = int(raw["active_count"])
+        if not scenario_id or scenario_id in seen_ids:
+            raise ValueError("effect-retargeting scenario ids must be unique and non-empty")
+        if not np.isfinite(target) or target < 0.0:
+            raise ValueError("target effects must be finite and non-negative")
+        if target == 0.0:
+            if active_count != 0:
+                raise ValueError("all-null targets require active_count zero")
+        elif not 0 < active_count < int(family_size):
+            raise ValueError("active_count must lie inside the hypothesis family")
+        seen_ids.add(scenario_id)
+        normalized_specs.append(
+            {
+                "scenario_id": scenario_id,
+                "base_scenario_id": base_id,
+                "target_effect": target,
+                "active_count": active_count,
+            }
+        )
+
+    available = set(frame["scenario_id"].astype(str))
+    requested = {str(spec["base_scenario_id"]) for spec in normalized_specs}
+    if available != requested:
+        raise ValueError("effect-retargeting input base scenarios are incomplete or excessive")
+
+    output: list[pd.DataFrame] = []
+    next_task_idx = 0
+    for spec in normalized_specs:
+        base_id = str(spec["base_scenario_id"])
+        base = frame.loc[frame["scenario_id"].astype(str).eq(base_id)].copy()
+        base = base.sort_values(
+            ["registered_task_idx", "replicate", "hypothesis_id"], kind="stable"
+        ).reset_index(drop=True)
+        task_count = base[["registered_task_idx", "replicate"]].drop_duplicates().shape[0]
+        if expected_tasks_per_base is not None and task_count != int(expected_tasks_per_base):
+            raise ValueError("effect-retargeting base task count differs from contract")
+        old_positive_values = sorted(
+            value for value in base["true_effect"].astype(float).unique() if value > 0.0
+        )
+        if (base["true_effect"].astype(float) < 0.0).any() or len(old_positive_values) > 1:
+            raise ValueError("effect-retargeting requires all-null or one positive old effect")
+        old_active = base["true_effect"].astype(float).gt(0.0)
+        if old_positive_values:
+            active_per_task = old_active.groupby(
+                [base["registered_task_idx"], base["replicate"]]
+            ).sum()
+            if not active_per_task.eq(int(spec["active_count"])).all():
+                raise ValueError("effect-retargeting active pattern differs from scenario spec")
+            active_ids = base.loc[old_active].groupby(
+                ["registered_task_idx", "replicate"], sort=False
+            )["hypothesis_id"].agg(tuple)
+        else:
+            active_ids = pd.Series(
+                [expected_ids[: int(spec["active_count"])]], dtype=object
+            )
+        expected_active_ids = expected_ids[: int(spec["active_count"])]
+        if not active_ids.map(lambda value: value == expected_active_ids).all():
+            raise ValueError("effect-retargeting active hypotheses are not the registered prefix")
+
+        transformed = base.copy()
+        transformed["base_scenario_id"] = base_id
+        transformed["base_registered_task_idx"] = transformed["registered_task_idx"].astype(int)
+        target = float(spec["target_effect"])
+        positions = transformed["hypothesis_id"].str[1:].astype(int)
+        target_active = positions.le(int(spec["active_count"]))
+        transformed.loc[target_active, "observed_effect"] = (
+            transformed.loc[target_active, "observed_effect"].astype(float)
+            - transformed.loc[target_active, "true_effect"].astype(float)
+            + target
+        )
+        transformed["true_effect"] = np.where(target_active, target, 0.0)
+        transformed["scenario_id"] = str(spec["scenario_id"])
+        transformed["analysis_specification"] = (
+            str(spec["scenario_id"]) + "__right_tail_primary__realistic_effect"
+        )
+        task_map = {
+            int(value): next_task_idx + index
+            for index, value in enumerate(
+                transformed["base_registered_task_idx"].drop_duplicates().tolist()
+            )
+        }
+        transformed["registered_task_idx"] = transformed[
+            "base_registered_task_idx"
+        ].map(task_map).astype(int)
+        next_task_idx += len(task_map)
+        output.append(transformed)
+
+    combined = pd.concat(output, ignore_index=True)
+    if combined.duplicated(
+        ["registered_task_idx", "scenario_id", "replicate", "hypothesis_id"]
+    ).any():
+        raise RuntimeError("effect-retargeting produced duplicate task hypotheses")
+    return combined
+
+
+@dataclass(frozen=True)
 class DiscoveryPowerAttributionArtifacts:
     hypothesis_results: pd.DataFrame
     task_summary: pd.DataFrame
@@ -280,11 +809,15 @@ def _effect_vector(raw: str, count: int) -> np.ndarray:
     result = np.zeros(count, dtype=float)
     if raw == "all_null":
         return result
-    if raw.startswith("first_5_positive_"):
-        result[:5] = float(raw.rsplit("_", 1)[1])
-        return result
-    if raw == "first_24_positive_0.10":
-        result[:24] = 0.10
+    parts = raw.split("_")
+    if len(parts) == 4 and parts[0] == "first" and parts[2] == "positive":
+        active_count = int(parts[1])
+        effect = float(parts[3])
+        if not 0 < active_count < int(count):
+            raise ValueError("positive-effect count must lie inside the family")
+        if not np.isfinite(effect) or effect <= 0.0:
+            raise ValueError("positive effect must be finite and positive")
+        result[:active_count] = effect
         return result
     if raw == "first_6_positive_0.20_next_6_negative_0.20":
         result[:6], result[6:12] = 0.20, -0.20
@@ -1566,10 +2099,11 @@ def evaluate_bh_fdr_variants(
     results: pd.DataFrame,
     *,
     dataset_id: str,
-    scenario_temporal_dependence: Mapping[str, str],
+    scenario_temporal_dependence: Mapping[str, str] | None = None,
     day_count: int = 494,
     family_size: int = 47,
     alpha: float = 0.05,
+    include_cross_scenario_summary: bool = True,
 ) -> BhFdrEvaluationArtifacts:
     """Evaluate frozen Gaussian variants by task-level BH FDR.
 
@@ -1599,7 +2133,7 @@ def evaluate_bh_fdr_variants(
         raise ValueError("alpha must lie strictly between zero and one")
 
     optional = {
-        "expected_1125_raw_p_value",
+        "expected_1125_raw_p_value", "reference_standard_error",
     }.intersection(results.columns)
     frame = results.loc[:, sorted(required | optional)].copy()
     if frame.isna().any().any():
@@ -1610,13 +2144,19 @@ def evaluate_bh_fdr_variants(
     frame["alternative"] = frame["alternative"].astype(str)
     if not set(frame["alternative"]).issubset({"greater", "two-sided"}):
         raise ValueError("unsupported alternative in BH-FDR input")
-    numeric = frame[
-        ["observed_effect", "uncalibrated_standard_error", "true_effect"]
-    ].to_numpy(dtype=float)
+    numeric_columns = ["observed_effect", "uncalibrated_standard_error", "true_effect"]
+    if "reference_standard_error" in frame:
+        numeric_columns.append("reference_standard_error")
+    numeric = frame[numeric_columns].to_numpy(dtype=float)
     if not np.isfinite(numeric).all():
         raise ValueError("BH-FDR numeric inputs must be finite")
     if (frame["uncalibrated_standard_error"].astype(float) <= 0.0).any():
         raise ValueError("uncalibrated standard errors must be positive")
+    if (
+        "reference_standard_error" in frame
+        and (frame["reference_standard_error"].astype(float) <= 0.0).any()
+    ):
+        raise ValueError("reference standard errors must be positive")
 
     task_keys = [
         "registered_task_idx",
@@ -1640,7 +2180,17 @@ def evaluate_bh_fdr_variants(
     if not invalid.empty:
         raise ValueError("BH-FDR requires complete, ordered fixed-size families")
     scenarios = set(frame["scenario_id"])
-    if scenarios != set(str(key) for key in scenario_temporal_dependence):
+    has_reference = "reference_standard_error" in frame
+    temporal_mapping = {
+        str(key): str(value)
+        for key, value in (scenario_temporal_dependence or {}).items()
+    }
+    if has_reference:
+        if temporal_mapping:
+            raise ValueError(
+                "empirical reference standard errors cannot be combined with a temporal mapping"
+            )
+    elif scenarios != set(temporal_mapping):
         raise ValueError("scenario temporal-dependence mapping is incomplete or excessive")
 
     logical = np.where(
@@ -1690,26 +2240,34 @@ def evaluate_bh_fdr_variants(
         candidate["method_variant"] = variant
         variant_frames.append(candidate)
 
-    oracle = frame.copy()
-    oracle_variance = {
-        scenario: exact_gaussian_mean_variance(
-            str(scenario_temporal_dependence[scenario]), day_count=int(day_count)
-        )["exact_mean_variance"]
-        for scenario in sorted(scenarios)
-    }
-    oracle["standard_error"] = oracle["scenario_id"].map(
-        {scenario: sqrt(value) for scenario, value in oracle_variance.items()}
+    reference_frame = frame.copy()
+    if has_reference:
+        reference_frame["standard_error"] = reference_frame[
+            "reference_standard_error"
+        ].astype(float)
+        reference_method = "MC_REFERENCE_BH"
+    else:
+        oracle_variance = {
+            scenario: exact_gaussian_mean_variance(
+                temporal_mapping[scenario], day_count=int(day_count)
+            )["exact_mean_variance"]
+            for scenario in sorted(scenarios)
+        }
+        reference_frame["standard_error"] = reference_frame["scenario_id"].map(
+            {scenario: sqrt(value) for scenario, value in oracle_variance.items()}
+        )
+        reference_method = "ORACLE_BH"
+    reference_frame["test_statistic"] = (
+        reference_frame["observed_effect"].astype(float)
+        / reference_frame["standard_error"]
     )
-    oracle["test_statistic"] = (
-        oracle["observed_effect"].astype(float) / oracle["standard_error"]
+    reference_frame["raw_p_value"] = np.where(
+        reference_frame["alternative"].eq("two-sided"),
+        2.0 * normal_distribution.sf(np.abs(reference_frame["test_statistic"])),
+        normal_distribution.sf(reference_frame["test_statistic"]),
     )
-    oracle["raw_p_value"] = np.where(
-        oracle["alternative"].eq("two-sided"),
-        2.0 * normal_distribution.sf(np.abs(oracle["test_statistic"])),
-        normal_distribution.sf(oracle["test_statistic"]),
-    )
-    oracle["method_variant"] = "ORACLE_BH"
-    variant_frames.append(oracle)
+    reference_frame["method_variant"] = reference_method
+    variant_frames.append(reference_frame)
 
     hypothesis = pd.concat(variant_frames, ignore_index=True)
     raw = hypothesis["raw_p_value"].to_numpy(dtype=float)
@@ -1759,6 +2317,7 @@ def evaluate_bh_fdr_variants(
         fdr=("false_discovery_proportion", "mean"),
         fdp_standard_deviation=("false_discovery_proportion", "std"),
         mean_true_positive_rate=("true_positive_rate", "mean"),
+        true_positive_rate_standard_deviation=("true_positive_rate", "std"),
         any_true_discovery_rate=("any_true_discovery", "mean"),
         any_false_discovery_rate=("any_false_discovery", "mean"),
         mean_discovery_count=("discovery_count", "mean"),
@@ -1776,6 +2335,31 @@ def evaluate_bh_fdr_variants(
     margin = 1.96 * scenario["fdr_monte_carlo_standard_error"]
     scenario["fdr_ci95_lower"] = (scenario["fdr"] - margin).clip(0.0, 1.0)
     scenario["fdr_ci95_upper"] = (scenario["fdr"] + margin).clip(0.0, 1.0)
+    scenario["true_positive_rate_monte_carlo_standard_error"] = (
+        scenario["true_positive_rate_standard_deviation"]
+        / np.sqrt(scenario["task_count"].astype(float))
+    )
+    tpr_margin = 1.96 * scenario[
+        "true_positive_rate_monte_carlo_standard_error"
+    ]
+    scenario["true_positive_rate_ci95_lower"] = (
+        scenario["mean_true_positive_rate"] - tpr_margin
+    ).clip(0.0, 1.0)
+    scenario["true_positive_rate_ci95_upper"] = (
+        scenario["mean_true_positive_rate"] + tpr_margin
+    ).clip(0.0, 1.0)
+    for column in ("any_true_discovery", "any_false_discovery"):
+        rate_column = f"{column}_rate"
+        standard_error = np.sqrt(
+            scenario[rate_column] * (1.0 - scenario[rate_column])
+            / scenario["task_count"].astype(float)
+        )
+        scenario[f"{rate_column}_ci95_lower"] = (
+            scenario[rate_column] - 1.96 * standard_error
+        ).clip(0.0, 1.0)
+        scenario[f"{rate_column}_ci95_upper"] = (
+            scenario[rate_column] + 1.96 * standard_error
+        ).clip(0.0, 1.0)
 
     true_hypothesis = (
         hypothesis.loc[hypothesis["is_true_alternative"]]
@@ -1839,21 +2423,24 @@ def evaluate_bh_fdr_variants(
         null_ks, on=calibration_keys, how="left", validate="one_to_one"
     )
 
-    right_tail = scenario.loc[scenario["analysis_family"].eq("right_tail_primary")]
-    cross = right_tail.groupby(
-        ["dataset_id", "method_variant", "analysis_family"],
-        sort=True,
-        as_index=False,
-    ).agg(
-        scenario_count=("scenario_id", "nunique"),
-        equal_weight_mean_fdr=("fdr", "mean"),
-        equal_weight_mean_true_positive_rate=("mean_true_positive_rate", "mean"),
-        equal_weight_any_true_discovery_rate=("any_true_discovery_rate", "mean"),
-        equal_weight_any_false_discovery_rate=("any_false_discovery_rate", "mean"),
-        equal_weight_mean_discovery_count=("mean_discovery_count", "mean"),
-    )
-    if not cross["scenario_count"].eq(len(scenarios)).all():
-        raise ValueError("right-tail cross-scenario summary is incomplete")
+    if include_cross_scenario_summary:
+        right_tail = scenario.loc[scenario["analysis_family"].eq("right_tail_primary")]
+        cross = right_tail.groupby(
+            ["dataset_id", "method_variant", "analysis_family"],
+            sort=True,
+            as_index=False,
+        ).agg(
+            scenario_count=("scenario_id", "nunique"),
+            equal_weight_mean_fdr=("fdr", "mean"),
+            equal_weight_mean_true_positive_rate=("mean_true_positive_rate", "mean"),
+            equal_weight_any_true_discovery_rate=("any_true_discovery_rate", "mean"),
+            equal_weight_any_false_discovery_rate=("any_false_discovery_rate", "mean"),
+            equal_weight_mean_discovery_count=("mean_discovery_count", "mean"),
+        )
+        if not cross["scenario_count"].eq(len(scenarios)).all():
+            raise ValueError("right-tail cross-scenario summary is incomplete")
+    else:
+        cross = pd.DataFrame()
 
     keep = [
         "dataset_id", "method_variant", "registered_task_idx", "scenario_id",
@@ -1871,6 +2458,325 @@ def evaluate_bh_fdr_variants(
         true_hypothesis_summary=true_hypothesis,
         raw_p_value_calibration_summary=raw_p_value_calibration,
         cross_scenario_summary=cross,
+    )
+
+
+def summarize_randomized_true_hypotheses(
+    hypothesis_results: pd.DataFrame,
+) -> pd.DataFrame:
+    """Summarize conditional discovery rates when truth identities vary by task."""
+    required = {
+        "dataset_id", "method_variant", "scenario_id", "analysis_family",
+        "registered_task_idx", "hypothesis_id", "true_effect", "discovered",
+        "is_true_alternative",
+    }
+    missing = sorted(required.difference(hypothesis_results.columns))
+    if missing:
+        raise ValueError("randomized-truth summary missing columns: " + ", ".join(missing))
+    frame = hypothesis_results.loc[:, sorted(required)].copy()
+    if frame.isna().any().any():
+        raise ValueError("randomized-truth summary must be complete")
+    if frame.duplicated(
+        ["dataset_id", "method_variant", "scenario_id", "analysis_family",
+         "registered_task_idx", "hypothesis_id"]
+    ).any():
+        raise ValueError("randomized-truth summary contains duplicate task hypotheses")
+    active = frame.loc[frame["is_true_alternative"].astype(bool)].copy()
+    if active.empty:
+        return pd.DataFrame(
+            columns=[
+                "dataset_id", "method_variant", "scenario_id", "analysis_family",
+                "hypothesis_id", "assigned_task_count", "conditional_discovery_rate",
+                "mean_true_effect", "minimum_true_effect", "maximum_true_effect",
+            ]
+        )
+    if (active["true_effect"].astype(float) <= 0.0).any():
+        raise ValueError("right-tail true alternatives must have positive effects")
+    keys = [
+        "dataset_id", "method_variant", "scenario_id", "analysis_family",
+        "hypothesis_id",
+    ]
+    return active.groupby(keys, sort=True, as_index=False).agg(
+        assigned_task_count=("registered_task_idx", "size"),
+        conditional_discovery_rate=("discovered", "mean"),
+        mean_true_effect=("true_effect", "mean"),
+        minimum_true_effect=("true_effect", "min"),
+        maximum_true_effect=("true_effect", "max"),
+    )
+
+
+def summarize_empirical_bh_diagnostics(
+    task_summary: pd.DataFrame,
+    scenario_summary: pd.DataFrame,
+    scenario_manifest: pd.DataFrame,
+) -> EmpiricalBhDiagnosticArtifacts:
+    """Summarize paired method differences and registered block sensitivity."""
+    task_required = {
+        "dataset_id", "method_variant", "registered_task_idx", "scenario_id",
+        "analysis_family", "replicate", "false_discovery_proportion",
+        "true_positive_rate", "any_true_discovery", "any_false_discovery",
+    }
+    scenario_required = {
+        "dataset_id", "method_variant", "scenario_id", "analysis_family",
+        "fdr", "mean_true_positive_rate", "any_true_discovery_rate",
+        "any_false_discovery_rate", "mean_discovery_count",
+    }
+    manifest_required = {
+        "scenario_id", "block_length", "active_count", "shrinkage_multiplier", "role",
+    }
+    for name, frame, required in (
+        ("task_summary", task_summary, task_required),
+        ("scenario_summary", scenario_summary, scenario_required),
+        ("scenario_manifest", scenario_manifest, manifest_required),
+    ):
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            raise ValueError(f"{name} must be a non-empty DataFrame")
+        missing = sorted(required.difference(frame.columns))
+        if missing:
+            raise ValueError(f"{name} missing columns: " + ", ".join(missing))
+
+    methods = tuple(sorted(task_summary["method_variant"].astype(str).unique()))
+    if len(methods) < 2:
+        raise ValueError("paired method diagnostics require at least two methods")
+    identity = [
+        "dataset_id", "registered_task_idx", "scenario_id", "analysis_family", "replicate",
+    ]
+    metrics = (
+        "false_discovery_proportion", "true_positive_rate",
+        "any_true_discovery", "any_false_discovery",
+    )
+    paired_rows: list[dict[str, object]] = []
+    for scenario_id, scenario_tasks in task_summary.groupby("scenario_id", sort=True):
+        for left_index, left_method in enumerate(methods):
+            for right_method in methods[left_index + 1:]:
+                left = scenario_tasks.loc[
+                    scenario_tasks["method_variant"].astype(str).eq(left_method),
+                    identity + list(metrics),
+                ]
+                right = scenario_tasks.loc[
+                    scenario_tasks["method_variant"].astype(str).eq(right_method),
+                    identity + list(metrics),
+                ]
+                merged = left.merge(
+                    right, on=identity, how="inner", validate="one_to_one",
+                    suffixes=("_left", "_right"),
+                )
+                if len(left) != len(right) or len(merged) != len(left):
+                    raise ValueError("paired method comparison is incomplete")
+                for metric in metrics:
+                    differences = (
+                        merged[f"{metric}_left"].astype(float)
+                        - merged[f"{metric}_right"].astype(float)
+                    ).dropna()
+                    count = len(differences)
+                    if count == 0:
+                        continue
+                    mean = float(differences.mean())
+                    standard_error = (
+                        float(differences.std(ddof=1) / np.sqrt(count)) if count > 1 else 0.0
+                    )
+                    paired_rows.append({
+                        "scenario_id": str(scenario_id),
+                        "left_method": left_method,
+                        "right_method": right_method,
+                        "metric": metric,
+                        "paired_task_count": count,
+                        "mean_left_minus_right": mean,
+                        "ci95_lower": mean - 1.96 * standard_error,
+                        "ci95_upper": mean + 1.96 * standard_error,
+                    })
+
+    merged_scenario = scenario_summary.merge(
+        scenario_manifest.loc[:, sorted(manifest_required)],
+        on="scenario_id", how="left", validate="many_to_one",
+    )
+    if merged_scenario["block_length"].isna().any():
+        raise ValueError("scenario manifest does not cover every scenario summary row")
+    sensitivity = merged_scenario.loc[
+        merged_scenario["active_count"].eq(0)
+        | (
+            merged_scenario["active_count"].eq(17)
+            & merged_scenario["shrinkage_multiplier"].eq(0.75)
+        ),
+        [
+            "dataset_id", "method_variant", "scenario_id", "analysis_family", "role",
+            "block_length", "active_count", "shrinkage_multiplier", "fdr",
+            "mean_true_positive_rate", "any_true_discovery_rate",
+            "any_false_discovery_rate", "mean_discovery_count",
+        ],
+    ].copy()
+    expected_blocks = {7, 14, 28}
+    for _, group in sensitivity.groupby(
+        ["method_variant", "active_count", "shrinkage_multiplier"], dropna=False
+    ):
+        if set(group["block_length"].astype(int)) != expected_blocks:
+            raise ValueError("block sensitivity does not contain 7/14/28-day rows")
+    return EmpiricalBhDiagnosticArtifacts(
+        paired_method_differences=pd.DataFrame(paired_rows),
+        block_length_sensitivity=sensitivity.sort_values(
+            ["active_count", "method_variant", "block_length"], kind="mergesort"
+        ).reset_index(drop=True),
+    )
+
+
+def evaluate_realistic_effect_power(
+    base_results: pd.DataFrame,
+    scenario_specs: Sequence[Mapping[str, object]],
+    *,
+    day_count: int = 494,
+    family_size: int = 47,
+    expected_tasks_per_base: int = 2000,
+    alpha: float = 0.05,
+) -> RealisticEffectPowerArtifacts:
+    """Evaluate a frozen paired realistic-effect grid without pooling scenarios."""
+    required_spec = {
+        "scenario_id", "base_scenario_id", "structure_id", "effect_label",
+        "target_effect", "active_count", "temporal_dependence",
+    }
+    specs = [dict(spec) for spec in scenario_specs]
+    if not specs:
+        raise ValueError("realistic-effect scenario specs must not be empty")
+    for spec in specs:
+        missing = sorted(required_spec.difference(spec))
+        if missing:
+            raise ValueError("realistic-effect scenario spec missing: " + ", ".join(missing))
+    metadata = pd.DataFrame(specs)
+    if metadata["scenario_id"].astype(str).duplicated().any():
+        raise ValueError("realistic-effect scenario ids must be unique")
+    structure_counts = metadata.groupby("structure_id").agg(
+        scenario_count=("scenario_id", "size"),
+        effect_count=("target_effect", "nunique"),
+        base_count=("base_scenario_id", "nunique"),
+        active_count_count=("active_count", "nunique"),
+        temporal_count=("temporal_dependence", "nunique"),
+    )
+    if (
+        structure_counts["scenario_count"].ne(3).any()
+        or structure_counts["effect_count"].ne(3).any()
+        or structure_counts["base_count"].ne(1).any()
+        or structure_counts["active_count_count"].ne(1).any()
+        or structure_counts["temporal_count"].ne(1).any()
+    ):
+        raise ValueError("each realistic-effect structure requires three paired effect levels")
+
+    counterfactual = retarget_additive_effect_scenarios(
+        base_results,
+        specs,
+        family_size=int(family_size),
+        expected_tasks_per_base=int(expected_tasks_per_base),
+    )
+    temporal = {
+        str(spec["scenario_id"]): str(spec["temporal_dependence"])
+        for spec in specs
+    }
+    bh = evaluate_bh_fdr_variants(
+        counterfactual,
+        dataset_id="realistic_effect_grid",
+        scenario_temporal_dependence=temporal,
+        day_count=int(day_count),
+        family_size=int(family_size),
+        alpha=float(alpha),
+    )
+    meta_columns = [
+        "scenario_id", "base_scenario_id", "structure_id", "effect_label",
+        "target_effect", "active_count", "temporal_dependence",
+    ]
+    scenario = bh.scenario_summary.merge(
+        metadata[meta_columns], on="scenario_id", how="left", validate="many_to_one"
+    )
+    if scenario["target_effect"].isna().any():
+        raise RuntimeError("realistic-effect scenario metadata failed to join")
+    task = bh.task_summary.merge(
+        metadata[meta_columns], on="scenario_id", how="left", validate="many_to_one"
+    )
+
+    def summarize_differences(
+        left: pd.DataFrame,
+        right: pd.DataFrame,
+        keys: Sequence[str],
+        *,
+        contrast_type: str,
+        left_label: str,
+        right_label: str,
+    ) -> dict[str, object]:
+        paired = left[list(keys) + ["true_positive_rate"]].merge(
+            right[list(keys) + ["true_positive_rate"]],
+            on=list(keys), how="inner", validate="one_to_one", suffixes=("_left", "_right"),
+        )
+        if len(paired) != int(expected_tasks_per_base):
+            raise ValueError("paired realistic-effect contrast is incomplete")
+        differences = (
+            paired["true_positive_rate_right"] - paired["true_positive_rate_left"]
+        ).to_numpy(dtype=float)
+        if not np.isfinite(differences).all():
+            raise ValueError("paired realistic-effect contrast contains non-finite values")
+        standard_error = float(np.std(differences, ddof=1) / np.sqrt(len(differences)))
+        mean = float(np.mean(differences))
+        return {
+            "contrast_type": contrast_type,
+            "left_label": left_label,
+            "right_label": right_label,
+            "task_count": int(len(differences)),
+            "mean_true_positive_rate_difference": mean,
+            "monte_carlo_standard_error": standard_error,
+            "ci95_lower": max(-1.0, mean - 1.96 * standard_error),
+            "ci95_upper": min(1.0, mean + 1.96 * standard_error),
+        }
+
+    effect_rows: list[dict[str, object]] = []
+    for (structure_id, method), group in task.groupby(
+        ["structure_id", "method_variant"], sort=True
+    ):
+        levels = sorted(group["target_effect"].astype(float).unique())
+        if len(levels) != 3:
+            raise ValueError("paired effect contrast requires exactly three effect levels")
+        for lower, upper in zip(levels[:-1], levels[1:]):
+            left = group.loc[group["target_effect"].astype(float).eq(lower)]
+            right = group.loc[group["target_effect"].astype(float).eq(upper)]
+            row = summarize_differences(
+                left, right, ["replicate"], contrast_type="adjacent_effect",
+                left_label=f"effect_{lower:.2f}", right_label=f"effect_{upper:.2f}",
+            )
+            row.update(
+                {
+                    "structure_id": structure_id,
+                    "method_variant": method,
+                    "lower_effect": lower,
+                    "upper_effect": upper,
+                }
+            )
+            effect_rows.append(row)
+
+    method_rows: list[dict[str, object]] = []
+    for scenario_id, group in task.groupby("scenario_id", sort=True):
+        oracle = group.loc[group["method_variant"].eq("ORACLE_BH")]
+        if oracle.empty:
+            raise ValueError("paired method contrast requires ORACLE_BH")
+        meta = metadata.loc[metadata["scenario_id"].astype(str).eq(str(scenario_id))].iloc[0]
+        for method in ("AR_BIC_1000_BH", "AR_BIC_1125_BH"):
+            practical = group.loc[group["method_variant"].eq(method)]
+            row = summarize_differences(
+                practical, oracle, ["replicate"], contrast_type="oracle_minus_practical",
+                left_label=method, right_label="ORACLE_BH",
+            )
+            row.update(
+                {
+                    "scenario_id": scenario_id,
+                    "structure_id": meta["structure_id"],
+                    "target_effect": float(meta["target_effect"]),
+                    "practical_method": method,
+                }
+            )
+            method_rows.append(row)
+
+    return RealisticEffectPowerArtifacts(
+        counterfactual_inputs=counterfactual,
+        bh_evaluation=bh,
+        scenario_summary=scenario.sort_values(
+            ["structure_id", "target_effect", "method_variant"]
+        ).reset_index(drop=True),
+        paired_effect_contrasts=pd.DataFrame(effect_rows),
+        paired_method_contrasts=pd.DataFrame(method_rows),
     )
 
 

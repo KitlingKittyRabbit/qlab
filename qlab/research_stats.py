@@ -39,6 +39,13 @@ class AutoRegressiveSpectralHolmArtifacts:
 
 
 @dataclass(frozen=True)
+class AutoRegressiveSpectralBhArtifacts:
+    summary: pd.DataFrame
+    selected_coefficients: pd.DataFrame
+    family_summary: pd.DataFrame
+
+
+@dataclass(frozen=True)
 class RandomizationStepdownMaxTArtifacts:
     summary: pd.DataFrame
     null_t_values: pd.DataFrame
@@ -380,6 +387,68 @@ def autoregressive_spectral_holm_test(
         columns=["hypothesis_id", "lag", "coefficient"],
     )
     return AutoRegressiveSpectralHolmArtifacts(summary, coefficients)
+
+
+def autoregressive_spectral_bh_test(
+    daily_centered_sums: pd.DataFrame,
+    daily_counts: pd.DataFrame,
+    observed_effects: pd.Series,
+    *,
+    order_criterion: str,
+    standard_error_multiplier: float = 1.0,
+    alternative: str = "greater",
+    expected_hypothesis_count: int = 47,
+    alpha: float = 0.05,
+) -> AutoRegressiveSpectralBhArtifacts:
+    """AR spectral marginal tests with task-level Benjamini-Hochberg FDR control.
+
+    The marginal estimates are exactly those of the tested AR spectral entry.
+    Only the complete-family multiplicity contract changes from Holm to BH.
+    """
+    if not 0.0 < float(alpha) < 1.0:
+        raise ValueError("alpha must lie strictly between zero and one")
+    marginal = autoregressive_spectral_holm_test(
+        daily_centered_sums,
+        daily_counts,
+        observed_effects,
+        order_criterion=order_criterion,
+        standard_error_multiplier=standard_error_multiplier,
+        alternative=alternative,
+        expected_hypothesis_count=expected_hypothesis_count,
+    )
+    summary = marginal.summary.drop(
+        columns=["holm_adjusted_p_value", "family_adjusted_p_value"]
+    ).copy()
+    raw_column = (
+        "raw_one_sided_p_value"
+        if alternative == "greater"
+        else "raw_two_sided_p_value"
+    )
+    summary["bh_adjusted_q_value"] = benjamini_hochberg_q_values(
+        summary[raw_column]
+    )
+    summary["family_adjusted_p_value"] = summary["bh_adjusted_q_value"]
+    summary["inference_engine"] = "autoregressive_spectral_normal_bh"
+    summary["alpha"] = float(alpha)
+    summary["discovered"] = summary["bh_adjusted_q_value"].le(float(alpha))
+    family_summary = pd.DataFrame(
+        [
+            {
+                "hypothesis_count": int(len(summary)),
+                "discovery_count": int(summary["discovered"].sum()),
+                "alpha": float(alpha),
+                "alternative": str(alternative),
+                "order_criterion": str(order_criterion).upper(),
+                "standard_error_multiplier": float(standard_error_multiplier),
+                "inference_engine": "autoregressive_spectral_normal_bh",
+            }
+        ]
+    )
+    return AutoRegressiveSpectralBhArtifacts(
+        summary=summary,
+        selected_coefficients=marginal.selected_coefficients.copy(),
+        family_summary=family_summary,
+    )
 
 
 def annualized_sharpe_from_periods(
