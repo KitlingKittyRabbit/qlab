@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from qlab.data.crypto import data_roots
+
 
 def load_paths_module():
     sys.modules.pop("qlab.data.crypto.paths", None)
@@ -82,3 +84,38 @@ def test_trade_env_override_supports_relative_workspace_paths(tmp_path, monkeypa
     paths = load_paths_module()
 
     assert paths.TRADE_ENV_PATH == paths.WORKSPACE_ROOT / relative_env
+
+
+def test_canonical_resolver_explicit_argument_wins_without_environment(tmp_path, monkeypatch):
+    monkeypatch.delenv("QLAB_CRYPTO_DATA_DIR", raising=False)
+    monkeypatch.delenv("COINGLASS_DATA_DIR", raising=False)
+    monkeypatch.setenv("QLAB_TRADE_ENV_PATH", str(tmp_path / "missing.env"))
+
+    explicit = tmp_path / "explicit-root"
+
+    assert data_roots.resolve_data_root(explicit) == explicit
+
+
+def test_canonical_resolver_uses_same_relative_anchor_for_process_and_env_file(tmp_path, monkeypatch):
+    relative = Path("relative") / "crypto-data"
+    env_file = tmp_path / "trade.env"
+    env_file.write_text("QLAB_CRYPTO_DATA_DIR=relative/crypto-data\n", encoding="utf-8")
+    monkeypatch.setenv("QLAB_TRADE_ENV_PATH", str(env_file))
+    monkeypatch.delenv("QLAB_CRYPTO_DATA_DIR", raising=False)
+    monkeypatch.delenv("COINGLASS_DATA_DIR", raising=False)
+
+    from_file = data_roots.resolve_data_root()
+
+    monkeypatch.setenv("QLAB_CRYPTO_DATA_DIR", str(relative))
+    from_process = data_roots.resolve_data_root()
+
+    assert from_file == from_process == data_roots.WORKSPACE_ROOT / relative
+
+
+def test_canonical_resolver_does_not_use_existing_sibling_as_fallback(tmp_path, monkeypatch):
+    monkeypatch.delenv("QLAB_CRYPTO_DATA_DIR", raising=False)
+    monkeypatch.delenv("COINGLASS_DATA_DIR", raising=False)
+    monkeypatch.setenv("QLAB_TRADE_ENV_PATH", str(tmp_path / "missing.env"))
+
+    with pytest.raises(RuntimeError, match="Crypto data root is not configured"):
+        data_roots.resolve_data_root()

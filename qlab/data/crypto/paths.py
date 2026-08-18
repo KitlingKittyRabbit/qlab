@@ -1,62 +1,19 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
-
-WORKSPACE_ROOT = Path(__file__).resolve().parents[4]
-QLAB_REPO_ROOT = WORKSPACE_ROOT / "qlab"
-LEGACY_REPO_DATA_ROOT = QLAB_REPO_ROOT / "data" / "crypto"
-LEGACY_TRADE_ENV_PATH = WORKSPACE_ROOT / "trade" / "crypto_signal" / ".env"
-
-
-def _load_env_file(path: Path) -> dict[str, str]:
-    env: dict[str, str] = {}
-    if not path.exists():
-        return env
-    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        env[key.strip()] = value.strip()
-    return env
+from .data_roots import (
+    LEGACY_REPO_DATA_ROOT,
+    WORKSPACE_ROOT,
+    resolve_data_root,
+    resolve_trade_env_path,
+)
 
 
-def _resolve_trade_env_path() -> Path:
-    raw_value = os.environ.get("QLAB_TRADE_ENV_PATH", "").strip() or os.environ.get(
-        "QLAB_CRYPTO_ENV_PATH", ""
-    ).strip()
-    if raw_value:
-        candidate = Path(raw_value).expanduser()
-        return candidate if candidate.is_absolute() else (WORKSPACE_ROOT / candidate)
-
-    return LEGACY_TRADE_ENV_PATH
+TRADE_ENV_PATH = resolve_trade_env_path()
 
 
-TRADE_ENV_PATH = _resolve_trade_env_path()
-
-
-def _resolve_data_root() -> Path:
-    raw_value = os.environ.get("QLAB_CRYPTO_DATA_DIR", "").strip() or os.environ.get(
-        "COINGLASS_DATA_DIR", ""
-    ).strip()
-    if not raw_value:
-        env_file_values = _load_env_file(_resolve_trade_env_path())
-        raw_value = env_file_values.get("QLAB_CRYPTO_DATA_DIR", "").strip() or env_file_values.get(
-            "COINGLASS_DATA_DIR", ""
-        ).strip()
-    if not raw_value:
-        raise RuntimeError(
-            "Crypto data root is not configured. Set QLAB_CRYPTO_DATA_DIR "
-            "(preferred) or COINGLASS_DATA_DIR. For temporary compatibility, "
-            f"you may point that env var at the legacy repo path: {LEGACY_REPO_DATA_ROOT}"
-        )
-    candidate = Path(raw_value).expanduser()
-    return candidate if candidate.is_absolute() else (WORKSPACE_ROOT / candidate)
-
-
-DATA_ROOT = _resolve_data_root()
+DATA_ROOT = resolve_data_root()
 CACHE_DIR = DATA_ROOT / "caches"
 MANIFEST_DIR = DATA_ROOT / "manifests"
 RAW_HISTORY_ROOT = DATA_ROOT / "raw_history"

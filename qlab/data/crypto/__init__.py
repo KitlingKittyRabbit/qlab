@@ -24,6 +24,8 @@ _PATH_EXPORTS = {
     "manifest_path",
 }
 
+_DATA_ROOT_EXPORTS = {"resolve_data_root"}
+
 _PANEL_EXPORTS = {
     "build_control_panel",
     "forward_returns_for_symbol",
@@ -36,6 +38,7 @@ _PANEL_EXPORTS = {
 
 __all__ = sorted(
     _PATH_EXPORTS
+    | _DATA_ROOT_EXPORTS
     | _PANEL_EXPORTS
     | {
         "CORE_SYMBOLS",
@@ -55,6 +58,11 @@ def __getattr__(name: str):
         value = getattr(paths, name)
         globals()[name] = value
         return value
+    if name in _DATA_ROOT_EXPORTS:
+        from .data_roots import resolve_data_root
+
+        globals()[name] = resolve_data_root
+        return resolve_data_root
     if name in _PANEL_EXPORTS:
         from . import panel
 

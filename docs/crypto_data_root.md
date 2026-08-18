@@ -14,10 +14,11 @@
 
 ## 当前行为
 
-- 如果进程环境里设置了 `QLAB_CRYPTO_DATA_DIR`，则优先使用该目录作为正式数据根。
-- 如果没有设置 `QLAB_CRYPTO_DATA_DIR`，但设置了 `COINGLASS_DATA_DIR`，也会使用该目录。
-- 如果进程环境里没有这两个变量，qlab 还会继续尝试从当前运行进程显式提供的 env 文件里读取同名配置。
+- 所有正式入口共享 `qlab.data.crypto.data_roots.resolve_data_root()`。
+- 显式函数参数优先于进程环境；进程环境按 `QLAB_CRYPTO_DATA_DIR`、`COINGLASS_DATA_DIR` 顺序优先；最后才读取兼容 trade `.env` 中的同名配置。
+- 相对路径统一相对于工作区根目录，而不是当前进程工作目录。
 - 如果环境和已知 `.env` 文件里都没有这两个变量，qlab 会直接报错，不再偷偷回到仓内 `data/crypto`。
+- 即使同级存在 `qlab_crypto_data/`，也不会被自动选用；必须显式传入或配置数据根。
 - 如果需要临时兼容旧目录，也必须显式把 `QLAB_CRYPTO_DATA_DIR` 指向旧的仓内路径。
 - 如果没有设置 `QLAB_TRADE_ENV_PATH`，刷新脚本只会按兼容逻辑查看旧的 trade `.env` 路径；公开 qlab 不假定任何私有仓库结构。
 

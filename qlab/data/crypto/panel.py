@@ -11,6 +11,7 @@ import pandas as pd
 
 from ...signal import rank_standardize_cross_section
 from .binance_um_klines import execution_opens
+from .panel_statistics import rank_standardize_grouped_series
 from .strategy_time_contract import (
     ContinuousHoldingTimeContract,
     execution_timestamps,
@@ -250,20 +251,6 @@ def rank_standardize_with_nans(series: pd.Series) -> pd.Series:
         return result
     result.loc[valid.index] = rank_standardize_cross_section(valid)
     return result
-
-
-def rank_standardize_grouped_series(
-    series: pd.Series,
-    *,
-    level: str | int = "decision_ts",
-) -> pd.Series:
-    """Vectorized rank standardization within each decision cross-section."""
-    grouped = series.groupby(level=level, sort=False)
-    ranks = grouped.rank(method="average")
-    counts = grouped.transform("count")
-    scaled = -1.0 + (ranks - 1.0) * (2.0 / (counts - 1.0))
-    scaled = scaled.where(counts > 1, 0.0)
-    return scaled.where(series.notna()).astype(float).rename(series.name)
 
 
 def price_controls_for_symbol(

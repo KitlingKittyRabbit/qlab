@@ -8,7 +8,6 @@ return labels, run research gates, or authorize strategy conclusions.
 """
 
 from dataclasses import dataclass
-import os
 import pickle
 from pathlib import Path
 from typing import Any, Sequence
@@ -17,11 +16,11 @@ import numpy as np
 import pandas as pd
 
 from . import keystore_coinglass_factors as factor_registry
-from .panel import rank_standardize_grouped_series
+from .data_roots import resolve_data_root as _resolve_canonical_data_root
+from .panel_statistics import rank_standardize_grouped_series
 from .symbol_universe import normalize_symbol_list
 
 
-WORKSPACE_ROOT = Path(__file__).resolve().parents[4]
 RAW_SOURCE_BAR_DURATION = {
     "1h": pd.Timedelta(hours=1),
     "2h": pd.Timedelta(hours=2),
@@ -45,16 +44,7 @@ class PanelArtifacts:
 
 
 def resolve_data_root(data_root: Path | str | None = None) -> Path:
-    if data_root is not None:
-        root = Path(data_root).expanduser()
-    else:
-        raw_value = os.environ.get("QLAB_CRYPTO_DATA_DIR", "").strip() or os.environ.get(
-            "COINGLASS_DATA_DIR", ""
-        ).strip()
-        root = Path(raw_value).expanduser() if raw_value else WORKSPACE_ROOT / "qlab_crypto_data"
-    if not root.exists():
-        raise FileNotFoundError(f"crypto data root does not exist: {root}")
-    return root
+    return _resolve_canonical_data_root(data_root)
 
 
 def load_admitted_symbols_from_audit(
