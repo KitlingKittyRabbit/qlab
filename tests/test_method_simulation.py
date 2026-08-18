@@ -10,6 +10,15 @@ import pytest
 from sklearn.linear_model import Ridge
 
 from qlab import method_simulation
+from qlab.workspace_paths import resolve_blueprint_root
+
+
+def _blueprint_file(name: str) -> Path:
+    try:
+        root = resolve_blueprint_root(Path(__file__).resolve().parents[2])
+    except RuntimeError as exc:
+        pytest.skip(f"private blueprint repository is unavailable: {exc}")
+    return root / name
 
 
 def _empirical_family_fixture(day_count: int = 40):
@@ -1166,7 +1175,7 @@ def test_minimal_a05_chain_has_frozen_exact_outputs():
 
 
 def test_e1_failure_task_rejects_registry_identity_mismatch():
-    design = Path(__file__).resolve().parents[2] / "蓝图/ksv4_增量信息方法模拟设计清单.json"
+    design = _blueprint_file("ksv4_增量信息方法模拟设计清单.json")
     if not design.exists():
         pytest.skip("private frozen design is outside the qlab-only checkout")
     task = dict(method_simulation.registered_e1_failure_diagnostic_tasks(design)[0])
@@ -1696,10 +1705,13 @@ def test_layer_a_engine_dispatches_e1h_without_bootstrap():
 
 
 def test_joint_inference_task_registries_are_frozen_and_complete():
-    root = Path(__file__).resolve().parents[2]
-    prior_path = root / "蓝图" / "ksv4_增量信息方法模拟设计清单.json"
+    try:
+        blueprint_root = resolve_blueprint_root(Path(__file__).resolve().parents[2])
+    except RuntimeError as exc:
+        pytest.skip(f"private blueprint repository is unavailable: {exc}")
+    prior_path = blueprint_root / "ksv4_增量信息方法模拟设计清单.json"
     revision = json.loads(
-        (root / "蓝图" / "ksv4_增量信息方法修订设计清单.json").read_text()
+        (blueprint_root / "ksv4_增量信息方法修订设计清单.json").read_text()
     )
     development = method_simulation.registered_joint_inference_development_tasks(
         prior_path
@@ -1720,11 +1732,7 @@ def test_joint_inference_task_registries_are_frozen_and_complete():
 
 
 def test_revision_layer_a_task_registries_freeze_development_and_confirmation():
-    prior = (
-        Path(__file__).resolve().parents[2]
-        / "蓝图"
-        / "ksv4_增量信息方法模拟设计清单.json"
-    )
+    prior = _blueprint_file("ksv4_增量信息方法模拟设计清单.json")
     development = method_simulation.registered_joint_inference_development_tasks(
         prior
     )
@@ -1806,11 +1814,7 @@ def test_e1j_multiplier_calibration_mechanically_selects_first_eligible_grid_val
 
 
 def test_revision_task_generates_dataset_once_and_runs_requested_engines(monkeypatch):
-    prior = (
-        Path(__file__).resolve().parents[2]
-        / "蓝图"
-        / "ksv4_增量信息方法模拟设计清单.json"
-    )
+    prior = _blueprint_file("ksv4_增量信息方法模拟设计清单.json")
     task = method_simulation.registered_joint_inference_development_tasks(prior)[0]
     calls = []
 
@@ -1853,11 +1857,7 @@ def test_revision_task_generates_dataset_once_and_runs_requested_engines(monkeyp
 
 
 def test_revision_specifications_reuse_one_dataset_across_e0_block_lengths(monkeypatch):
-    prior = (
-        Path(__file__).resolve().parents[2]
-        / "蓝图"
-        / "ksv4_增量信息方法模拟设计清单.json"
-    )
+    prior = _blueprint_file("ksv4_增量信息方法模拟设计清单.json")
     task = method_simulation.registered_e0_diagnostic_tasks(prior)[0]
     dataset_ids = []
 
@@ -2014,11 +2014,7 @@ def test_staged_resource_projection_treats_cpu_as_reporting_only_but_enforces_me
 
 
 def test_registered_preflight_workload_multipliers_cover_every_frozen_stage():
-    manifest_path = (
-        Path(__file__).resolve().parents[2]
-        / "蓝图"
-        / "ksv4_增量信息方法模拟设计清单.json"
-    )
+    manifest_path = _blueprint_file("ksv4_增量信息方法模拟设计清单.json")
     assert method_simulation.registered_preflight_workload_multipliers(
         manifest_path
     ) == {
@@ -2033,11 +2029,7 @@ def test_registered_preflight_workload_multipliers_cover_every_frozen_stage():
 
 
 def test_registered_layer_b_tasks_cover_frozen_114_in_manifest_order():
-    manifest_path = (
-        Path(__file__).resolve().parents[2]
-        / "蓝图"
-        / "ksv4_增量信息方法模拟设计清单.json"
-    )
+    manifest_path = _blueprint_file("ksv4_增量信息方法模拟设计清单.json")
     tasks = method_simulation.registered_layer_b_tasks(manifest_path)
     assert len(tasks) == 114
     assert [row["task_idx"] for row in tasks] == list(range(114))
@@ -2075,11 +2067,7 @@ def test_registered_layer_b_tasks_cover_frozen_114_in_manifest_order():
 
 
 def test_registered_layer_a_tasks_cover_frozen_variants_and_are_reproducible():
-    manifest_path = (
-        Path(__file__).resolve().parents[2]
-        / "蓝图"
-        / "ksv4_增量信息方法模拟设计清单.json"
-    )
+    manifest_path = _blueprint_file("ksv4_增量信息方法模拟设计清单.json")
     first = method_simulation.registered_layer_a_tasks(manifest_path)
     second = method_simulation.registered_layer_a_tasks(manifest_path)
     assert first == second
@@ -2091,11 +2079,7 @@ def test_registered_layer_a_tasks_cover_frozen_variants_and_are_reproducible():
 
 
 def test_layer_a_variant_entry_runs_only_the_requested_registered_variant(monkeypatch):
-    manifest_path = (
-        Path(__file__).resolve().parents[2]
-        / "蓝图"
-        / "ksv4_增量信息方法模拟设计清单.json"
-    )
+    manifest_path = _blueprint_file("ksv4_增量信息方法模拟设计清单.json")
     tasks = method_simulation.registered_layer_a_tasks(manifest_path)
     task = next(row for row in tasks if row["run_production_equivalent"])
     calls = []
@@ -2129,11 +2113,7 @@ def test_layer_a_variant_entry_runs_only_the_requested_registered_variant(monkey
 
 
 def test_a10_two_sided_variant_is_explicit_and_rejects_other_scenarios(monkeypatch):
-    manifest_path = (
-        Path(__file__).resolve().parents[2]
-        / "蓝图"
-        / "ksv4_增量信息方法模拟设计清单.json"
-    )
+    manifest_path = _blueprint_file("ksv4_增量信息方法模拟设计清单.json")
     tasks = method_simulation.registered_layer_a_tasks(manifest_path)
     a10_task = next(row for row in tasks if row["scenario_id"] == "A10")
     a09_task = next(row for row in tasks if row["scenario_id"] == "A09")
@@ -2468,11 +2448,7 @@ def reduced_layer_b_c_runs():
         return Ridge(alpha=0.5)
 
     method_simulation.substitution._registered_estimator = cheap_registered_estimator
-    manifest_path = (
-        Path(__file__).resolve().parents[2]
-        / "蓝图"
-        / "ksv4_增量信息方法模拟设计清单.json"
-    )
+    manifest_path = _blueprint_file("ksv4_增量信息方法模拟设计清单.json")
     overrides = {
         "day_count": 24,
         "object_count": 6,
@@ -2683,11 +2659,7 @@ def test_layer_b_c_missing_features_use_only_complete_common_support(reduced_lay
 
 @pytest.fixture(scope="module")
 def reduced_temporal_dataset():
-    manifest_path = (
-        Path(__file__).resolve().parents[2]
-        / "蓝图"
-        / "ksv4_增量信息方法模拟设计清单.json"
-    )
+    manifest_path = _blueprint_file("ksv4_增量信息方法模拟设计清单.json")
     return method_simulation.generate_temporal_falsification_dataset(
         manifest_path,
         replicate=0,
@@ -2738,11 +2710,7 @@ def test_temporal_true_alignment_uses_fixed_holding_window(reduced_temporal_data
 
 
 def test_temporal_runner_reuses_signal_side_entry_with_formal_2000(monkeypatch):
-    manifest_path = (
-        Path(__file__).resolve().parents[2]
-        / "蓝图"
-        / "ksv4_增量信息方法模拟设计清单.json"
-    )
+    manifest_path = _blueprint_file("ksv4_增量信息方法模拟设计清单.json")
     calls = []
 
     def cheap_randomization(observations, daily_effects, **kwargs):
