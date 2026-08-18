@@ -255,6 +255,7 @@ def correct_complete_p_value_family(
     stage1_level = float("nan")
     stage2_level = float("nan")
     if correction == "BH":
+        effective_level = level
         discovered, rejection_cutoff = step_up_discoveries(raw, level)
         adjusted = bh_q
         r1 = np.nan
@@ -263,8 +264,8 @@ def correct_complete_p_value_family(
             raw, expected_hypothesis_count=count
         )
         harmonic = float(np.sum(1.0 / np.arange(1, count + 1, dtype=float)))
-        stage2_level = level / harmonic
-        discovered, rejection_cutoff = step_up_discoveries(raw, stage2_level)
+        effective_level = level / harmonic
+        discovered, rejection_cutoff = step_up_discoveries(raw, effective_level)
         r1 = np.nan
     else:
         first_level = level / (1.0 + level)
@@ -274,14 +275,16 @@ def correct_complete_p_value_family(
         r1 = float(r1_int)
         adjusted = np.full(count, np.nan, dtype=float)
         if r1_int == 0:
+            effective_level = first_level
             rejection_cutoff = 0.0
             discovered = np.zeros(count, dtype=bool)
         elif r1_int == count:
-            stage2_level = level
+            effective_level = first_level
             rejection_cutoff = float(raw.max())
             discovered = np.ones(count, dtype=bool)
         else:
             stage2_level = first_level * count / float(count - r1_int)
+            effective_level = stage2_level
             discovered, rejection_cutoff = step_up_discoveries(raw, stage2_level)
 
     summary = pd.DataFrame(
@@ -293,6 +296,7 @@ def correct_complete_p_value_family(
             "discovered": discovered,
             "method": correction,
             "q": level,
+            "effective_bh_level": effective_level,
             "rejection_p_cutoff": float(rejection_cutoff),
             "stage1_bh_level": stage1_level,
             "stage2_bh_level": stage2_level,
@@ -306,6 +310,7 @@ def correct_complete_p_value_family(
             "hypothesis_count": count,
             "discovery_count": int(discovered.sum()),
             "first_stage_discovery_count": r1,
+            "effective_bh_level": effective_level,
             "rejection_p_cutoff": float(rejection_cutoff),
             "stage1_bh_level": stage1_level,
             "stage2_bh_level": stage2_level,
@@ -845,7 +850,7 @@ def self_normalized_circular_block_marginal_p_values(
     """Return frozen E3 self-normalized synchronized-block p-values."""
     if int(n_bootstrap) != 10_000:
         raise ValueError("n_bootstrap must equal 10000 for formal E3/E3S")
-    ids, sums, _, observed, blocks_per_sample = _marginal_bootstrap_inputs(
+    ids, sums, counts, observed, blocks_per_sample = _marginal_bootstrap_inputs(
         daily_centered_sums,
         daily_counts,
         observed_effects,
@@ -858,11 +863,9 @@ def self_normalized_circular_block_marginal_p_values(
     if int(block_length) not in {14, 28}:
         raise ValueError("formal E3/E3S block_length must be 14 or 28")
     centered = sums - sums.mean(axis=0, keepdims=True)
-    cumulative = np.cumsum(centered, axis=0)
-    normalizer = np.sum(cumulative * cumulative, axis=0) / float(len(sums) ** 2)
-    if not np.isfinite(normalizer).all() or (normalizer <= 0.0).any():
-        raise ValueError("self-normalizers must be finite and positive")
-    observed_t = sqrt(float(len(sums))) * observed / np.sqrt(normalizer)
+    observed_artifacts = self_normalized_ratio_standard_error(centered, counts)
+    normalizer = observed_artifacts.self_normalizer
+    observed_t = observed / observed_artifacts.standard_error
     starts = _validated_block_starts(
         block_starts,
         n_bootstrap=n_bootstrap,
@@ -880,15 +883,11 @@ def self_normalized_circular_block_marginal_p_values(
         bootstrap_series = centered[indices]
         bootstrap_effects = bootstrap_series.mean(axis=1)
         bootstrap_influence = bootstrap_series - bootstrap_effects[:, None, :]
-        bootstrap_cumulative = np.cumsum(bootstrap_influence, axis=1)
-        bootstrap_normalizer = np.sum(
-            bootstrap_cumulative * bootstrap_cumulative, axis=1
-        ) / float(len(sums) ** 2)
-        if not np.isfinite(bootstrap_normalizer).all() or (bootstrap_normalizer <= 0.0).any():
-            raise ValueError("bootstrap self-normalizers must be finite and positive")
-        bootstrap_t = sqrt(float(len(sums))) * bootstrap_effects / np.sqrt(
-            bootstrap_normalizer
+        bootstrap_artifacts = self_normalized_ratio_standard_error(
+            bootstrap_influence,
+            np.ones_like(bootstrap_influence),
         )
+        bootstrap_t = bootstrap_effects / bootstrap_artifacts.standard_error
         exceedances += (bootstrap_t >= observed_t[None, :]).sum(axis=0)
     p_values = (1.0 + exceedances) / (int(n_bootstrap) + 1.0)
     summary = pd.DataFrame(

@@ -368,8 +368,12 @@ def test_e3_bootstrap_t_recenters_each_resampled_series(monkeypatch):
         expected_hypothesis_count=1,
         batch_size=10_000,
     )
-    indices = np.zeros((1, 28), dtype=int)
-    indices[:, 14:] = np.arange(14)
+    indices = research_stats._bootstrap_block_indices(
+        starts[:1], block_length=14, day_count=28
+    )
+    np.testing.assert_array_equal(
+        indices, np.concatenate([np.arange(14), np.arange(14)])[None, :]
+    )
     bootstrap_series = centered[indices]
     bootstrap_effect = bootstrap_series.mean(axis=1)
     influence = bootstrap_series - bootstrap_effect[:, None]
@@ -387,6 +391,27 @@ def test_e3_bootstrap_t_recenters_each_resampled_series(monkeypatch):
     assert normal_two_sided_p_value(2.0) < 0.05
     assert math.isnan(normal_two_sided_p_value(float("nan")))
     assert math.isnan(normal_two_sided_p_value(float("inf")))
+
+
+def test_e3_wrapper_matches_self_normalized_primitive():
+    sums, counts, effects = _long_centered_daily_fixture()
+    result = self_normalized_circular_block_marginal_p_values(
+        sums, counts, effects, block_length=14, n_bootstrap=10_000, seed=11,
+        expected_hypothesis_count=2,
+    )
+    sums_values = sums.to_numpy(dtype=float)
+    counts_values = counts.to_numpy(dtype=float)
+    centered = sums_values - sums_values.mean(axis=0, keepdims=True)
+    primitive = research_stats.self_normalized_ratio_standard_error(
+        centered, counts_values
+    )
+    np.testing.assert_allclose(
+        result.summary["self_normalizer"].to_numpy(), primitive.self_normalizer
+    )
+    np.testing.assert_allclose(
+        result.summary["observed_t"].to_numpy(),
+        effects.to_numpy(dtype=float) / primitive.standard_error,
+    )
 
 
 def test_e2_raw_p_value_matches_manual_synchronized_bootstrap(monkeypatch):
@@ -417,6 +442,141 @@ def test_e2_raw_p_value_matches_manual_synchronized_bootstrap(monkeypatch):
 
     assert result.summary.loc[0, "raw_one_sided_p_value"] == pytest.approx(manual_p)
     assert result.summary.loc[0, "evidence_method"] == "E2_SYNC_BLOCK"
+
+
+def test_correction_metadata_pinning_for_bh_by_and_bky_edges():
+    ids = ["a", "b", "c"]
+
+    bh = correct_complete_p_value_family(
+        [0.01, 0.2, 0.5], method="BH", expected_hypothesis_count=3,
+        hypothesis_ids=ids,
+    )
+    row = bh.summary.iloc[0]
+    assert row["effective_bh_level"] == pytest.approx(0.05)
+    assert math.isnan(row["stage1_bh_level"])
+    assert math.isnan(row["stage2_bh_level"])
+
+    by = correct_complete_p_value_family(
+        [0.01, 0.2, 0.5], method="BY", expected_hypothesis_count=3,
+        hypothesis_ids=ids,
+    )
+    harmonic = 1.0 + 1.0 / 2.0 + 1.0 / 3.0
+    row = by.summary.iloc[0]
+    assert row["effective_bh_level"] == pytest.approx(0.05 / harmonic)
+    assert math.isnan(row["stage1_bh_level"])
+    assert math.isnan(row["stage2_bh_level"])
+
+    bky_none = correct_complete_p_value_family(
+        [1.0, 1.0, 1.0], method="TWO_STAGE_BKY", expected_hypothesis_count=3,
+        hypothesis_ids=ids,
+    )
+    row = bky_none.summary.iloc[0]
+    assert row["stage1_bh_level"] == pytest.approx(0.05 / 1.05)
+    assert math.isnan(row["stage2_bh_level"])
+    assert row["effective_bh_level"] == pytest.approx(0.05 / 1.05)
+
+    bky_all = correct_complete_p_value_family(
+        [0.0, 0.0, 0.0], method="TWO_STAGE_BKY", expected_hypothesis_count=3,
+        hypothesis_ids=ids,
+    )
+    row = bky_all.summary.iloc[0]
+    assert row["stage1_bh_level"] == pytest.approx(0.05 / 1.05)
+    assert math.isnan(row["stage2_bh_level"])
+    assert row["effective_bh_level"] == pytest.approx(0.05 / 1.05)
+
+    bky_middle = correct_complete_p_value_family(
+        [0.001, 0.08, 0.4], method="TWO_STAGE_BKY", expected_hypothesis_count=3,
+        hypothesis_ids=ids,
+    )
+    row = bky_middle.summary.iloc[0]
+    expected_stage2 = (0.05 / 1.05) * 3 / 2
+    assert row["stage1_bh_level"] == pytest.approx(0.05 / 1.05)
+    assert row["stage2_bh_level"] == pytest.approx(expected_stage2)
+    assert row["effective_bh_level"] == pytest.approx(expected_stage2)
+
+
+def test_e1_wrapper_fails_closed_and_orders_evidence_direction():
+    sums, counts, effects = _long_centered_daily_fixture()
+    with pytest.raises(ValueError, match="wrong hypothesis count"):
+        hac_marginal_p_values(sums, counts, effects, expected_hypothesis_count=3)
+
+    non_finite = sums.copy()
+    non_finite.iloc[0, 0] = float("nan")
+    with pytest.raises(ValueError, match="finite"):
+        hac_marginal_p_values(non_finite, counts, effects, expected_hypothesis_count=2)
+
+    constant = pd.DataFrame(
+        0.0, index=sums.index, columns=sums.columns
+    )
+    with pytest.raises(ValueError, match="long-run variance"):
+        hac_marginal_p_values(constant, counts, effects, expected_hypothesis_count=2)
+
+    strong_positive = hac_marginal_p_values(
+        sums, counts, pd.Series({"a": 5.0, "b": 0.0}), expected_hypothesis_count=2
+    )
+    assert strong_positive.summary.loc[
+        strong_positive.summary["hypothesis_id"] == "a", "raw_one_sided_p_value"
+    ].iloc[0] < strong_positive.summary.loc[
+        strong_positive.summary["hypothesis_id"] == "b", "raw_one_sided_p_value"
+    ].iloc[0]
+    strong_negative = hac_marginal_p_values(
+        sums, counts, pd.Series({"a": -5.0, "b": 5.0}), expected_hypothesis_count=2
+    )
+    assert strong_negative.summary.loc[
+        strong_negative.summary["hypothesis_id"] == "a", "raw_one_sided_p_value"
+    ].iloc[0] > 0.9
+
+
+def test_e3_wrapper_fails_closed_and_orders_evidence_direction(monkeypatch):
+    sums, counts, effects = _long_centered_daily_fixture()
+    with pytest.raises(ValueError, match="wrong hypothesis count"):
+        self_normalized_circular_block_marginal_p_values(
+            sums, counts, effects, block_length=14, n_bootstrap=10_000, seed=11,
+            expected_hypothesis_count=3,
+        )
+
+    non_finite = sums.copy()
+    non_finite.iloc[0, 0] = float("nan")
+    with pytest.raises(ValueError, match="finite"):
+        self_normalized_circular_block_marginal_p_values(
+            non_finite, counts, effects, block_length=14, n_bootstrap=10_000,
+            seed=11, expected_hypothesis_count=2,
+        )
+
+    constant = pd.DataFrame(0.0, index=sums.index, columns=sums.columns)
+    with pytest.raises(ValueError, match="self-normalizers"):
+        self_normalized_circular_block_marginal_p_values(
+            constant, counts, effects, block_length=14, n_bootstrap=10_000,
+            seed=11, expected_hypothesis_count=2,
+        )
+
+    real_primitive = research_stats.self_normalized_ratio_standard_error
+
+    def fail_on_bootstrap_batch(influence, batch_counts):
+        if np.asarray(influence).ndim == 3:
+            raise ValueError("bootstrap self-normalizers must be finite and positive")
+        return real_primitive(influence, batch_counts)
+
+    monkeypatch.setattr(
+        research_stats,
+        "self_normalized_ratio_standard_error",
+        fail_on_bootstrap_batch,
+    )
+    with pytest.raises(ValueError, match="bootstrap self-normalizers"):
+        self_normalized_circular_block_marginal_p_values(
+            sums, counts, effects, block_length=14, n_bootstrap=10_000,
+            seed=11, expected_hypothesis_count=2,
+        )
+
+    monkeypatch.undo()
+    result = self_normalized_circular_block_marginal_p_values(
+        sums, counts, pd.Series({"a": 5.0, "b": 0.0}), block_length=14,
+        n_bootstrap=10_000, seed=11, expected_hypothesis_count=2,
+    )
+    by_id = result.summary.set_index("hypothesis_id")
+    assert by_id.loc["a", "raw_one_sided_p_value"] < by_id.loc[
+        "b", "raw_one_sided_p_value"
+    ]
 
 
 def test_holm_adjusted_p_values_preserve_order_and_nan():
