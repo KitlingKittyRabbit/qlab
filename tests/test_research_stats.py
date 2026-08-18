@@ -12,9 +12,12 @@ from qlab.research_stats import (
     adaptive_flat_top_restudentized_circular_block_bootstrap_stepdown_max_t,
     annualized_sharpe_from_periods,
     benjamini_hochberg_q_values,
+    benjamini_yekutieli_q_values,
     circular_block_bootstrap_stepdown_max_t,
+    correct_complete_p_value_family,
     dependent_multiplier_bootstrap_stepdown_max_t,
     hac_t_stat,
+    hac_marginal_p_values,
     holm_adjusted_p_values,
     newey_west_max_lags,
     normal_one_sided_p_value,
@@ -28,6 +31,9 @@ from qlab.research_stats import (
     simulation_calibration_self_normalized_stepdown_max_t,
     self_normalized_circular_block_bootstrap_stepdown_max_t,
     self_normalized_ratio_standard_error,
+    self_normalized_circular_block_marginal_p_values,
+    synchronized_circular_block_marginal_p_values,
+    autoregressive_spectral_marginal_p_values,
     simple_t_stat,
 )
 
@@ -178,6 +184,110 @@ def test_normal_two_sided_p_value_is_symmetric():
     assert normal_two_sided_p_value(2.0) == pytest.approx(
         normal_two_sided_p_value(-2.0)
     )
+
+
+def test_complete_family_corrections_cover_bky_edges_and_by():
+    p_values = [0.001, 0.08, 0.4]
+    bh = correct_complete_p_value_family(
+        p_values, method="BH", expected_hypothesis_count=3,
+        hypothesis_ids=["a", "b", "c"]
+    )
+    bky = correct_complete_p_value_family(
+        p_values, method="TWO_STAGE_BKY", expected_hypothesis_count=3,
+        hypothesis_ids=["a", "b", "c"]
+    )
+    by = correct_complete_p_value_family(
+        p_values, method="BY", expected_hypothesis_count=3,
+        hypothesis_ids=["a", "b", "c"]
+    )
+    assert bh.family_summary.loc[0, "discovery_count"] == 1
+    assert bky.family_summary.loc[0, "first_stage_discovery_count"] == 1
+    assert bky.summary["discovered"].tolist() == [True, False, False]
+    assert by.summary["discovered"].tolist() == [True, False, False]
+    assert by.summary["adjusted_q_value"].iloc[0] == pytest.approx(
+        benjamini_yekutieli_q_values(p_values, expected_hypothesis_count=3)[0]
+    )
+    assert correct_complete_p_value_family(
+        [0.0, 0.0, 0.0], method="TWO_STAGE_BKY", expected_hypothesis_count=3,
+        hypothesis_ids=["a", "b", "c"]
+    ).family_summary.loc[0, "discovery_count"] == 3
+    assert correct_complete_p_value_family(
+        [1.0, 1.0, 1.0], method="TWO_STAGE_BKY", expected_hypothesis_count=3,
+        hypothesis_ids=["a", "b", "c"]
+    ).family_summary.loc[0, "discovery_count"] == 0
+
+
+def test_complete_family_corrections_reject_invalid_or_incomplete_families():
+    with pytest.raises(ValueError, match="wrong hypothesis count"):
+        correct_complete_p_value_family(
+            [0.01, 0.02], method="BH", expected_hypothesis_count=3,
+            hypothesis_ids=["a", "b"]
+        )
+    with pytest.raises(ValueError, match="unique"):
+        correct_complete_p_value_family(
+            [0.01, 0.02, 0.2], method="BH", expected_hypothesis_count=3,
+            hypothesis_ids=["a", "a", "c"]
+        )
+    counterexample = correct_complete_p_value_family(
+        [0.04, 0.04, 0.90], method="BH", expected_hypothesis_count=3,
+        hypothesis_ids=["a", "b", "c"]
+    )
+    assert not counterexample.summary["discovered"].any()
+    with pytest.raises(ValueError, match="finite"):
+        correct_complete_p_value_family(
+            [0.01, float("nan"), 0.2], method="BY", expected_hypothesis_count=3,
+            hypothesis_ids=["a", "b", "c"]
+        )
+
+
+def test_marginal_entries_return_complete_families_and_reproduce():
+    sums, counts, effects = _long_centered_daily_fixture()
+    e0 = autoregressive_spectral_marginal_p_values(
+        sums, counts, effects, expected_hypothesis_count=2
+    )
+    e1 = hac_marginal_p_values(
+        sums, counts, effects, expected_hypothesis_count=2
+    )
+    e2 = synchronized_circular_block_marginal_p_values(
+        sums, counts, effects, block_length=4, n_bootstrap=10_000, seed=11,
+        expected_hypothesis_count=2, batch_size=17,
+    )
+    e3 = self_normalized_circular_block_marginal_p_values(
+        sums, counts, effects, block_length=4, n_bootstrap=10_000, seed=11,
+        expected_hypothesis_count=2, batch_size=17,
+    )
+    assert all(len(result.summary) == 2 for result in (e0, e1, e2, e3))
+    repeated = synchronized_circular_block_marginal_p_values(
+        sums, counts, effects, block_length=4, n_bootstrap=10_000, seed=11,
+        expected_hypothesis_count=2, batch_size=17,
+    )
+    pd.testing.assert_frame_equal(e2.summary, repeated.summary)
+    assert e2.summary["raw_one_sided_p_value"].between(0.0, 1.0).all()
+    assert e3.summary["self_normalizer"].gt(0.0).all()
+    assert np.array_equal(e2.block_starts, e3.block_starts)
+    explicit = synchronized_circular_block_marginal_p_values(
+        sums, counts, effects, block_length=4, n_bootstrap=10_000, seed=99,
+        expected_hypothesis_count=2, batch_size=17, block_starts=e2.block_starts,
+    )
+    explicit_e3 = self_normalized_circular_block_marginal_p_values(
+        sums, counts, effects, block_length=4, n_bootstrap=10_000, seed=99,
+        expected_hypothesis_count=2, batch_size=17, block_starts=e2.block_starts,
+    )
+    assert np.array_equal(explicit.block_starts, explicit_e3.block_starts)
+
+
+def test_formal_bootstrap_entries_reject_diagnostic_counts():
+    sums, counts, effects = _long_centered_daily_fixture()
+    with pytest.raises(ValueError, match="10000"):
+        synchronized_circular_block_marginal_p_values(
+            sums, counts, effects, block_length=4, n_bootstrap=9999, seed=11,
+            expected_hypothesis_count=2,
+        )
+    with pytest.raises(ValueError, match="10000"):
+        self_normalized_circular_block_marginal_p_values(
+            sums, counts, effects, block_length=4, n_bootstrap=9999, seed=11,
+            expected_hypothesis_count=2,
+        )
     assert normal_two_sided_p_value(2.0) < 0.05
     assert math.isnan(normal_two_sided_p_value(float("nan")))
     assert math.isnan(normal_two_sided_p_value(float("inf")))

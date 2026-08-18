@@ -6,6 +6,7 @@ import pandas as pd
 
 from qlab import coinglass_substitution as substitution
 from qlab import method_simulation
+from qlab.workspace_paths import resolve_blueprint_root
 
 
 def test_truth_known_b06_runs_real_poly2_paths_through_joint_inference(monkeypatch):
@@ -19,10 +20,8 @@ def test_truth_known_b06_runs_real_poly2_paths_through_joint_inference(monkeypat
 
     monkeypatch.setattr(substitution, "_poly2_registered_design", tracked_poly2)
     registered = substitution.registered_replica_model_specs()
-    design = (
-        Path(__file__).resolve().parents[2]
-        / "蓝图"
-        / "ksv4_增量信息方法模拟设计清单.json"
+    design = resolve_blueprint_root(Path(__file__).resolve().parents[2]) / (
+        "ksv4_增量信息方法模拟设计清单.json"
     )
     artifacts = method_simulation.run_layer_b_c_simulation(
         design,
