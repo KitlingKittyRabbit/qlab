@@ -2459,6 +2459,25 @@ def test_layer_bc_summary_matches_hand_counted_family_rates():
     assert np.isnan(null_summary.scenario_summary.iloc[0]["any_true_detection_rate"])
 
 
+def test_correction_identity_contract_disambiguates_legacy_short_codes():
+    assert method_simulation.FAMILY_ADJUSTMENTS == ("C0", "C1", "C2")
+    assert method_simulation.correction_identity_for_code("C0") == {
+        "identity_schema_version": "correction_identity_v1",
+        "namespace": "legacy.family_adjustment",
+        "method_id": "legacy.family_adjustment.raw@v1",
+        "algorithm": "raw p-values, no family adjustment",
+        "legacy_code": "C0",
+    }
+    assert method_simulation.correction_identity_for_code("C1")["method_id"] == (
+        "legacy.family_adjustment.holm@v1"
+    )
+    assert method_simulation.correction_identity_for_code("C2")["method_id"] == (
+        "legacy.family_adjustment.stepdown_maxT@v1"
+    )
+    with pytest.raises(ValueError, match="unknown correction identity"):
+        method_simulation.correction_identity_for_code("C9")
+
+
 @pytest.fixture(scope="module")
 def reduced_layer_b_c_runs():
     original_estimator = method_simulation.substitution._registered_estimator

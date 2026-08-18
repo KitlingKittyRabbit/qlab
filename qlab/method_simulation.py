@@ -29,10 +29,44 @@ from qlab.walkforward import WalkForwardFold, walk_forward_splits
 
 HORIZON_HOURS = {"4h": 4, "8h": 8, "12h": 12, "1d": 24}
 RESIDUAL_METHODS = tuple(f"R{index}" for index in range(7))
-FAMILY_ADJUSTMENTS = ("C0", "C1", "C2")
+CORRECTION_IDENTITY_SCHEMA_VERSION = "correction_identity_v1"
+CORRECTION_IDENTITIES: Mapping[str, Mapping[str, str]] = {
+    "C0": {
+        "namespace": "legacy.family_adjustment",
+        "method_id": "legacy.family_adjustment.raw@v1",
+        "algorithm": "raw p-values, no family adjustment",
+    },
+    "C1": {
+        "namespace": "legacy.family_adjustment",
+        "method_id": "legacy.family_adjustment.holm@v1",
+        "algorithm": "Holm adjusted p-values",
+    },
+    "C2": {
+        "namespace": "legacy.family_adjustment",
+        "method_id": "legacy.family_adjustment.stepdown_maxT@v1",
+        "algorithm": "synchronized step-down maxT",
+    },
+}
+FAMILY_ADJUSTMENTS = tuple(CORRECTION_IDENTITIES)
 JOINT_INFERENCE_ENGINES = (
     "E0", "E1", "E1F", "E1S", "E1H_AIC", "E1H_BIC", "E1J_BIC_1125", "E2"
 )
+
+
+def correction_identity_for_code(code: str) -> dict[str, str]:
+    """Return the canonical identity fields for a legacy correction code."""
+    legacy_code = str(code)
+    try:
+        identity = CORRECTION_IDENTITIES[legacy_code]
+    except KeyError as exc:
+        raise ValueError(f"unknown correction identity: {legacy_code}") from exc
+    return {
+        "identity_schema_version": CORRECTION_IDENTITY_SCHEMA_VERSION,
+        "namespace": str(identity["namespace"]),
+        "method_id": str(identity["method_id"]),
+        "algorithm": str(identity["algorithm"]),
+        "legacy_code": legacy_code,
+    }
 
 
 @contextmanager
@@ -5114,6 +5148,7 @@ def infer_layer_c_comparison(
             raise RuntimeError("Layer C inference truth mapping is incomplete")
         for adjustment in FAMILY_ADJUSTMENTS:
             p_values = adjusted_by_code[adjustment]
+            identity = correction_identity_for_code(adjustment)
             rejected = p_values <= float(alpha)
             positive = truth.to_numpy(dtype=float) > 0.0
             grid_rows.append(
@@ -5121,6 +5156,7 @@ def infer_layer_c_comparison(
                     "cell_id": f"{method}-{adjustment}",
                     "residual_method": method,
                     "family_adjustment": adjustment,
+                    **identity,
                     "hypothesis_count": len(observed),
                     "true_positive_count": int(positive.sum()),
                     "rejection_count": int(rejected.sum()),
