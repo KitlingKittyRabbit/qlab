@@ -67,6 +67,29 @@ class FamilyCorrectionArtifacts:
     family_summary: pd.DataFrame
 
 
+FAMILY_CORRECTION_IDENTITY_SCHEMA_VERSION = "correction_identity_v1"
+FAMILY_CORRECTION_IDENTITIES: dict[str, dict[str, str]] = {
+    "BH": {
+        "namespace": "l55.multiplicity",
+        "method_id": "l55.multiplicity.BH@v1",
+        "algorithm": "Benjamini-Hochberg",
+        "legacy_code": "C0",
+    },
+    "TWO_STAGE_BKY": {
+        "namespace": "l55.multiplicity",
+        "method_id": "l55.multiplicity.TWO_STAGE_BKY@v1",
+        "algorithm": "two-stage Benjamini-Krieger-Yekutieli",
+        "legacy_code": "C1",
+    },
+    "BY": {
+        "namespace": "l55.multiplicity.reference",
+        "method_id": "l55.multiplicity.BY_REFERENCE@v1",
+        "algorithm": "Benjamini-Yekutieli reference",
+        "legacy_code": "BY_REFERENCE",
+    },
+}
+
+
 def newey_west_max_lags(observation_count: int, overlap_lags: int = 0) -> int:
     """Conservative Newey-West lag count for a univariate test series.
 
@@ -238,6 +261,10 @@ def correct_complete_p_value_family(
     correction = str(method).upper()
     if correction not in {"BH", "TWO_STAGE_BKY", "BY"}:
         raise ValueError("method must be BH, TWO_STAGE_BKY, or BY")
+    identity = {
+        "identity_schema_version": FAMILY_CORRECTION_IDENTITY_SCHEMA_VERSION,
+        **FAMILY_CORRECTION_IDENTITIES[correction],
+    }
 
     bh_q = benjamini_hochberg_q_values(raw)
     def step_up_discoveries(values: np.ndarray, threshold_level: float) -> tuple[np.ndarray, float]:
@@ -301,6 +328,7 @@ def correct_complete_p_value_family(
             "stage1_bh_level": stage1_level,
             "stage2_bh_level": stage2_level,
             "first_stage_discovery_count": r1,
+            **identity,
         }
     )
     family_summary = pd.DataFrame(
@@ -314,6 +342,7 @@ def correct_complete_p_value_family(
             "rejection_p_cutoff": float(rejection_cutoff),
             "stage1_bh_level": stage1_level,
             "stage2_bh_level": stage2_level,
+            **identity,
         }]
     )
     return FamilyCorrectionArtifacts(summary, family_summary)

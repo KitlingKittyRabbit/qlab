@@ -495,6 +495,24 @@ def test_correction_metadata_pinning_for_bh_by_and_bky_edges():
     assert row["effective_bh_level"] == pytest.approx(expected_stage2)
 
 
+def test_family_correction_artifacts_emit_canonical_identity_contract():
+    result = correct_complete_p_value_family(
+        [0.01, 0.2, 0.5], method="BH", expected_hypothesis_count=3,
+        hypothesis_ids=["a", "b", "c"],
+    )
+    required = {
+        "identity_schema_version",
+        "namespace",
+        "method_id",
+        "algorithm",
+        "legacy_code",
+    }
+    assert required.issubset(result.summary.columns)
+    assert required.issubset(result.family_summary.columns)
+    assert result.summary.loc[0, "method_id"] == "l55.multiplicity.BH@v1"
+    assert result.family_summary.loc[0, "legacy_code"] == "C0"
+
+
 def test_e1_wrapper_fails_closed_and_orders_evidence_direction():
     sums, counts, effects = _long_centered_daily_fixture()
     with pytest.raises(ValueError, match="wrong hypothesis count"):
