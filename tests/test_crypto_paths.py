@@ -87,9 +87,11 @@ def test_trade_env_override_supports_relative_workspace_paths(tmp_path, monkeypa
 
 
 def test_canonical_resolver_explicit_argument_wins_without_environment(tmp_path, monkeypatch):
-    monkeypatch.delenv("QLAB_CRYPTO_DATA_DIR", raising=False)
-    monkeypatch.delenv("COINGLASS_DATA_DIR", raising=False)
-    monkeypatch.setenv("QLAB_TRADE_ENV_PATH", str(tmp_path / "missing.env"))
+    env_file = tmp_path / "trade.env"
+    env_file.write_text("QLAB_CRYPTO_DATA_DIR=from-file\n", encoding="utf-8")
+    monkeypatch.setenv("QLAB_CRYPTO_DATA_DIR", str(tmp_path / "from-process"))
+    monkeypatch.setenv("COINGLASS_DATA_DIR", str(tmp_path / "from-legacy-process"))
+    monkeypatch.setenv("QLAB_TRADE_ENV_PATH", str(env_file))
 
     explicit = tmp_path / "explicit-root"
 
@@ -112,7 +114,28 @@ def test_canonical_resolver_uses_same_relative_anchor_for_process_and_env_file(t
     assert from_file == from_process == data_roots.WORKSPACE_ROOT / relative
 
 
+def test_canonical_resolver_accepts_coinglass_process_environment(tmp_path, monkeypatch):
+    monkeypatch.delenv("QLAB_CRYPTO_DATA_DIR", raising=False)
+    monkeypatch.setenv("COINGLASS_DATA_DIR", str(tmp_path / "coinglass-root"))
+    monkeypatch.setenv("QLAB_TRADE_ENV_PATH", str(tmp_path / "missing.env"))
+
+    assert data_roots.resolve_data_root() == tmp_path / "coinglass-root"
+
+
+def test_canonical_resolver_accepts_coinglass_env_file(tmp_path, monkeypatch):
+    env_file = tmp_path / "trade.env"
+    expected = tmp_path / "coinglass-from-file"
+    env_file.write_text(f"COINGLASS_DATA_DIR={expected}\n", encoding="utf-8")
+    monkeypatch.delenv("QLAB_CRYPTO_DATA_DIR", raising=False)
+    monkeypatch.delenv("COINGLASS_DATA_DIR", raising=False)
+    monkeypatch.setenv("QLAB_TRADE_ENV_PATH", str(env_file))
+
+    assert data_roots.resolve_data_root() == expected
+
+
 def test_canonical_resolver_does_not_use_existing_sibling_as_fallback(tmp_path, monkeypatch):
+    monkeypatch.setattr(data_roots, "WORKSPACE_ROOT", tmp_path)
+    (tmp_path / "qlab_crypto_data").mkdir()
     monkeypatch.delenv("QLAB_CRYPTO_DATA_DIR", raising=False)
     monkeypatch.delenv("COINGLASS_DATA_DIR", raising=False)
     monkeypatch.setenv("QLAB_TRADE_ENV_PATH", str(tmp_path / "missing.env"))
