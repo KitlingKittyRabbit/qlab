@@ -545,7 +545,7 @@ def test_e1_wrapper_fails_closed_and_orders_evidence_direction():
     ].iloc[0] > 0.9
 
 
-def test_e3_wrapper_fails_closed_and_orders_evidence_direction(monkeypatch):
+def test_e3_wrapper_fails_closed_and_orders_evidence_direction():
     sums, counts, effects = _long_centered_daily_fixture()
     with pytest.raises(ValueError, match="wrong hypothesis count"):
         self_normalized_circular_block_marginal_p_values(
@@ -568,25 +568,35 @@ def test_e3_wrapper_fails_closed_and_orders_evidence_direction(monkeypatch):
             seed=11, expected_hypothesis_count=2,
         )
 
-    real_primitive = research_stats.self_normalized_ratio_standard_error
-
-    def fail_on_bootstrap_batch(influence, batch_counts):
-        if np.asarray(influence).ndim == 3:
-            raise ValueError("bootstrap self-normalizers must be finite and positive")
-        return real_primitive(influence, batch_counts)
-
-    monkeypatch.setattr(
-        research_stats,
-        "self_normalized_ratio_standard_error",
-        fail_on_bootstrap_batch,
+    degenerate_index = pd.date_range(
+        "2025-01-01", periods=28, freq="D", tz="UTC"
     )
-    with pytest.raises(ValueError, match="bootstrap self-normalizers"):
+    degenerate_sums = pd.DataFrame(
+        {"h1": np.r_[np.ones(14), -np.ones(14)]}, index=degenerate_index
+    )
+    degenerate_counts = pd.DataFrame(1.0, index=degenerate_index, columns=["h1"])
+    degenerate_effects = pd.Series({"h1": 0.5})
+    degenerate_starts = research_stats._validated_block_starts(
+        None,
+        n_bootstrap=10_000,
+        blocks_per_sample=2,
+        day_count=28,
+        seed=0,
+        block_length=14,
+    )
+    assert np.any(np.all(degenerate_starts == 0, axis=1))
+    with pytest.raises(ValueError, match="self-normalizers"):
         self_normalized_circular_block_marginal_p_values(
-            sums, counts, effects, block_length=14, n_bootstrap=10_000,
-            seed=11, expected_hypothesis_count=2,
+            degenerate_sums,
+            degenerate_counts,
+            degenerate_effects,
+            block_length=14,
+            n_bootstrap=10_000,
+            seed=0,
+            expected_hypothesis_count=1,
+            block_starts=degenerate_starts,
         )
 
-    monkeypatch.undo()
     result = self_normalized_circular_block_marginal_p_values(
         sums, counts, pd.Series({"a": 5.0, "b": 0.0}), block_length=14,
         n_bootstrap=10_000, seed=11, expected_hypothesis_count=2,
@@ -595,6 +605,13 @@ def test_e3_wrapper_fails_closed_and_orders_evidence_direction(monkeypatch):
     assert by_id.loc["a", "raw_one_sided_p_value"] < by_id.loc[
         "b", "raw_one_sided_p_value"
     ]
+    strong_negative = self_normalized_circular_block_marginal_p_values(
+        sums, counts, pd.Series({"a": -5.0, "b": 0.0}), block_length=14,
+        n_bootstrap=10_000, seed=11, expected_hypothesis_count=2,
+    )
+    assert strong_negative.summary.set_index("hypothesis_id").loc[
+        "a", "raw_one_sided_p_value"
+    ] > 0.9
 
 
 def test_holm_adjusted_p_values_preserve_order_and_nan():
