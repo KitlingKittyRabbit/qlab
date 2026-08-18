@@ -2240,6 +2240,7 @@ def _write_federated_fixture(root, tasks, source_id, task):
                     "cell_id": f"{residual}-{adjustment}",
                     "residual_method": residual,
                     "family_adjustment": adjustment,
+                    **method_simulation.correction_identity_for_code(adjustment),
                     "hypothesis_count": 4,
                     "true_positive_count": 0,
                     "rejection_count": 0,
@@ -2435,6 +2436,7 @@ def test_layer_bc_summary_matches_hand_counted_family_rates():
                 "cell_id": "R5-C2",
                 "residual_method": "R5",
                 "family_adjustment": "C2",
+                **method_simulation.correction_identity_for_code("C2"),
                 "hypothesis_count": 4,
                 "true_positive_count": 2,
                 "true_positive_rejection_count": true_count,
@@ -2446,6 +2448,7 @@ def test_layer_bc_summary_matches_hand_counted_family_rates():
         )
     summary = method_simulation.summarize_layer_bc_results(pd.DataFrame(rows))
     row = summary.scenario_summary.iloc[0]
+    assert row["method_id"] == "legacy.family_adjustment.stepdown_maxT@v1"
     assert row["false_family_detection_rate"] == pytest.approx(0.5)
     assert row["true_positive_rejection_rate"] == pytest.approx(0.75)
     assert row["any_true_detection_rate"] == pytest.approx(1.0)
@@ -2457,6 +2460,10 @@ def test_layer_bc_summary_matches_hand_counted_family_rates():
     )
     null_summary = method_simulation.summarize_layer_bc_results(null_rows)
     assert np.isnan(null_summary.scenario_summary.iloc[0]["any_true_detection_rate"])
+
+    incomplete = pd.DataFrame(rows).drop(columns=["method_id"])
+    with pytest.raises(ValueError, match="Layer B/C results missing columns"):
+        method_simulation.summarize_layer_bc_results(incomplete)
 
 
 def test_correction_identity_contract_disambiguates_legacy_short_codes():

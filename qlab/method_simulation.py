@@ -69,6 +69,29 @@ def correction_identity_for_code(code: str) -> dict[str, str]:
     }
 
 
+def validate_correction_identity_frame(frame: pd.DataFrame) -> None:
+    """Fail closed when a legacy Layer C artifact loses its canonical identity."""
+    required = {
+        "family_adjustment",
+        "identity_schema_version",
+        "namespace",
+        "method_id",
+        "algorithm",
+        "legacy_code",
+    }
+    missing = sorted(required.difference(frame.columns))
+    if missing:
+        raise ValueError("correction identity fields missing: " + ", ".join(missing))
+    for row in frame.itertuples(index=False):
+        expected = correction_identity_for_code(str(row.family_adjustment))
+        actual = {field: str(getattr(row, field)) for field in expected}
+        if actual != expected:
+            raise ValueError(
+                "correction identity mismatch for "
+                f"{row.family_adjustment}: {actual} != {expected}"
+            )
+
+
 @contextmanager
 def _performance_stage(
     rows: list[dict[str, object]] | None,
@@ -5818,6 +5841,7 @@ def validate_federated_layer_bc_tasks(
             if receipt.get("file_sha256") != actual_hashes:
                 raise RuntimeError(f"federated task file hash mismatch: {task_id}")
             grid = pd.read_csv(task_dir / "comparison_grid.csv")
+            validate_correction_identity_frame(grid)
             expected_cells = {
                 f"{method}-{adjustment}"
                 for method in RESIDUAL_METHODS for adjustment in FAMILY_ADJUSTMENTS
@@ -5878,10 +5902,12 @@ def summarize_layer_bc_results(replicate_results: pd.DataFrame) -> LayerBCSummar
         "case_id", "replicate", "cell_id", "residual_method", "family_adjustment",
         "hypothesis_count", "true_positive_count", "true_positive_rejection_count",
         "true_null_rejection_count", "mean_estimate", "mean_bias", "mean_squared_error",
+        "identity_schema_version", "namespace", "method_id", "algorithm", "legacy_code",
     }
     missing = sorted(required.difference(replicate_results.columns))
     if missing:
         raise ValueError("Layer B/C results missing columns: " + ", ".join(missing))
+    validate_correction_identity_frame(replicate_results)
     frame = replicate_results.copy()
     numeric = frame[
         [
@@ -5908,7 +5934,17 @@ def summarize_layer_bc_results(replicate_results: pd.DataFrame) -> LayerBCSummar
         frame["true_null_rejection_count"] / frame["true_null_count"],
         np.nan,
     )
-    keys = ["case_id", "cell_id", "residual_method", "family_adjustment"]
+    keys = [
+        "case_id",
+        "cell_id",
+        "residual_method",
+        "family_adjustment",
+        "identity_schema_version",
+        "namespace",
+        "method_id",
+        "algorithm",
+        "legacy_code",
+    ]
     rows: list[dict[str, object]] = []
     for key, group in frame.groupby(keys, sort=True):
         row = dict(zip(keys, key, strict=True))
