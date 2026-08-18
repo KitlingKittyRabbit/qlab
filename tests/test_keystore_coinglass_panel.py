@@ -201,6 +201,19 @@ def test_build_panel_requires_explicit_universe_input():
         panel_builder.build_panel(feature_names=("ob_pair_imbalance__1h",), min_common_rows=1)
 
 
+def test_panel_resolver_uses_canonical_process_environment(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("QLAB_CRYPTO_DATA_DIR", str(tmp_path / "configured"))
+    monkeypatch.delenv("COINGLASS_DATA_DIR", raising=False)
+
+    assert panel_builder.resolve_data_root() == tmp_path / "configured"
+
+
+def test_panel_resolver_accepts_missing_explicit_root_without_implicit_fallback(tmp_path: Path):
+    explicit = tmp_path / "not-yet-restored"
+
+    assert panel_builder.resolve_data_root(explicit) == explicit
+
+
 def test_load_admitted_symbols_from_audit(tmp_path: Path):
     audit = tmp_path / "universe.csv"
     audit.write_text("symbol,base_admitted\nbtc,yes\neth,no\nsol,yes\n", encoding="utf-8")

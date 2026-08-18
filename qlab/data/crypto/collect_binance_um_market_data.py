@@ -437,7 +437,6 @@ def main() -> None:
         if "Crypto data root is not configured" not in str(exc):
             raise
 
-        workspace_data_root = Path(__file__).resolve().parents[4] / "qlab_crypto_data"
         hint_lines = [
             "Crypto data root is not configured for the collector.",
             "",
@@ -445,18 +444,6 @@ def main() -> None:
             "  1. Pass --data-root /path/to/crypto_data",
             "  2. Export QLAB_CRYPTO_DATA_DIR=/path/to/crypto_data",
         ]
-        if workspace_data_root.exists():
-            hint_lines.extend(
-                [
-                    "",
-                    "For this workspace, the likely command is:",
-                    (
-                        "  /root/workspace/.venv311/bin/python "
-                        "/root/workspace/qlab/qlab/data/crypto/collect_binance_um_market_data.py "
-                        f"--data-root {workspace_data_root} --symbols BTCUSDT"
-                    ),
-                ]
-            )
         raise SystemExit("\n".join(hint_lines)) from exc
 
     ensure_data_dirs()
