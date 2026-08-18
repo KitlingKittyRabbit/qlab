@@ -16,7 +16,7 @@ def resolve_blueprint_root(workspace_root: Path | None = None) -> Path:
         raise RuntimeError(f"QLAB_BLUEPRINT_DIR is not a directory: {root}")
 
     root = (workspace_root or Path(__file__).resolve().parents[2]).resolve()
-    for name in ("蓝图", "quant-research-blueprints-private"):
+    for name in ("quant-research-blueprints-private", "蓝图"):
         candidate = root / name
         if candidate.is_dir():
             return candidate

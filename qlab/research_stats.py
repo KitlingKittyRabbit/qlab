@@ -97,20 +97,29 @@ def hac_t_stat(
     lags = newey_west_max_lags(
         observation_count, overlap_lags=overlap_lags) if max_lags is None else int(max_lags)
     lags = max(0, min(lags, observation_count - 1))
-    centered = series.to_numpy() - float(series.mean())
-    gamma_zero = float(np.dot(centered, centered) / observation_count)
-    long_run_variance = gamma_zero
-    for lag in range(1, lags + 1):
-        gamma = float(
-            np.dot(centered[lag:], centered[:-lag]) / observation_count)
-        weight = 1.0 - lag / (lags + 1.0)
-        long_run_variance += 2.0 * weight * gamma
+    long_run_variance = _bartlett_long_run_variance(
+        series.to_numpy(), max_lags=lags
+    )
     if not np.isfinite(long_run_variance) or long_run_variance <= 0.0:
         return float("nan")
     standard_error = sqrt(long_run_variance / observation_count)
     if not np.isfinite(standard_error) or standard_error <= 0.0:
         return float("nan")
     return float(series.mean() / standard_error)
+
+
+def _bartlett_long_run_variance(values: np.ndarray, *, max_lags: int) -> float:
+    """Compute the centered Bartlett HAC long-run variance once."""
+    raw = np.asarray(values, dtype=float)
+    if raw.ndim != 1 or len(raw) < 1 or not np.isfinite(raw).all():
+        return float("nan")
+    lags = max(0, min(int(max_lags), len(raw) - 1))
+    centered = raw - float(raw.mean())
+    long_run_variance = float(np.dot(centered, centered) / len(raw))
+    for lag in range(1, lags + 1):
+        gamma = float(np.dot(centered[lag:], centered[:-lag]) / len(raw))
+        long_run_variance += 2.0 * (1.0 - lag / (lags + 1.0)) * gamma
+    return float(long_run_variance)
 
 
 def simple_t_stat(values: pd.Series | np.ndarray | list[float]) -> float:
@@ -217,6 +226,12 @@ def correct_complete_p_value_family(
     ids = pd.Index([str(value) for value in hypothesis_ids])
     if len(ids) != count or ids.has_duplicates:
         raise ValueError("hypothesis_ids must be complete and unique")
+    if isinstance(p_values, pd.Series):
+        series_ids = pd.Index([str(value) for value in p_values.index])
+        if not series_ids.equals(ids):
+            raise ValueError(
+                "p-value Series index must exactly match hypothesis_ids in order"
+            )
     level = float(q)
     if not np.isfinite(level) or not 0.0 < level < 1.0:
         raise ValueError("q must lie strictly between zero and one")
@@ -237,8 +252,10 @@ def correct_complete_p_value_family(
         discovered[: cutoff + 1] = True
         return discovered[np.argsort(order)], float(ordered[cutoff])
 
+    stage1_level = float("nan")
+    stage2_level = float("nan")
     if correction == "BH":
-        discovered, threshold = step_up_discoveries(raw, level)
+        discovered, rejection_cutoff = step_up_discoveries(raw, level)
         adjusted = bh_q
         r1 = np.nan
     elif correction == "BY":
@@ -246,25 +263,26 @@ def correct_complete_p_value_family(
             raw, expected_hypothesis_count=count
         )
         harmonic = float(np.sum(1.0 / np.arange(1, count + 1, dtype=float)))
-        discovered, threshold = step_up_discoveries(raw, level / harmonic)
+        stage2_level = level / harmonic
+        discovered, rejection_cutoff = step_up_discoveries(raw, stage2_level)
         r1 = np.nan
     else:
         first_level = level / (1.0 + level)
+        stage1_level = first_level
         first_discovered = bh_q <= first_level
         r1_int = int(first_discovered.sum())
         r1 = float(r1_int)
+        adjusted = np.full(count, np.nan, dtype=float)
         if r1_int == 0:
-            threshold = 0.0
-            adjusted = np.full(count, np.inf, dtype=float)
+            rejection_cutoff = 0.0
             discovered = np.zeros(count, dtype=bool)
         elif r1_int == count:
-            threshold = level
-            adjusted = np.zeros(count, dtype=float)
+            stage2_level = level
+            rejection_cutoff = float(raw.max())
             discovered = np.ones(count, dtype=bool)
         else:
-            threshold = first_level * count / float(count - r1_int)
-            adjusted = bh_q
-            discovered, _ = step_up_discoveries(raw, threshold)
+            stage2_level = first_level * count / float(count - r1_int)
+            discovered, rejection_cutoff = step_up_discoveries(raw, stage2_level)
 
     summary = pd.DataFrame(
         {
@@ -275,7 +293,9 @@ def correct_complete_p_value_family(
             "discovered": discovered,
             "method": correction,
             "q": level,
-            "critical_value": float(threshold),
+            "rejection_p_cutoff": float(rejection_cutoff),
+            "stage1_bh_level": stage1_level,
+            "stage2_bh_level": stage2_level,
             "first_stage_discovery_count": r1,
         }
     )
@@ -286,7 +306,9 @@ def correct_complete_p_value_family(
             "hypothesis_count": count,
             "discovery_count": int(discovered.sum()),
             "first_stage_discovery_count": r1,
-            "critical_value": float(threshold),
+            "rejection_p_cutoff": float(rejection_cutoff),
+            "stage1_bh_level": stage1_level,
+            "stage2_bh_level": stage2_level,
         }]
     )
     return FamilyCorrectionArtifacts(summary, family_summary)
@@ -613,6 +635,7 @@ def autoregressive_spectral_marginal_p_values(
         columns=["holm_adjusted_p_value", "family_adjusted_p_value"]
     ).copy()
     summary["evidence_method"] = "E0_AR_BIC"
+    summary["inference_engine"] = "E0_AR_BIC"
     return MarginalPValueArtifacts(summary=summary)
 
 
@@ -641,12 +664,7 @@ def hac_marginal_p_values(
     statistics = np.empty(len(hypothesis_ids), dtype=float)
     for column_index in range(len(hypothesis_ids)):
         values = sums[:, column_index]
-        centered = values - float(values.mean())
-        gamma_zero = float(np.dot(centered, centered) / len(values))
-        long_run = gamma_zero
-        for lag in range(1, lags + 1):
-            gamma = float(np.dot(centered[lag:], centered[:-lag]) / len(values))
-            long_run += 2.0 * (1.0 - lag / (lags + 1.0)) * gamma
+        long_run = _bartlett_long_run_variance(values, max_lags=lags)
         if not np.isfinite(long_run) or long_run <= 0.0:
             raise ValueError("HAC long-run variance must be finite and positive")
         standard_error[column_index] = sqrt(long_run / len(values))
@@ -677,20 +695,45 @@ def _validated_block_starts(
     seed: int,
     block_length: int,
 ) -> np.ndarray:
+    derived = _derive_circular_block_starts(
+        n_bootstrap=n_bootstrap,
+        blocks_per_sample=blocks_per_sample,
+        day_count=day_count,
+        seed=seed,
+        block_length=block_length,
+        include_block_length=True,
+    )
     if block_starts is None:
-        rng = np.random.default_rng(
-            np.random.SeedSequence([int(seed), int(block_length)])
-        )
-        starts = rng.integers(
-            0, day_count, size=(int(n_bootstrap), blocks_per_sample), endpoint=False
-        )
+        starts = derived
     else:
         starts = np.asarray(block_starts, dtype=int)
         if starts.shape != (int(n_bootstrap), blocks_per_sample):
             raise ValueError("block_starts has the wrong shape")
         if (starts < 0).any() or (starts >= day_count).any():
             raise ValueError("block_starts contains an invalid day offset")
+        if not np.array_equal(starts, derived):
+            raise ValueError("block_starts do not match seed and block_length provenance")
     return starts
+
+
+def _derive_circular_block_starts(
+    *,
+    n_bootstrap: int,
+    blocks_per_sample: int,
+    day_count: int,
+    seed: int,
+    block_length: int,
+    include_block_length: bool,
+) -> np.ndarray:
+    """Shared deterministic block-start generation for all circular engines."""
+    namespace = [int(seed), int(block_length)] if include_block_length else [int(seed)]
+    rng = np.random.default_rng(np.random.SeedSequence(namespace))
+    return rng.integers(
+        0,
+        int(day_count),
+        size=(int(n_bootstrap), int(blocks_per_sample)),
+        endpoint=False,
+    )
 
 
 def _marginal_bootstrap_inputs(
@@ -740,8 +783,8 @@ def synchronized_circular_block_marginal_p_values(
     block_starts: np.ndarray | None = None,
 ) -> MarginalPValueArtifacts:
     """Return frozen E2 marginal p-values using synchronized circular blocks."""
-    if int(n_bootstrap) < 10_000:
-        raise ValueError("n_bootstrap must be at least 10000 for E2")
+    if int(n_bootstrap) != 10_000:
+        raise ValueError("n_bootstrap must equal 10000 for formal E2/E2S")
     ids, sums, _, observed, blocks_per_sample = _marginal_bootstrap_inputs(
         daily_centered_sums,
         daily_counts,
@@ -752,6 +795,8 @@ def synchronized_circular_block_marginal_p_values(
     )
     if int(batch_size) <= 0:
         raise ValueError("batch_size must be positive")
+    if int(block_length) not in {14, 28}:
+        raise ValueError("formal E2/E2S block_length must be 14 or 28")
     starts = _validated_block_starts(
         block_starts,
         n_bootstrap=n_bootstrap,
@@ -779,7 +824,7 @@ def synchronized_circular_block_marginal_p_values(
             "n_bootstrap": int(n_bootstrap),
             "seed": int(seed),
             "alternative": "greater",
-            "evidence_method": "E2_SYNC_BLOCK",
+            "evidence_method": "E2_SYNC_BLOCK" if int(block_length) == 14 else "E2S_SYNC_BLOCK",
         }
     )
     return MarginalPValueArtifacts(summary=summary, block_starts=starts.copy())
@@ -798,8 +843,8 @@ def self_normalized_circular_block_marginal_p_values(
     block_starts: np.ndarray | None = None,
 ) -> MarginalPValueArtifacts:
     """Return frozen E3 self-normalized synchronized-block p-values."""
-    if int(n_bootstrap) < 10_000:
-        raise ValueError("n_bootstrap must be at least 10000 for E3")
+    if int(n_bootstrap) != 10_000:
+        raise ValueError("n_bootstrap must equal 10000 for formal E3/E3S")
     ids, sums, _, observed, blocks_per_sample = _marginal_bootstrap_inputs(
         daily_centered_sums,
         daily_counts,
@@ -810,6 +855,8 @@ def self_normalized_circular_block_marginal_p_values(
     )
     if int(batch_size) <= 0:
         raise ValueError("batch_size must be positive")
+    if int(block_length) not in {14, 28}:
+        raise ValueError("formal E3/E3S block_length must be 14 or 28")
     centered = sums - sums.mean(axis=0, keepdims=True)
     cumulative = np.cumsum(centered, axis=0)
     normalizer = np.sum(cumulative * cumulative, axis=0) / float(len(sums) ** 2)
@@ -832,7 +879,8 @@ def self_normalized_circular_block_marginal_p_values(
         )
         bootstrap_series = centered[indices]
         bootstrap_effects = bootstrap_series.mean(axis=1)
-        bootstrap_cumulative = np.cumsum(bootstrap_series, axis=1)
+        bootstrap_influence = bootstrap_series - bootstrap_effects[:, None, :]
+        bootstrap_cumulative = np.cumsum(bootstrap_influence, axis=1)
         bootstrap_normalizer = np.sum(
             bootstrap_cumulative * bootstrap_cumulative, axis=1
         ) / float(len(sums) ** 2)
@@ -855,7 +903,7 @@ def self_normalized_circular_block_marginal_p_values(
             "n_bootstrap": int(n_bootstrap),
             "seed": int(seed),
             "alternative": "greater",
-            "evidence_method": "E3_SELF_NORMALIZED",
+            "evidence_method": "E3_SELF_NORMALIZED" if int(block_length) == 14 else "E3S_SELF_NORMALIZED",
         }
     )
     return MarginalPValueArtifacts(summary=summary, block_starts=starts.copy())
@@ -956,12 +1004,13 @@ def _circular_block_bootstrap_stepdown_max_t(
 
     day_count = len(daily_centered_sums)
     blocks_per_sample = int(np.ceil(day_count / int(block_length)))
-    rng = np.random.default_rng(int(seed))
-    block_starts_array = rng.integers(
-        0,
-        day_count,
-        size=(int(n_bootstrap), blocks_per_sample),
-        endpoint=False,
+    block_starts_array = _derive_circular_block_starts(
+        n_bootstrap=n_bootstrap,
+        blocks_per_sample=blocks_per_sample,
+        day_count=day_count,
+        seed=seed,
+        block_length=block_length,
+        include_block_length=False,
     )
     bootstrap_effects = np.empty(
         (int(n_bootstrap), len(hypothesis_ids)), dtype=float

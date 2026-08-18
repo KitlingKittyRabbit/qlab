@@ -14,7 +14,11 @@ from qlab.workspace_paths import resolve_blueprint_root
 
 
 def _blueprint_file(name: str) -> Path:
-    return resolve_blueprint_root(Path(__file__).resolve().parents[2]) / name
+    try:
+        root = resolve_blueprint_root(Path(__file__).resolve().parents[2])
+    except RuntimeError as exc:
+        pytest.skip(f"private blueprint repository is unavailable: {exc}")
+    return root / name
 
 
 def _empirical_family_fixture(day_count: int = 40):
@@ -1701,7 +1705,10 @@ def test_layer_a_engine_dispatches_e1h_without_bootstrap():
 
 
 def test_joint_inference_task_registries_are_frozen_and_complete():
-    blueprint_root = resolve_blueprint_root(Path(__file__).resolve().parents[2])
+    try:
+        blueprint_root = resolve_blueprint_root(Path(__file__).resolve().parents[2])
+    except RuntimeError as exc:
+        pytest.skip(f"private blueprint repository is unavailable: {exc}")
     prior_path = blueprint_root / "ksv4_增量信息方法模拟设计清单.json"
     revision = json.loads(
         (blueprint_root / "ksv4_增量信息方法修订设计清单.json").read_text()
