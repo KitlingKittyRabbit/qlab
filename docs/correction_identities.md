@@ -17,6 +17,10 @@ remain compatibility aliases only; new artifacts must also carry the fields
 | `C1` | `legacy.family_adjustment.holm@v1` | Holm adjusted p-values |
 | `C2` | `legacy.family_adjustment.stepdown_maxT@v1` | synchronized step-down maxT |
 
+The only registered compatibility route is `legacy.layer_bc`. Readers must
+declare this route explicitly to interpret a pre-schema Layer B/C artifact;
+the canonical fields are added to an in-memory copy only.
+
 The active L5.5 blueprint uses a separate namespace:
 
 | Blueprint code | Canonical method ID | Algorithm |
