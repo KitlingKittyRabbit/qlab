@@ -389,6 +389,36 @@ def test_e3_bootstrap_t_recenters_each_resampled_series(monkeypatch):
     assert math.isnan(normal_two_sided_p_value(float("inf")))
 
 
+def test_e2_raw_p_value_matches_manual_synchronized_bootstrap(monkeypatch):
+    index = pd.date_range("2025-01-01", periods=28, freq="D", tz="UTC")
+    centered = np.arange(28, dtype=float) - 13.5
+    sums = pd.DataFrame({"h1": centered}, index=index)
+    counts = pd.DataFrame({"h1": np.ones(28)}, index=index)
+    effects = pd.Series({"h1": 0.5})
+    starts = np.zeros((10_000, 2), dtype=int)
+    monkeypatch.setattr(
+        research_stats,
+        "_validated_block_starts",
+        lambda *args, **kwargs: starts,
+    )
+
+    result = synchronized_circular_block_marginal_p_values(
+        sums,
+        counts,
+        effects,
+        block_length=14,
+        n_bootstrap=10_000,
+        seed=11,
+        expected_hypothesis_count=1,
+        batch_size=10_000,
+    )
+    manual_bootstrap_effect = float(np.r_[centered[:14], centered[:14]].mean())
+    manual_p = (1.0 + 10_000 * int(manual_bootstrap_effect >= effects.iloc[0])) / 10_001
+
+    assert result.summary.loc[0, "raw_one_sided_p_value"] == pytest.approx(manual_p)
+    assert result.summary.loc[0, "evidence_method"] == "E2_SYNC_BLOCK"
+
+
 def test_holm_adjusted_p_values_preserve_order_and_nan():
     adjusted = holm_adjusted_p_values([0.01, 0.04, float("nan"), 0.03, 0.03])
 
