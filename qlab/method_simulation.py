@@ -29,10 +29,108 @@ from qlab.walkforward import WalkForwardFold, walk_forward_splits
 
 HORIZON_HOURS = {"4h": 4, "8h": 8, "12h": 12, "1d": 24}
 RESIDUAL_METHODS = tuple(f"R{index}" for index in range(7))
-FAMILY_ADJUSTMENTS = ("C0", "C1", "C2")
+CORRECTION_IDENTITY_SCHEMA_VERSION = "correction_identity_v1"
+LEGACY_LAYER_BC_ROUTE = "legacy.layer_bc"
+REGISTERED_CORRECTION_IDENTITY_ROUTES = frozenset({LEGACY_LAYER_BC_ROUTE})
+CANONICAL_CORRECTION_IDENTITY_FIELDS = (
+    "identity_schema_version",
+    "namespace",
+    "method_id",
+    "algorithm",
+    "legacy_code",
+)
+CORRECTION_IDENTITIES: Mapping[str, Mapping[str, str]] = {
+    "C0": {
+        "namespace": "legacy.family_adjustment",
+        "method_id": "legacy.family_adjustment.raw@v1",
+        "algorithm": "raw p-values, no family adjustment",
+    },
+    "C1": {
+        "namespace": "legacy.family_adjustment",
+        "method_id": "legacy.family_adjustment.holm@v1",
+        "algorithm": "Holm adjusted p-values",
+    },
+    "C2": {
+        "namespace": "legacy.family_adjustment",
+        "method_id": "legacy.family_adjustment.stepdown_maxT@v1",
+        "algorithm": "synchronized step-down maxT",
+    },
+}
+FAMILY_ADJUSTMENTS = tuple(CORRECTION_IDENTITIES)
 JOINT_INFERENCE_ENGINES = (
     "E0", "E1", "E1F", "E1S", "E1H_AIC", "E1H_BIC", "E1J_BIC_1125", "E2"
 )
+
+
+def correction_identity_for_code(code: str) -> dict[str, str]:
+    """Return the canonical identity fields for a legacy correction code."""
+    legacy_code = str(code)
+    try:
+        identity = CORRECTION_IDENTITIES[legacy_code]
+    except KeyError as exc:
+        raise ValueError(f"unknown correction identity: {legacy_code}") from exc
+    return {
+        "identity_schema_version": CORRECTION_IDENTITY_SCHEMA_VERSION,
+        "namespace": str(identity["namespace"]),
+        "method_id": str(identity["method_id"]),
+        "algorithm": str(identity["algorithm"]),
+        "legacy_code": legacy_code,
+    }
+
+
+def _validated_correction_identity_route(route: str | None) -> str | None:
+    if route is None:
+        return None
+    normalized = str(route)
+    if normalized not in REGISTERED_CORRECTION_IDENTITY_ROUTES:
+        raise ValueError(f"unknown correction identity route: {normalized}")
+    return normalized
+
+
+def normalize_correction_identity_frame(
+    frame: pd.DataFrame, *, route: str | None = None
+) -> pd.DataFrame:
+    """Return a validated copy, with explicit compatibility for legacy Layer B/C."""
+    route = _validated_correction_identity_route(route)
+    canonical = set(CANONICAL_CORRECTION_IDENTITY_FIELDS)
+    present = canonical.intersection(frame.columns)
+    if present and present != canonical:
+        missing = sorted(canonical.difference(frame.columns))
+        raise ValueError(
+            "correction identity fields are partially present: "
+            + ", ".join(missing)
+        )
+    normalized = frame.copy()
+    if not present:
+        if route != LEGACY_LAYER_BC_ROUTE:
+            raise ValueError(
+                "legacy correction identity route is required for pre-schema artifact"
+            )
+        if "family_adjustment" not in normalized.columns:
+            raise ValueError("correction identity fields missing: family_adjustment")
+        identities = normalized["family_adjustment"].map(correction_identity_for_code)
+        for field in CANONICAL_CORRECTION_IDENTITY_FIELDS:
+            normalized[field] = identities.map(lambda identity: identity[field])
+    required = {"family_adjustment", *CANONICAL_CORRECTION_IDENTITY_FIELDS}
+    missing = sorted(required.difference(normalized.columns))
+    if missing:
+        raise ValueError("correction identity fields missing: " + ", ".join(missing))
+    for row in normalized.itertuples(index=False):
+        expected = correction_identity_for_code(str(row.family_adjustment))
+        actual = {field: str(getattr(row, field)) for field in expected}
+        if actual != expected:
+            raise ValueError(
+                "correction identity mismatch for "
+                f"{row.family_adjustment}: {actual} != {expected}"
+            )
+    return normalized
+
+
+def validate_correction_identity_frame(
+    frame: pd.DataFrame, *, route: str | None = None
+) -> None:
+    """Fail closed while allowing only the registered legacy compatibility route."""
+    normalize_correction_identity_frame(frame, route=route)
 
 
 @contextmanager
@@ -5114,6 +5212,7 @@ def infer_layer_c_comparison(
             raise RuntimeError("Layer C inference truth mapping is incomplete")
         for adjustment in FAMILY_ADJUSTMENTS:
             p_values = adjusted_by_code[adjustment]
+            identity = correction_identity_for_code(adjustment)
             rejected = p_values <= float(alpha)
             positive = truth.to_numpy(dtype=float) > 0.0
             grid_rows.append(
@@ -5121,6 +5220,7 @@ def infer_layer_c_comparison(
                     "cell_id": f"{method}-{adjustment}",
                     "residual_method": method,
                     "family_adjustment": adjustment,
+                    **identity,
                     "hypothesis_count": len(observed),
                     "true_positive_count": int(positive.sum()),
                     "rejection_count": int(rejected.sum()),
@@ -5620,6 +5720,7 @@ def validate_federated_layer_bc_tasks(
     *,
     design_sha256: str,
     baseline_source_id: str,
+    route: str | None = None,
 ) -> FederatedTaskValidationArtifacts:
     """Validate a complete Layer-B/C package produced by multiple runtimes."""
     tasks = tuple(dict(task) for task in registered_tasks)
@@ -5781,7 +5882,9 @@ def validate_federated_layer_bc_tasks(
                     actual_hashes[name] = _file_sha256(path)
             if receipt.get("file_sha256") != actual_hashes:
                 raise RuntimeError(f"federated task file hash mismatch: {task_id}")
-            grid = pd.read_csv(task_dir / "comparison_grid.csv")
+            grid = normalize_correction_identity_frame(
+                pd.read_csv(task_dir / "comparison_grid.csv"), route=route
+            )
             expected_cells = {
                 f"{method}-{adjustment}"
                 for method in RESIDUAL_METHODS for adjustment in FAMILY_ADJUSTMENTS
@@ -5836,17 +5939,19 @@ def validate_federated_layer_bc_tasks(
     return FederatedTaskValidationArtifacts(inventory, runtimes, receipt)
 
 
-def summarize_layer_bc_results(replicate_results: pd.DataFrame) -> LayerBCSummary:
+def summarize_layer_bc_results(
+    replicate_results: pd.DataFrame, *, route: str | None = None
+) -> LayerBCSummary:
     """Summarize registered B/C replicate distributions without a pass label."""
+    frame = normalize_correction_identity_frame(replicate_results, route=route)
     required = {
         "case_id", "replicate", "cell_id", "residual_method", "family_adjustment",
         "hypothesis_count", "true_positive_count", "true_positive_rejection_count",
         "true_null_rejection_count", "mean_estimate", "mean_bias", "mean_squared_error",
     }
-    missing = sorted(required.difference(replicate_results.columns))
+    missing = sorted(required.difference(frame.columns))
     if missing:
         raise ValueError("Layer B/C results missing columns: " + ", ".join(missing))
-    frame = replicate_results.copy()
     numeric = frame[
         [
             "hypothesis_count", "true_positive_count", "true_positive_rejection_count",
@@ -5872,7 +5977,17 @@ def summarize_layer_bc_results(replicate_results: pd.DataFrame) -> LayerBCSummar
         frame["true_null_rejection_count"] / frame["true_null_count"],
         np.nan,
     )
-    keys = ["case_id", "cell_id", "residual_method", "family_adjustment"]
+    keys = [
+        "case_id",
+        "cell_id",
+        "residual_method",
+        "family_adjustment",
+        "identity_schema_version",
+        "namespace",
+        "method_id",
+        "algorithm",
+        "legacy_code",
+    ]
     rows: list[dict[str, object]] = []
     for key, group in frame.groupby(keys, sort=True):
         row = dict(zip(keys, key, strict=True))

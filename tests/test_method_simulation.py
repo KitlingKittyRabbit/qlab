@@ -2194,7 +2194,7 @@ def test_matched_layer_a_summary_requires_identical_registered_replicates():
         )
 
 
-def _write_federated_fixture(root, tasks, source_id, task):
+def _write_federated_fixture(root, tasks, source_id, task, *, include_identity=True):
     root.mkdir()
     runtime = {
         "status": "frozen",
@@ -2220,6 +2220,11 @@ def _write_federated_fixture(root, tasks, source_id, task):
                     "cell_id": f"{residual}-{adjustment}",
                     "residual_method": residual,
                     "family_adjustment": adjustment,
+                    **(
+                        method_simulation.correction_identity_for_code(adjustment)
+                        if include_identity
+                        else {}
+                    ),
                     "hypothesis_count": 4,
                     "true_positive_count": 0,
                     "rejection_count": 0,
@@ -2279,6 +2284,39 @@ def test_federated_validation_accepts_different_runtimes_and_fails_on_tamper(tmp
             tasks, {"local": local, "remote": remote},
             design_sha256="design", baseline_source_id="local",
         )
+
+
+def test_federated_validation_reads_registered_legacy_artifacts_without_rewriting(tmp_path):
+    tasks = (
+        {"task_idx": 0, "task_id": "task_000", "case_id": "B01", "scenario_id": "B01", "replicate": 0, "base_state": None, "beta": None, "q_x": None},
+        {"task_idx": 1, "task_id": "task_001", "case_id": "B01", "scenario_id": "B01", "replicate": 1, "base_state": None, "beta": None, "q_x": None},
+    )
+    local, remote = tmp_path / "local", tmp_path / "remote"
+    _write_federated_fixture(local, tasks, "local", tasks[0], include_identity=False)
+    _write_federated_fixture(remote, tasks, "remote", tasks[1], include_identity=False)
+    before = {
+        root: (root / "task_000" / "comparison_grid.csv").read_bytes()
+        if root == local
+        else (root / "task_001" / "comparison_grid.csv").read_bytes()
+        for root in (local, remote)
+    }
+
+    artifacts = method_simulation.validate_federated_layer_bc_tasks(
+        tasks,
+        {"local": local, "remote": remote},
+        design_sha256="design",
+        baseline_source_id="local",
+        route=method_simulation.LEGACY_LAYER_BC_ROUTE,
+    )
+
+    assert artifacts.receipt["status"] == "complete"
+    assert all(
+        (root / task_id / "comparison_grid.csv").read_bytes() == content
+        for root, task_id, content in (
+            (local, "task_000", before[local]),
+            (remote, "task_001", before[remote]),
+        )
+    )
 
 
 def test_federated_validation_accepts_bound_external_observation_hash_audit(tmp_path):
@@ -2415,6 +2453,7 @@ def test_layer_bc_summary_matches_hand_counted_family_rates():
                 "cell_id": "R5-C2",
                 "residual_method": "R5",
                 "family_adjustment": "C2",
+                **method_simulation.correction_identity_for_code("C2"),
                 "hypothesis_count": 4,
                 "true_positive_count": 2,
                 "true_positive_rejection_count": true_count,
@@ -2426,6 +2465,7 @@ def test_layer_bc_summary_matches_hand_counted_family_rates():
         )
     summary = method_simulation.summarize_layer_bc_results(pd.DataFrame(rows))
     row = summary.scenario_summary.iloc[0]
+    assert row["method_id"] == "legacy.family_adjustment.stepdown_maxT@v1"
     assert row["false_family_detection_rate"] == pytest.approx(0.5)
     assert row["true_positive_rejection_rate"] == pytest.approx(0.75)
     assert row["any_true_detection_rate"] == pytest.approx(1.0)
@@ -2437,6 +2477,82 @@ def test_layer_bc_summary_matches_hand_counted_family_rates():
     )
     null_summary = method_simulation.summarize_layer_bc_results(null_rows)
     assert np.isnan(null_summary.scenario_summary.iloc[0]["any_true_detection_rate"])
+
+    incomplete = pd.DataFrame(rows).drop(columns=["method_id"])
+    with pytest.raises(ValueError, match="partially present"):
+        method_simulation.summarize_layer_bc_results(incomplete)
+
+
+def test_correction_identity_contract_disambiguates_legacy_short_codes():
+    assert method_simulation.FAMILY_ADJUSTMENTS == ("C0", "C1", "C2")
+    assert method_simulation.correction_identity_for_code("C0") == {
+        "identity_schema_version": "correction_identity_v1",
+        "namespace": "legacy.family_adjustment",
+        "method_id": "legacy.family_adjustment.raw@v1",
+        "algorithm": "raw p-values, no family adjustment",
+        "legacy_code": "C0",
+    }
+    assert method_simulation.correction_identity_for_code("C1")["method_id"] == (
+        "legacy.family_adjustment.holm@v1"
+    )
+    assert method_simulation.correction_identity_for_code("C2")["method_id"] == (
+        "legacy.family_adjustment.stepdown_maxT@v1"
+    )
+    with pytest.raises(ValueError, match="unknown correction identity"):
+        method_simulation.correction_identity_for_code("C9")
+
+    legacy = pd.DataFrame(
+        [
+            {
+                "case_id": "B",
+                "replicate": 0,
+                "cell_id": "R5-C2",
+                "residual_method": "R5",
+                "family_adjustment": "C2",
+                "hypothesis_count": 4,
+                "true_positive_count": 2,
+                "true_positive_rejection_count": 1,
+                "true_null_rejection_count": 0,
+                "mean_estimate": 0.2,
+                "mean_bias": 0.0,
+                "mean_squared_error": 0.1,
+            }
+        ]
+    )
+    original_columns = tuple(legacy.columns)
+    summary = method_simulation.summarize_layer_bc_results(
+        legacy, route=method_simulation.LEGACY_LAYER_BC_ROUTE
+    )
+    assert summary.scenario_summary.loc[0, "legacy_code"] == "C2"
+    assert tuple(legacy.columns) == original_columns
+    with pytest.raises(ValueError, match="legacy correction identity route"):
+        method_simulation.summarize_layer_bc_results(legacy)
+    with pytest.raises(ValueError, match="unknown correction identity route"):
+        method_simulation.summarize_layer_bc_results(legacy, route="legacy.unknown")
+
+    partial = legacy.assign(
+        identity_schema_version=method_simulation.CORRECTION_IDENTITY_SCHEMA_VERSION
+    )
+    with pytest.raises(ValueError, match="partially present"):
+        method_simulation.summarize_layer_bc_results(
+            partial, route=method_simulation.LEGACY_LAYER_BC_ROUTE
+        )
+
+    unknown_code = legacy.assign(family_adjustment="C9")
+    with pytest.raises(ValueError, match="unknown correction identity"):
+        method_simulation.summarize_layer_bc_results(
+            unknown_code, route=method_simulation.LEGACY_LAYER_BC_ROUTE
+        )
+
+    new_artifact = method_simulation.normalize_correction_identity_frame(
+        legacy, route=method_simulation.LEGACY_LAYER_BC_ROUTE
+    )
+    assert set(method_simulation.CANONICAL_CORRECTION_IDENTITY_FIELDS).issubset(
+        new_artifact.columns
+    )
+    conflict = new_artifact.assign(method_id="conflicting.method@v1")
+    with pytest.raises(ValueError, match="correction identity mismatch"):
+        method_simulation.validate_correction_identity_frame(conflict)
 
 
 @pytest.fixture(scope="module")
