@@ -92,6 +92,33 @@ class RegisteredModelReplicationArtifacts:
     selected_predictions: pd.DataFrame
 
 
+@dataclass(frozen=True)
+class RegisteredReplicaFoldRidgeArtifacts:
+    prediction_frame: pd.DataFrame
+    class_candidate: dict[str, object]
+    inner_rows: list[dict[str, object]]
+
+
+@dataclass(frozen=True)
+class RegisteredReplicaFoldClassFit:
+    model_class: str
+    best_parameter_key: str
+    class_candidate: dict[str, object]
+    inner_rows: list[dict[str, object]]
+    test_prediction: np.ndarray
+
+
+@dataclass(frozen=True)
+class RegisteredReplicaFoldArtifacts:
+    fold_idx: int
+    prediction_parts: list[pd.DataFrame]
+    inner_rows: list[dict[str, object]]
+    class_candidates: list[dict[str, object]]
+    diagnostic_rows: list[dict[str, object]]
+    selection_row: dict[str, object]
+    winner: dict[str, object]
+
+
 @contextmanager
 def _performance_stage(
     rows: list[dict[str, object]] | None,
@@ -1997,310 +2024,25 @@ def fit_walk_forward_registered_replicas(
     selection_rows: list[dict[str, object]] = []
     class_order = {name: index for index, name in enumerate(REGISTERED_MODEL_CLASS_ORDER)}
     for fold in folds:
-        fold_idx = int(fold.fold_idx)
-        if {"fold_idx", "split"}.issubset(canonical_frame.index.names):
-            try:
-                train_frame = canonical_frame.xs(
-                    (fold_idx, "train"), level=("fold_idx", "split")
-                ).sort_index()
-                test_frame = canonical_frame.xs(
-                    (fold_idx, "test"), level=("fold_idx", "split")
-                ).sort_index()
-            except KeyError as error:
-                raise ValueError(f"canonical frame is missing fold {fold_idx}") from error
-        else:
-            train_frame = canonical_frame.loc[
-                _date_mask(canonical_frame, fold.train_start, fold.train_end)
-            ].sort_index()
-            test_frame = canonical_frame.loc[
-                _date_mask(canonical_frame, fold.test_start, fold.test_end)
-            ].sort_index()
-        if train_frame.empty or test_frame.empty:
-            raise ValueError(f"registered replica fold {fold_idx} is empty")
-        splits = _inner_time_splits(
-            pd.DatetimeIndex(train_frame.index.get_level_values("decision_ts")),
-            gap=pd.Timedelta(inner_gap),
+        fold_artifacts = fit_walk_forward_registered_replica_fold(
+            canonical_frame,
+            fold,
+            candidate_id=candidate_id,
+            frozen_ridge_predictions=frozen_predictions,
+            frozen_ridge_inner_scores=frozen_scores,
+            target_column=target_column,
+            feature_columns=features,
+            inner_gap=inner_gap,
+            model_specs=specs,
+            fit_workers=fit_workers,
+            performance_timings=performance_timings,
+            timing_target=timing_target,
+            class_order=class_order,
         )
-        train_dates = pd.DatetimeIndex(
-            train_frame.index.get_level_values("decision_ts")
-        )
-        train_target = train_frame[target_column].to_numpy(dtype=float)
-        test_target = test_frame[target_column].to_numpy(dtype=float)
-        train_baseline = float(train_frame[target_column].mean())
-        split_payloads: list[dict[str, object]] = []
-        for split_idx, (inner_train_dates, validation_dates) in enumerate(splits):
-            inner_train = train_frame.loc[train_dates.isin(inner_train_dates)]
-            validation = train_frame.loc[train_dates.isin(validation_dates)]
-            split_payloads.append(
-                {
-                    "inner_split_idx": split_idx,
-                    "inner_train_start": inner_train_dates.min(),
-                    "inner_train_end": inner_train_dates.max(),
-                    "validation_start": validation_dates.min(),
-                    "validation_end": validation_dates.max(),
-                    "train_x": inner_train[list(features)].to_numpy(dtype=float),
-                    "train_y": inner_train[target_column].to_numpy(dtype=float),
-                    "validation_x": validation[list(features)].to_numpy(dtype=float),
-                    "validation_y": validation[target_column].to_numpy(dtype=float),
-                }
-            )
-
-        class_candidates: list[dict[str, object]] = []
-        ridge_score_rows = frozen_scores.loc[frozen_scores["fold_idx"] == fold_idx].copy()
-        if ridge_score_rows.empty:
-            raise ValueError(f"frozen ridge inner scores missing fold {fold_idx}")
-        ridge_totals = (
-            ridge_score_rows.groupby("alpha", as_index=False)["validation_sse"]
-            .sum()
-            .sort_values("alpha")
-        )
-        ridge_best_sse = float(ridge_totals["validation_sse"].min())
-        ridge_best_alpha = float(
-            ridge_totals.loc[
-                np.isclose(
-                    ridge_totals["validation_sse"],
-                    ridge_best_sse,
-                    rtol=1e-12,
-                    atol=1e-12,
-                ),
-                "alpha",
-            ].max()
-        )
-        for score_row in ridge_score_rows.itertuples(index=False):
-            inner_rows.append(
-                {
-                    "candidate_id": str(candidate_id),
-                    "model_class": "linear_ridge",
-                    "fold_idx": fold_idx,
-                    "inner_split_idx": int(score_row.inner_split_idx),
-                    "hyperparameters_json": _registered_parameter_key(
-                        {"alpha": float(score_row.alpha)}
-                    ),
-                    "inner_train_start": score_row.inner_train_start,
-                    "inner_train_end": score_row.inner_train_end,
-                    "validation_start": score_row.validation_start,
-                    "validation_end": score_row.validation_end,
-                    "validation_rows": int(score_row.validation_rows),
-                    "validation_sse": float(score_row.validation_sse),
-                }
-            )
-        ridge_fold = frozen_predictions.loc[
-            frozen_predictions["fold_idx"] == fold_idx
-        ].copy()
-        if ridge_fold.empty:
-            raise ValueError(f"frozen ridge predictions missing fold {fold_idx}")
-        ridge_fold["decision_ts"] = pd.to_datetime(
-            ridge_fold["decision_ts"], utc=True, errors="raise"
-        )
-        ridge_fold["symbol"] = ridge_fold["symbol"].astype(str)
-        ridge_fold = ridge_fold.sort_values(
-            ["decision_ts", "symbol"], kind="mergesort"
-        ).reset_index(drop=True)
-        expected_keys = test_frame.reset_index()[["decision_ts", "symbol"]].copy()
-        expected_keys["decision_ts"] = pd.to_datetime(
-            expected_keys["decision_ts"], utc=True, errors="raise"
-        )
-        expected_keys["symbol"] = expected_keys["symbol"].astype(str)
-        expected_keys = expected_keys.sort_values(
-            ["decision_ts", "symbol"], kind="mergesort"
-        ).reset_index(drop=True)
-        if not ridge_fold[["decision_ts", "symbol"]].equals(expected_keys):
-            raise ValueError("frozen ridge and canonical outer-OOS keys disagree")
-        if not np.allclose(
-            ridge_fold["target_signal"].to_numpy(dtype=float),
-            test_target,
-            rtol=0.0,
-            atol=1e-12,
-        ):
-            raise ValueError("frozen ridge and canonical outer-OOS targets disagree")
-        recorded_alpha = ridge_fold["selected_alpha"].astype(float).unique()
-        if len(recorded_alpha) != 1 or not np.isclose(
-            recorded_alpha[0], ridge_best_alpha, rtol=1e-12, atol=1e-12
-        ):
-            raise ValueError("frozen ridge selected alpha disagrees with inner scores")
-        ridge_output = ridge_fold.copy()
-        ridge_output["model_class"] = "linear_ridge"
-        ridge_output["source_model_id"] = "level2_full"
-        ridge_output["hyperparameters_json"] = _registered_parameter_key(
-            {"alpha": ridge_best_alpha}
-        )
-        prediction_parts.append(ridge_output)
-        ridge_outer_r2 = _replication_r2(
-            ridge_fold["target_signal"].to_numpy(dtype=float),
-            ridge_fold["replica_signal"].to_numpy(dtype=float),
-            train_baseline,
-        )
-        class_candidates.append(
-            {
-                "model_class": "linear_ridge",
-                "inner_validation_sse": ridge_best_sse,
-                "hyperparameters_json": _registered_parameter_key(
-                    {"alpha": ridge_best_alpha}
-                ),
-                "outer_train_r2": float("nan"),
-                "outer_oos_r2": ridge_outer_r2,
-            }
-        )
-
-        for model_class in REGISTERED_MODEL_CLASS_ORDER[1:]:
-            tasks = [
-                (parameters, payload)
-                for parameters in specs[model_class]
-                for payload in split_payloads
-            ]
-            prefix_tasks, generic_tasks = _registered_prefix_partition(
-                model_class, tasks
-            )
-            estimator_fit_count = len(prefix_tasks) + len(generic_tasks)
-            with _performance_stage(
-                performance_timings,
-                f"registered_{model_class}_inner_selection",
-                candidate_id=str(candidate_id),
-                timing_target=str(timing_target),
-                fold_idx=fold_idx,
-                estimator_fit_count=estimator_fit_count,
-            ):
-                evaluated_splits = _evaluate_registered_inner_tasks(
-                    model_class, tasks, fit_workers=int(fit_workers)
-                )
-            by_configuration: dict[str, dict[str, object]] = {}
-            for parameter_key, parameters, score_row in evaluated_splits:
-                entry = by_configuration.setdefault(
-                    parameter_key,
-                    {
-                        "parameters": parameters,
-                        "score_rows": [],
-                    },
-                )
-                entry["score_rows"].append(score_row)
-            configuration_results: list[
-                tuple[float, str, Mapping[str, object]]
-            ] = []
-            for parameter_key in sorted(by_configuration):
-                entry = by_configuration[parameter_key]
-                parameters = entry["parameters"]
-                score_rows = sorted(
-                    entry["score_rows"], key=lambda value: value["inner_split_idx"]
-                )
-                total_sse = float(
-                    sum(float(value["validation_sse"]) for value in score_rows)
-                )
-                configuration_results.append(
-                    (total_sse, parameter_key, parameters)
-                )
-                for score_row in score_rows:
-                    score_row.update(
-                        {
-                            "candidate_id": str(candidate_id),
-                            "model_class": model_class,
-                            "fold_idx": fold_idx,
-                            "hyperparameters_json": parameter_key,
-                        }
-                    )
-                inner_rows.extend(score_rows)
-            best_sse = min(value[0] for value in configuration_results)
-            best_configurations = [
-                value
-                for value in configuration_results
-                if np.isclose(value[0], best_sse, rtol=1e-12, atol=1e-12)
-            ]
-            _, best_parameter_key, best_parameters = min(
-                best_configurations,
-                key=lambda value: _registered_tie_key(
-                    model_class, value[2]
-                ),
-            )
-            with _performance_stage(
-                performance_timings,
-                f"registered_{model_class}_outer_final_fit",
-                candidate_id=str(candidate_id),
-                timing_target=str(timing_target),
-                fold_idx=fold_idx,
-                estimator_fit_count=1,
-            ):
-                estimator = _fit_registered_estimator(
-                    model_class,
-                    best_parameters,
-                    train_frame[list(features)].to_numpy(dtype=float),
-                    train_target,
-                )
-                train_prediction = estimator.predict(
-                    train_frame[list(features)].to_numpy(dtype=float)
-                )
-                test_prediction = estimator.predict(
-                    test_frame[list(features)].to_numpy(dtype=float)
-                )
-            output = test_frame[["forward_return", "strategy_forward_return"]].copy()
-            output["candidate_id"] = str(candidate_id)
-            output["model_id"] = model_class
-            output["model_class"] = model_class
-            output["source_model_id"] = model_class
-            output["fold_idx"] = fold_idx
-            output["target_signal"] = test_target
-            output["replica_signal"] = test_prediction
-            output["residual_signal"] = test_target - test_prediction
-            output["fold_train_target_mean"] = train_baseline
-            output["selected_alpha"] = np.nan
-            output["hyperparameters_json"] = best_parameter_key
-            prediction_parts.append(output.reset_index())
-            class_candidates.append(
-                {
-                    "model_class": model_class,
-                    "inner_validation_sse": float(best_sse),
-                    "hyperparameters_json": best_parameter_key,
-                    "outer_train_r2": _replication_r2(
-                        train_target, train_prediction, train_baseline
-                    ),
-                    "outer_oos_r2": _replication_r2(
-                        test_target, test_prediction, train_baseline
-                    ),
-                }
-            )
-
-        winner_sse = min(
-            float(candidate["inner_validation_sse"])
-            for candidate in class_candidates
-        )
-        winner = min(
-            (
-                candidate
-                for candidate in class_candidates
-                if np.isclose(
-                    float(candidate["inner_validation_sse"]),
-                    winner_sse,
-                    rtol=1e-12,
-                    atol=1e-12,
-                )
-            ),
-            key=lambda candidate: class_order[str(candidate["model_class"])],
-        )
-        for candidate in class_candidates:
-            diagnostic_rows.append(
-                {
-                    "candidate_id": str(candidate_id),
-                    "fold_idx": fold_idx,
-                    **candidate,
-                    "selected_model_class": str(winner["model_class"]),
-                    "model_class_selected": (
-                        str(candidate["model_class"]) == str(winner["model_class"])
-                    ),
-                    "selection_source": "outer_train_inner_validation",
-                }
-            )
-        selection_rows.append(
-            {
-                "candidate_id": str(candidate_id),
-                "fold_idx": fold_idx,
-                "selected_model_class": str(winner["model_class"]),
-                "selected_hyperparameters_json": str(
-                    winner["hyperparameters_json"]
-                ),
-                "selected_inner_validation_sse": float(
-                    winner["inner_validation_sse"]
-                ),
-                "selection_source": "outer_train_inner_validation",
-            }
-        )
+        prediction_parts.extend(fold_artifacts.prediction_parts)
+        inner_rows.extend(fold_artifacts.inner_rows)
+        diagnostic_rows.extend(fold_artifacts.diagnostic_rows)
+        selection_rows.append(fold_artifacts.selection_row)
     class_predictions = pd.concat(prediction_parts, ignore_index=True).sort_values(
         ["candidate_id", "model_class", "fold_idx", "decision_ts", "symbol"],
         kind="mergesort",
@@ -2317,6 +2059,536 @@ def fit_walk_forward_registered_replicas(
         model_diagnostics=pd.DataFrame(diagnostic_rows),
         fold_selection=fold_selection,
         selected_predictions=selected_predictions,
+    )
+
+
+def registered_replica_fold_inner_tasks(
+    model_class, model_specs, split_payloads
+) -> list[tuple[str, Mapping[str, object], dict[str, object]]]:
+    """Return the ordered fine-grained inner-fit unit descriptors for one
+    (model_class, fold).  Each unit is ``(kind, parameters, payload)`` where
+    ``kind`` is ``"prefix"`` or ``"generic"``.  The order matches the
+    sequential fold body exactly: parameter_key order then split order, with
+    prefix families first (as produced by ``_registered_prefix_partition``).
+    """
+    tasks = [
+        (parameters, payload)
+        for parameters in model_specs
+        for payload in split_payloads
+    ]
+    prefix_tasks, generic_tasks = _registered_prefix_partition(model_class, tasks)
+    units: list[tuple[str, Mapping[str, object], dict[str, object]]] = []
+    units.extend(
+        ("prefix", parameters, payload) for parameters, payload in prefix_tasks
+    )
+    units.extend(
+        ("generic", parameters, payload) for parameters, payload in generic_tasks
+    )
+    return units
+
+
+def evaluate_registered_replica_inner_task(
+    model_class,
+    parameters,
+    payload,
+    *,
+    kind,
+) -> list[tuple[str, Mapping[str, object], dict[str, object]]]:
+    """Evaluate one fine-grained inner-fit unit and return its scored rows.
+
+    ``kind`` must be the value produced by ``registered_replica_fold_inner_tasks``
+    (``"prefix"`` or ``"generic"``).  Returns the same
+    ``(parameter_key, parameters, score_row)`` tuples that the sequential fold
+    body collects, so the caller can feed them directly into
+    ``finalize_registered_replica_fold_class``.
+    """
+    model_class = str(model_class)
+    if str(kind) == "prefix":
+        family = (
+            _fit_registered_hist_gbm_prefix_family
+            if model_class == "hist_gbm"
+            else _fit_registered_random_forest_prefix_family
+        )
+        return family(dict(parameters), payload)
+    if str(kind) == "generic":
+        return [_fit_registered_inner_split(model_class, dict(parameters), payload)]
+    raise ValueError(f"unknown registered inner task kind: {kind}")
+
+
+def finalize_registered_replica_fold_class(
+    model_class,
+    evaluated_rows,
+    *,
+    fold_idx,
+    candidate_id,
+    train_features,
+    test_features,
+    train_target,
+    test_target,
+    train_baseline,
+) -> RegisteredReplicaFoldClassFit:
+    """Aggregate one (model_class, fold) inner scores, select the best
+    configuration, and perform the outer final fit.  Mirrors the sequential
+    fold body exactly (configuration ordering, tie-break, diagnostics).
+    """
+    model_class = str(model_class)
+    by_configuration: dict[str, dict[str, object]] = {}
+    for parameter_key, parameters, score_row in evaluated_rows:
+        entry = by_configuration.setdefault(
+            parameter_key,
+            {
+                "parameters": parameters,
+                "score_rows": [],
+            },
+        )
+        entry["score_rows"].append(score_row)
+    configuration_results: list[tuple[float, str, Mapping[str, object]]] = []
+    inner_rows: list[dict[str, object]] = []
+    for parameter_key in sorted(by_configuration):
+        entry = by_configuration[parameter_key]
+        parameters = entry["parameters"]
+        score_rows = sorted(
+            entry["score_rows"], key=lambda value: value["inner_split_idx"]
+        )
+        total_sse = float(
+            sum(float(value["validation_sse"]) for value in score_rows)
+        )
+        configuration_results.append((total_sse, parameter_key, parameters))
+        for score_row in score_rows:
+            score_row.update(
+                {
+                    "candidate_id": str(candidate_id),
+                    "model_class": model_class,
+                    "fold_idx": int(fold_idx),
+                    "hyperparameters_json": parameter_key,
+                }
+            )
+        inner_rows.extend(score_rows)
+    best_sse = min(value[0] for value in configuration_results)
+    best_configurations = [
+        value
+        for value in configuration_results
+        if np.isclose(value[0], best_sse, rtol=1e-12, atol=1e-12)
+    ]
+    _, best_parameter_key, best_parameters = min(
+        best_configurations,
+        key=lambda value: _registered_tie_key(model_class, value[2]),
+    )
+    estimator = _fit_registered_estimator(
+        model_class,
+        best_parameters,
+        np.asarray(train_features, dtype=float),
+        np.asarray(train_target, dtype=float),
+    )
+    train_prediction = estimator.predict(np.asarray(train_features, dtype=float))
+    test_prediction = estimator.predict(np.asarray(test_features, dtype=float))
+    class_candidate = {
+        "model_class": model_class,
+        "inner_validation_sse": float(best_sse),
+        "hyperparameters_json": best_parameter_key,
+        "outer_train_r2": _replication_r2(
+            np.asarray(train_target, dtype=float),
+            train_prediction,
+            float(train_baseline),
+        ),
+        "outer_oos_r2": _replication_r2(
+            np.asarray(test_target, dtype=float),
+            test_prediction,
+            float(train_baseline),
+        ),
+    }
+    return RegisteredReplicaFoldClassFit(
+        model_class=model_class,
+        best_parameter_key=best_parameter_key,
+        class_candidate=class_candidate,
+        inner_rows=inner_rows,
+        test_prediction=test_prediction,
+    )
+
+
+def registered_replica_fold_ridge_artifacts(
+    *,
+    candidate_id,
+    fold_idx,
+    frozen_score_rows,
+    frozen_prediction_rows,
+    test_frame,
+    test_target,
+    train_baseline,
+) -> RegisteredReplicaFoldRidgeArtifacts:
+    """Build the frozen level2_full ridge artifacts for one outer fold.
+
+    Returns the prediction frame, the linear_ridge class candidate, and the
+    ridge inner rows exactly as the sequential fold body produces them.
+    """
+    fold_idx = int(fold_idx)
+    ridge_score_rows = frozen_score_rows.copy()
+    if ridge_score_rows.empty:
+        raise ValueError(f"frozen ridge inner scores missing fold {fold_idx}")
+    ridge_totals = (
+        ridge_score_rows.groupby("alpha", as_index=False)["validation_sse"]
+        .sum()
+        .sort_values("alpha")
+    )
+    ridge_best_sse = float(ridge_totals["validation_sse"].min())
+    ridge_best_alpha = float(
+        ridge_totals.loc[
+            np.isclose(
+                ridge_totals["validation_sse"],
+                ridge_best_sse,
+                rtol=1e-12,
+                atol=1e-12,
+            ),
+            "alpha",
+        ].max()
+    )
+    inner_rows: list[dict[str, object]] = []
+    for score_row in ridge_score_rows.itertuples(index=False):
+        inner_rows.append(
+            {
+                "candidate_id": str(candidate_id),
+                "model_class": "linear_ridge",
+                "fold_idx": fold_idx,
+                "inner_split_idx": int(score_row.inner_split_idx),
+                "hyperparameters_json": _registered_parameter_key(
+                    {"alpha": float(score_row.alpha)}
+                ),
+                "inner_train_start": score_row.inner_train_start,
+                "inner_train_end": score_row.inner_train_end,
+                "validation_start": score_row.validation_start,
+                "validation_end": score_row.validation_end,
+                "validation_rows": int(score_row.validation_rows),
+                "validation_sse": float(score_row.validation_sse),
+            }
+        )
+    ridge_fold = frozen_prediction_rows.copy()
+    if ridge_fold.empty:
+        raise ValueError(f"frozen ridge predictions missing fold {fold_idx}")
+    ridge_fold["decision_ts"] = pd.to_datetime(
+        ridge_fold["decision_ts"], utc=True, errors="raise"
+    )
+    ridge_fold["symbol"] = ridge_fold["symbol"].astype(str)
+    ridge_fold = ridge_fold.sort_values(
+        ["decision_ts", "symbol"], kind="mergesort"
+    ).reset_index(drop=True)
+    expected_keys = test_frame.reset_index()[["decision_ts", "symbol"]].copy()
+    expected_keys["decision_ts"] = pd.to_datetime(
+        expected_keys["decision_ts"], utc=True, errors="raise"
+    )
+    expected_keys["symbol"] = expected_keys["symbol"].astype(str)
+    expected_keys = expected_keys.sort_values(
+        ["decision_ts", "symbol"], kind="mergesort"
+    ).reset_index(drop=True)
+    if not ridge_fold[["decision_ts", "symbol"]].equals(expected_keys):
+        raise ValueError("frozen ridge and canonical outer-OOS keys disagree")
+    if not np.allclose(
+        ridge_fold["target_signal"].to_numpy(dtype=float),
+        np.asarray(test_target, dtype=float),
+        rtol=0.0,
+        atol=1e-12,
+    ):
+        raise ValueError("frozen ridge and canonical outer-OOS targets disagree")
+    recorded_alpha = ridge_fold["selected_alpha"].astype(float).unique()
+    if len(recorded_alpha) != 1 or not np.isclose(
+        recorded_alpha[0], ridge_best_alpha, rtol=1e-12, atol=1e-12
+    ):
+        raise ValueError("frozen ridge selected alpha disagrees with inner scores")
+    ridge_output = ridge_fold.copy()
+    ridge_output["model_class"] = "linear_ridge"
+    ridge_output["source_model_id"] = "level2_full"
+    ridge_output["hyperparameters_json"] = _registered_parameter_key(
+        {"alpha": ridge_best_alpha}
+    )
+    ridge_outer_r2 = _replication_r2(
+        ridge_fold["target_signal"].to_numpy(dtype=float),
+        ridge_fold["replica_signal"].to_numpy(dtype=float),
+        float(train_baseline),
+    )
+    class_candidate = {
+        "model_class": "linear_ridge",
+        "inner_validation_sse": ridge_best_sse,
+        "hyperparameters_json": _registered_parameter_key(
+            {"alpha": ridge_best_alpha}
+        ),
+        "outer_train_r2": float("nan"),
+        "outer_oos_r2": ridge_outer_r2,
+    }
+    return RegisteredReplicaFoldRidgeArtifacts(
+        prediction_frame=ridge_output,
+        class_candidate=class_candidate,
+        inner_rows=inner_rows,
+    )
+
+
+def registered_replica_fold_class_output_frame(
+    *,
+    test_frame,
+    model_class,
+    candidate_id,
+    fold_idx,
+    test_target,
+    train_baseline,
+    best_parameter_key,
+    test_prediction,
+) -> pd.DataFrame:
+    """Assemble the class output prediction frame for one (class, fold)."""
+    output = test_frame[["forward_return", "strategy_forward_return"]].copy()
+    output["candidate_id"] = str(candidate_id)
+    output["model_id"] = model_class
+    output["model_class"] = model_class
+    output["source_model_id"] = model_class
+    output["fold_idx"] = int(fold_idx)
+    output["target_signal"] = np.asarray(test_target, dtype=float)
+    output["replica_signal"] = np.asarray(test_prediction, dtype=float)
+    output["residual_signal"] = (
+        np.asarray(test_target, dtype=float)
+        - np.asarray(test_prediction, dtype=float)
+    )
+    output["fold_train_target_mean"] = float(train_baseline)
+    output["selected_alpha"] = np.nan
+    output["hyperparameters_json"] = str(best_parameter_key)
+    return output.reset_index()
+
+
+def registered_replica_fold_winner(
+    class_candidates, class_order
+) -> dict[str, object]:
+    """Select the winning class candidate for one fold (min inner SSE with
+    model-class order tie-break)."""
+    winner_sse = min(
+        float(candidate["inner_validation_sse"])
+        for candidate in class_candidates
+    )
+    winner = min(
+        (
+            candidate
+            for candidate in class_candidates
+            if np.isclose(
+                float(candidate["inner_validation_sse"]),
+                winner_sse,
+                rtol=1e-12,
+                atol=1e-12,
+            )
+        ),
+        key=lambda candidate: class_order[str(candidate["model_class"])],
+    )
+    return dict(winner)
+
+
+def registered_replica_fold_diagnostic_rows(
+    class_candidates, winner, *, candidate_id, fold_idx
+) -> list[dict[str, object]]:
+    """Build the model_diagnostics rows for one fold, in candidate order."""
+    rows: list[dict[str, object]] = []
+    for candidate in class_candidates:
+        rows.append(
+            {
+                "candidate_id": str(candidate_id),
+                "fold_idx": int(fold_idx),
+                **candidate,
+                "selected_model_class": str(winner["model_class"]),
+                "model_class_selected": (
+                    str(candidate["model_class"]) == str(winner["model_class"])
+                ),
+                "selection_source": "outer_train_inner_validation",
+            }
+        )
+    return rows
+
+
+def registered_replica_fold_selection_row(
+    winner, *, candidate_id, fold_idx
+) -> dict[str, object]:
+    """Build the fold_selection row for one fold."""
+    return {
+        "candidate_id": str(candidate_id),
+        "fold_idx": int(fold_idx),
+        "selected_model_class": str(winner["model_class"]),
+        "selected_hyperparameters_json": str(winner["hyperparameters_json"]),
+        "selected_inner_validation_sse": float(winner["inner_validation_sse"]),
+        "selection_source": "outer_train_inner_validation",
+    }
+
+
+def fit_walk_forward_registered_replica_fold(
+    canonical_frame,
+    fold,
+    *,
+    candidate_id,
+    frozen_ridge_predictions,
+    frozen_ridge_inner_scores,
+    target_column="combo_signal",
+    feature_columns=PRICE_VOLUME_COLUMNS,
+    inner_gap="1d",
+    model_specs=None,
+    fit_workers=1,
+    performance_timings=None,
+    timing_target="unspecified",
+    class_order=None,
+) -> RegisteredReplicaFoldArtifacts:
+    """Run the registered-replica model grid for one outer fold and return
+    the fold artifacts (prediction parts, inner rows, class candidates,
+    diagnostics, selection row, winner).
+
+    This is the single per-fold driver used by both the sequential
+    ``fit_walk_forward_registered_replicas`` path and the distributed
+    execution path.  Inner fit units are evaluated sequentially here; the
+    distributed path evaluates the same units via
+    ``evaluate_registered_replica_inner_task`` and feeds the rows into
+    ``finalize_registered_replica_fold_class``.
+    """
+    fold_idx = int(fold.fold_idx)
+    features = tuple(str(c) for c in feature_columns)
+    specs = {
+        str(model_class): tuple(dict(parameters) for parameters in configurations)
+        for model_class, configurations in (
+            registered_replica_model_specs()
+            if model_specs is None
+            else model_specs
+        ).items()
+    }
+    if class_order is None:
+        class_order = {
+            name: index for index, name in enumerate(REGISTERED_MODEL_CLASS_ORDER)
+        }
+    if {"fold_idx", "split"}.issubset(canonical_frame.index.names):
+        try:
+            train_frame = canonical_frame.xs(
+                (fold_idx, "train"), level=("fold_idx", "split")
+            ).sort_index()
+            test_frame = canonical_frame.xs(
+                (fold_idx, "test"), level=("fold_idx", "split")
+            ).sort_index()
+        except KeyError as error:
+            raise ValueError(f"canonical frame is missing fold {fold_idx}") from error
+    else:
+        train_frame = canonical_frame.loc[
+            _date_mask(canonical_frame, fold.train_start, fold.train_end)
+        ].sort_index()
+        test_frame = canonical_frame.loc[
+            _date_mask(canonical_frame, fold.test_start, fold.test_end)
+        ].sort_index()
+    if train_frame.empty or test_frame.empty:
+        raise ValueError(f"registered replica fold {fold_idx} is empty")
+    splits = _inner_time_splits(
+        pd.DatetimeIndex(train_frame.index.get_level_values("decision_ts")),
+        gap=pd.Timedelta(inner_gap),
+    )
+    train_dates = pd.DatetimeIndex(
+        train_frame.index.get_level_values("decision_ts")
+    )
+    train_target = train_frame[target_column].to_numpy(dtype=float)
+    test_target = test_frame[target_column].to_numpy(dtype=float)
+    train_baseline = float(train_frame[target_column].mean())
+    train_features = train_frame[list(features)].to_numpy(dtype=float)
+    test_features = test_frame[list(features)].to_numpy(dtype=float)
+    split_payloads: list[dict[str, object]] = []
+    for split_idx, (inner_train_dates, validation_dates) in enumerate(splits):
+        inner_train = train_frame.loc[train_dates.isin(inner_train_dates)]
+        validation = train_frame.loc[train_dates.isin(validation_dates)]
+        split_payloads.append(
+            {
+                "inner_split_idx": split_idx,
+                "inner_train_start": inner_train_dates.min(),
+                "inner_train_end": inner_train_dates.max(),
+                "validation_start": validation_dates.min(),
+                "validation_end": validation_dates.max(),
+                "train_x": inner_train[list(features)].to_numpy(dtype=float),
+                "train_y": inner_train[target_column].to_numpy(dtype=float),
+                "validation_x": validation[list(features)].to_numpy(dtype=float),
+                "validation_y": validation[target_column].to_numpy(dtype=float),
+            }
+        )
+
+    prediction_parts: list[pd.DataFrame] = []
+    inner_rows: list[dict[str, object]] = []
+    class_candidates: list[dict[str, object]] = []
+
+    ridge_artifacts = registered_replica_fold_ridge_artifacts(
+        candidate_id=candidate_id,
+        fold_idx=fold_idx,
+        frozen_score_rows=frozen_ridge_inner_scores.loc[
+            frozen_ridge_inner_scores["fold_idx"] == fold_idx
+        ].copy(),
+        frozen_prediction_rows=frozen_ridge_predictions.loc[
+            frozen_ridge_predictions["fold_idx"] == fold_idx
+        ].copy(),
+        test_frame=test_frame,
+        test_target=test_target,
+        train_baseline=train_baseline,
+    )
+    prediction_parts.append(ridge_artifacts.prediction_frame)
+    inner_rows.extend(ridge_artifacts.inner_rows)
+    class_candidates.append(ridge_artifacts.class_candidate)
+
+    for model_class in REGISTERED_MODEL_CLASS_ORDER[1:]:
+        tasks = [
+            (parameters, payload)
+            for parameters in specs[model_class]
+            for payload in split_payloads
+        ]
+        prefix_tasks, generic_tasks = _registered_prefix_partition(model_class, tasks)
+        estimator_fit_count = len(prefix_tasks) + len(generic_tasks)
+        with _performance_stage(
+            performance_timings,
+            f"registered_{model_class}_inner_selection",
+            candidate_id=str(candidate_id),
+            timing_target=str(timing_target),
+            fold_idx=fold_idx,
+            estimator_fit_count=estimator_fit_count,
+        ):
+            evaluated_splits = _evaluate_registered_inner_tasks(
+                model_class, tasks, fit_workers=int(fit_workers)
+            )
+        with _performance_stage(
+            performance_timings,
+            f"registered_{model_class}_outer_final_fit",
+            candidate_id=str(candidate_id),
+            timing_target=str(timing_target),
+            fold_idx=fold_idx,
+            estimator_fit_count=1,
+        ):
+            class_fit = finalize_registered_replica_fold_class(
+                model_class,
+                evaluated_splits,
+                fold_idx=fold_idx,
+                candidate_id=str(candidate_id),
+                train_features=train_features,
+                test_features=test_features,
+                train_target=train_target,
+                test_target=test_target,
+                train_baseline=train_baseline,
+            )
+        prediction_parts.append(
+            registered_replica_fold_class_output_frame(
+                test_frame=test_frame,
+                model_class=class_fit.model_class,
+                candidate_id=str(candidate_id),
+                fold_idx=fold_idx,
+                test_target=test_target,
+                train_baseline=train_baseline,
+                best_parameter_key=class_fit.best_parameter_key,
+                test_prediction=class_fit.test_prediction,
+            )
+        )
+        inner_rows.extend(class_fit.inner_rows)
+        class_candidates.append(class_fit.class_candidate)
+
+    winner = registered_replica_fold_winner(class_candidates, class_order)
+    diagnostic_rows = registered_replica_fold_diagnostic_rows(
+        class_candidates, winner, candidate_id=candidate_id, fold_idx=fold_idx
+    )
+    selection_row = registered_replica_fold_selection_row(
+        winner, candidate_id=candidate_id, fold_idx=fold_idx
+    )
+    return RegisteredReplicaFoldArtifacts(
+        fold_idx=fold_idx,
+        prediction_parts=prediction_parts,
+        inner_rows=inner_rows,
+        class_candidates=class_candidates,
+        diagnostic_rows=diagnostic_rows,
+        selection_row=selection_row,
+        winner=winner,
     )
 
 
