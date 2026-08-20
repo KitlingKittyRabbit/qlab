@@ -11,6 +11,7 @@ from qlab.execution.resources import (
     apply_native_thread_environment,
     detect_machine_topology,
     native_thread_limits,
+    machine_topology_identity,
 )
 
 
@@ -127,6 +128,68 @@ def test_concurrent_capacity_respects_cpu_thread_and_ram_budgets():
     assert small_ram.concurrent_capacity(topology) == 2
     no_budget = ExecutionProfile(workers=16, native_threads=1, oversubscription_factor=1.0)
     assert no_budget.concurrent_capacity(topology) == 16
+
+
+def test_concurrent_capacity_uses_current_available_ram_and_fails_closed():
+    profile = ExecutionProfile(
+        workers=4,
+        native_threads=1,
+        per_task_ram_bytes=3 * 1024**3,
+        ram_budget_bytes=8 * 1024**3,
+    )
+    constrained = MachineTopology(
+        logical_cpus=8,
+        physical_cpus=None,
+        available_ram_bytes=4 * 1024**3,
+    )
+    assert profile.concurrent_capacity(constrained) == 1
+    impossible = MachineTopology(
+        logical_cpus=8,
+        physical_cpus=None,
+        available_ram_bytes=2 * 1024**3,
+    )
+    with pytest.raises(ValueError, match="no worker is admissible"):
+        profile.concurrent_capacity(impossible)
+
+
+def test_profile_binding_and_resource_report_are_consistent():
+    topology = MachineTopology(
+        logical_cpus=8,
+        physical_cpus=4,
+        available_ram_bytes=8 * 1024**3,
+    )
+    profile = ExecutionProfile(
+        workers=4,
+        native_threads=1,
+        per_task_ram_bytes=2 * 1024**3,
+        ram_budget_bytes=8 * 1024**3,
+        calibration_report_sha256="a" * 64,
+        qlab_head="b" * 40,
+        research_head="c" * 40,
+        route_identity="route",
+        machine_identity=machine_topology_identity(topology),
+        calibrated_effective_workers=4,
+        calibrated_ram_capacity_bytes=8 * 1024**3,
+        estimated_eta_seconds=12.5,
+    )
+    report = profile.resource_report(topology)
+    assert report["effective_workers"] == 4
+    assert report["ram_capacity_bytes"] == 8 * 1024**3
+    profile.validate_binding(
+        calibration_report_sha256="a" * 64,
+        qlab_head="b" * 40,
+        research_head="c" * 40,
+        route_identity="route",
+        topology=topology,
+    )
+    with pytest.raises(ValueError, match="binding mismatch"):
+        profile.validate_binding(
+            calibration_report_sha256="d" * 64,
+            qlab_head="b" * 40,
+            research_head="c" * 40,
+            route_identity="route",
+            topology=topology,
+        )
 
 
 def test_profile_round_trip_json_and_dict():

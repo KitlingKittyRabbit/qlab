@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-from qlab.execution.pool import WorkPool, current_context, set_pool_context
+from qlab.execution.pool import DependencyTask, WorkPool, current_context, set_pool_context
 from qlab.execution.resources import ExecutionProfile, MachineTopology
 
 
@@ -19,6 +19,12 @@ def _context_unit() -> str:
 
 def _cpu_unit(value: int) -> int:
     return value * 2
+
+
+def _timed_unit(seconds: float, name: str) -> dict[str, object]:
+    started = time.monotonic()
+    time.sleep(seconds)
+    return {"name": name, "started": started, "finished": time.monotonic()}
 
 
 def test_work_pool_returns_results_in_submission_order():
@@ -100,3 +106,43 @@ def test_work_pool_empty_map_is_deterministic():
     topology = MachineTopology(logical_cpus=2, physical_cpus=None, available_ram_bytes=1024)
     with WorkPool(profile=profile, topology=topology) as pool:
         assert pool.map([]) == []
+
+
+def test_dependency_scheduler_starts_ready_finalize_before_unrelated_slow_work():
+    profile = ExecutionProfile(workers=2, native_threads=1, oversubscription_factor=1.0)
+    topology = MachineTopology(
+        logical_cpus=4,
+        physical_cpus=None,
+        available_ram_bytes=2 * 1024**3,
+    )
+    tasks = [
+        DependencyTask("slow-random-forest", (), (_timed_unit, (0.25, "slow"))),
+        DependencyTask("fast-inner", (), (_timed_unit, (0.05, "fast"))),
+        DependencyTask(
+            "class-finalize",
+            ("fast-inner",),
+            (_timed_unit, (0.01, "finalize")),
+        ),
+    ]
+    with WorkPool(profile=profile, topology=topology) as pool:
+        results = pool.run_dag(tasks)
+    assert [result["name"] for result in results] == ["slow", "fast", "finalize"]
+    assert results[2]["started"] < results[0]["finished"]
+
+
+def test_dependency_scheduler_rejects_missing_dependencies_and_cycles():
+    profile = ExecutionProfile(workers=1, native_threads=1)
+    topology = MachineTopology(logical_cpus=2, physical_cpus=None, available_ram_bytes=1024)
+    with WorkPool(profile=profile, topology=topology) as pool:
+        with pytest.raises(ValueError, match="missing prerequisites"):
+            pool.run_dag(
+                [DependencyTask("a", ("missing",), (_cpu_unit, (1,)))]
+            )
+    with WorkPool(profile=profile, topology=topology) as pool:
+        with pytest.raises(ValueError, match="cycle"):
+            pool.run_dag(
+                [
+                    DependencyTask("a", ("b",), (_cpu_unit, (1,))),
+                    DependencyTask("b", ("a",), (_cpu_unit, (2,))),
+                ]
+            )
