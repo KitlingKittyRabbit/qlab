@@ -59,6 +59,17 @@ def test_work_pool_context_is_inherited_by_forked_workers():
         set_pool_context(previous)
 
 
+def test_work_pool_uses_explicit_fork_context():
+    profile = ExecutionProfile(workers=1, native_threads=1, oversubscription_factor=1.0)
+    topology = MachineTopology(
+        logical_cpus=max(2, os.cpu_count() or 2),
+        physical_cpus=None,
+        available_ram_bytes=2 * 1024**3,
+    )
+    pool = WorkPool(profile=profile, topology=topology)
+    assert pool._mp_context.get_start_method() == "fork"
+
+
 def test_work_pool_requires_context_manager():
     profile = ExecutionProfile(workers=1, native_threads=1)
     topology = MachineTopology(logical_cpus=2, physical_cpus=None, available_ram_bytes=1024)

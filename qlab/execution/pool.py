@@ -31,6 +31,7 @@ from qlab.execution.resources import (
 )
 
 _POOL_CONTEXT: dict[str, object] = {}
+POOL_START_METHOD = "fork"
 
 
 def set_pool_context(context: dict[str, object] | None) -> None:
@@ -69,6 +70,8 @@ class WorkPool:
         )
         self._profile = profile
         self._concurrency = profile.concurrent_capacity(self._topology)
+        # The context inheritance and copy-on-write contract requires Linux fork.
+        self._mp_context = multiprocessing.get_context(POOL_START_METHOD)
         set_pool_context(context)
         self._pool: multiprocessing.pool.Pool | None = None
 
@@ -78,7 +81,7 @@ class WorkPool:
 
     def __enter__(self) -> "WorkPool":
         with native_thread_limits(self._profile.native_threads):
-            self._pool = multiprocessing.Pool(
+            self._pool = self._mp_context.Pool(
                 processes=self._concurrency,
                 initializer=_worker_initializer,
                 initargs=(self._profile.native_threads,),
