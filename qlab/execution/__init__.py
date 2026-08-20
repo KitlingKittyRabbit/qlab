@@ -16,7 +16,11 @@ from qlab.execution.artifacts import (
     write_text_atomic,
 )
 from qlab.execution.equivalence import assert_frame_equivalent, canonical_frame_sha256
-from qlab.execution.identity import scientific_identity, task_identity
+from qlab.execution.identity import (
+    canonical_dict_sha256,
+    scientific_identity,
+    task_identity,
+)
 from qlab.execution.pool import DependencyTask, WorkPool, current_context, set_pool_context
 from qlab.execution.resources import (
     ExecutionProfile,
@@ -36,6 +40,7 @@ __all__ = [
     "atomic_directory_finalize",
     "assert_frame_equivalent",
     "canonical_frame_sha256",
+    "canonical_dict_sha256",
     "checksum_manifest_frame",
     "current_context",
     "detect_machine_topology",

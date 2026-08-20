@@ -21,6 +21,10 @@ def _cpu_unit(value: int) -> int:
     return value * 2
 
 
+def _collect_dependency_results(label: str, dependency_results: tuple[object, ...]) -> tuple[str, tuple[object, ...]]:
+    return label, dependency_results
+
+
 def _timed_unit(seconds: float, name: str) -> dict[str, object]:
     started = time.monotonic()
     time.sleep(seconds)
@@ -146,3 +150,19 @@ def test_dependency_scheduler_rejects_missing_dependencies_and_cycles():
                     DependencyTask("b", ("a",), (_cpu_unit, (2,))),
                 ]
             )
+
+
+def test_dependency_scheduler_passes_completed_results_to_dependents():
+    profile = ExecutionProfile(workers=2, native_threads=1)
+    topology = MachineTopology(logical_cpus=2, physical_cpus=None, available_ram_bytes=1024)
+    tasks = [
+        DependencyTask("a", (), (_cpu_unit, (2,))),
+        DependencyTask(
+            "b",
+            ("a",),
+            (_collect_dependency_results, ("finalize",)),
+            pass_dependency_results=True,
+        ),
+    ]
+    with WorkPool(profile=profile, topology=topology) as pool:
+        assert pool.run_dag(tasks) == [4, ("finalize", (4,))]

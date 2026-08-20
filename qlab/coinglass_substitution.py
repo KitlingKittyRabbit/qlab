@@ -1580,6 +1580,8 @@ def _registered_payload_identity(payload: Mapping[str, object]) -> str:
     }
     digest.update(json.dumps(metadata, sort_keys=True).encode("utf-8"))
     for key in ("train_x", "train_y", "validation_x", "validation_y"):
+        if key not in payload:
+            continue
         values = np.ascontiguousarray(np.asarray(payload[key]))
         digest.update(key.encode("utf-8"))
         digest.update(str(values.dtype).encode("utf-8"))

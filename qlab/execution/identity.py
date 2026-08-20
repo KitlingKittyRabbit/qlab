@@ -36,4 +36,7 @@ def scientific_identity(*, schema: str, **fields: object) -> str:
 
 def canonical_dict_sha256(mapping: Mapping[str, object], *, schema: str) -> str:
     """Stable digest of an ordered mapping of identifiers (order-independent)."""
-    return scientific_identity(schema=schema, **dict(mapping))
+    payload = dict(mapping)
+    if "schema" in payload:
+        payload["mapping_schema"] = payload.pop("schema")
+    return scientific_identity(schema=schema, **payload)

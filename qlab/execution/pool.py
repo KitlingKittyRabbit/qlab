@@ -44,6 +44,7 @@ class DependencyTask:
     task_id: str
     dependencies: tuple[str, ...]
     unit: tuple[Callable[..., object], tuple]
+    pass_dependency_results: bool = False
 
 
 def set_pool_context(context: dict[str, object] | None) -> None:
@@ -136,7 +137,9 @@ class WorkPool:
                 raise ValueError(f"dependency task has duplicate prerequisites: {task_id}")
             if task_id in dependencies:
                 raise ValueError(f"dependency task depends on itself: {task_id}")
-            by_id[task_id] = DependencyTask(task_id, dependencies, task.unit)
+            by_id[task_id] = DependencyTask(
+                task_id, dependencies, task.unit, bool(task.pass_dependency_results)
+            )
         for task in by_id.values():
             missing = sorted(set(task.dependencies).difference(by_id))
             if missing:
@@ -161,9 +164,15 @@ class WorkPool:
             task = by_id[task_id]
             submitted.add(task_id)
             running.add(task_id)
+            arguments = task.unit[1]
+            if task.pass_dependency_results:
+                arguments = (
+                    *arguments,
+                    tuple(completed[dependency] for dependency in task.dependencies),
+                )
             self._pool.apply_async(
                 _dispatch_unit,
-                (task.unit,),
+                ((task.unit[0], arguments),),
                 callback=lambda value, task_id=task_id: completions.put(
                     (task_id, True, value)
                 ),
