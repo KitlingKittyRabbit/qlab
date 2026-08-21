@@ -9,21 +9,47 @@ Must not be used for: changing scientific definitions or tolerances.
 from __future__ import annotations
 
 import hashlib
+import pickle
 
+import numpy as np
 import pandas as pd
 
 
-def canonical_frame_sha256(frame: pd.DataFrame) -> str:
-    """Hash a tabular artifact with its schema, index, order, and values."""
+_CANONICAL_FRAME_SCHEMA = b"qlab.execution.frame.v2"
+
+
+def _length_prefixed(value: bytes) -> bytes:
+    return len(value).to_bytes(8, byteorder="big") + value
+
+
+def canonical_frame_bytes(frame: pd.DataFrame) -> bytes:
+    """Serialize a frame without lossy float formatting.
+
+    The payload records axes and dtypes separately from each column's contiguous
+    values. Protocol-5 pickle is used only for these typed, in-memory components;
+    unlike JSON formatting, it preserves every float64 bit pattern and null value.
+    """
     if not isinstance(frame, pd.DataFrame):
         raise TypeError("execution equivalence requires pandas DataFrame artifacts")
-    payload = frame.to_json(
-        orient="table",
-        date_format="iso",
-        date_unit="ns",
-        double_precision=15,
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    metadata = {
+        "schema": _CANONICAL_FRAME_SCHEMA.decode("ascii"),
+        "index": frame.index,
+        "columns": frame.columns,
+        "dtypes": tuple(frame.dtypes),
+        "allows_duplicate_labels": frame.flags.allows_duplicate_labels,
+        "attrs": frame.attrs,
+    }
+    parts = [_length_prefixed(_CANONICAL_FRAME_SCHEMA)]
+    parts.append(_length_prefixed(pickle.dumps(metadata, protocol=5)))
+    for _, series in frame.items():
+        values = np.ascontiguousarray(series.to_numpy(copy=False))
+        parts.append(_length_prefixed(pickle.dumps(values, protocol=5)))
+    return b"".join(parts)
+
+
+def canonical_frame_sha256(frame: pd.DataFrame) -> str:
+    """Hash a tabular artifact with lossless schema, order, and value bytes."""
+    return hashlib.sha256(canonical_frame_bytes(frame)).hexdigest()
 
 
 def assert_frame_equivalent(

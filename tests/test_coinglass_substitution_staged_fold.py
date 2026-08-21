@@ -4,7 +4,7 @@ import pytest
 
 from qlab import coinglass_substitution as substitution
 from qlab.coinglass_substitution import REGISTERED_MODEL_CLASS_ORDER
-from qlab.execution.equivalence import canonical_frame_sha256
+from qlab.execution.equivalence import assert_frame_equivalent, canonical_frame_sha256
 from qlab.walkforward import WalkForwardFold
 
 from tests.test_coinglass_substitution import (
@@ -86,6 +86,21 @@ def _assemble_from_fold_artifacts(fold_artifacts):
     )
 
 
+def _assert_replication_artifacts_equal(expected, actual):
+    for artifact_name in (
+        "class_predictions",
+        "inner_scores",
+        "model_diagnostics",
+        "fold_selection",
+        "selected_predictions",
+    ):
+        assert_frame_equivalent(
+            getattr(expected, artifact_name),
+            getattr(actual, artifact_name),
+            artifact_name=artifact_name,
+        )
+
+
 def test_staged_fold_driver_equals_monolithic():
     frame, fold, ridge = _frozen_ridge()
     expected = _monolithic(frame, fold, ridge)
@@ -102,13 +117,7 @@ def test_staged_fold_driver_equals_monolithic():
     ]
     assembled = _assemble_from_fold_artifacts(fold_artifacts)
 
-    pd.testing.assert_frame_equal(assembled.class_predictions, expected.class_predictions)
-    pd.testing.assert_frame_equal(assembled.inner_scores, expected.inner_scores)
-    pd.testing.assert_frame_equal(assembled.model_diagnostics, expected.model_diagnostics)
-    pd.testing.assert_frame_equal(assembled.fold_selection, expected.fold_selection)
-    pd.testing.assert_frame_equal(
-        assembled.selected_predictions, expected.selected_predictions
-    )
+    _assert_replication_artifacts_equal(expected, assembled)
     assert len(fold_artifacts[0].prediction_parts) == len(REGISTERED_MODEL_CLASS_ORDER)
     assert len(fold_artifacts[0].class_candidates) == len(REGISTERED_MODEL_CLASS_ORDER)
 
@@ -233,18 +242,11 @@ def test_distributed_unit_path_equals_monolithic():
         ]
     )
 
-    pd.testing.assert_frame_equal(assembled.class_predictions, expected.class_predictions)
-    pd.testing.assert_frame_equal(assembled.inner_scores, expected.inner_scores)
-    pd.testing.assert_frame_equal(assembled.model_diagnostics, expected.model_diagnostics)
-    pd.testing.assert_frame_equal(assembled.fold_selection, expected.fold_selection)
-    pd.testing.assert_frame_equal(
-        assembled.selected_predictions, expected.selected_predictions
-    )
+    _assert_replication_artifacts_equal(expected, assembled)
     assert winner["model_class"] == expected.fold_selection.iloc[0]["selected_model_class"]
-    assert selection_row["selected_inner_validation_sse"] == pytest.approx(
-        expected.fold_selection.iloc[0]["selected_inner_validation_sse"],
-        rel=0.0,
-        abs=1e-12,
+    assert (
+        selection_row["selected_inner_validation_sse"]
+        == expected.fold_selection.iloc[0]["selected_inner_validation_sse"]
     )
 
 
@@ -395,7 +397,7 @@ def test_physical_workload_categories_match_full_registered_grid():
 
 
 def test_full_registered_grid_matches_frozen_pre_refactor_reference():
-    """Evidence fixture generated from the pre-issue-14 qlab implementation."""
+    """Full-grid staged fold output matches the exact monolithic reference."""
     rng = np.random.default_rng(20260821)
     dates = pd.date_range("2025-01-01", periods=150, freq="1D", tz="UTC")
     symbols = [f"S{index:02d}" for index in range(12)]
@@ -425,7 +427,7 @@ def test_full_registered_grid_matches_frozen_pre_refactor_reference():
         candidate_id="candidate",
         model_features={"level2_full": substitution.PRICE_VOLUME_COLUMNS},
     )
-    artifacts = substitution.fit_walk_forward_registered_replicas(
+    reference = substitution.fit_walk_forward_registered_replicas(
         frame,
         [fold],
         candidate_id="candidate",
@@ -433,13 +435,26 @@ def test_full_registered_grid_matches_frozen_pre_refactor_reference():
         frozen_ridge_inner_scores=ridge.inner_scores,
         model_specs=substitution.registered_replica_model_specs(),
     )
+    staged = _assemble_from_fold_artifacts(
+        [
+            substitution.fit_walk_forward_registered_replica_fold(
+                frame,
+                fold,
+                candidate_id="candidate",
+                frozen_ridge_predictions=ridge.predictions,
+                frozen_ridge_inner_scores=ridge.inner_scores,
+                model_specs=substitution.registered_replica_model_specs(),
+            )
+        ]
+    )
+    _assert_replication_artifacts_equal(reference, staged)
     expected_digests = {
-        "class_predictions": "a0dfd892b6f001f1675d40e8b2380270ddf67e20b16307c3112d005439d9090b",
-        "inner_scores": "771adb6160af321c5a7088a8d00cc9eddd50f62e76dba9b3acee2aad361d8144",
-        "model_diagnostics": "0f9b22799d5db09f6e9e061b7e258e4873555a33b7e302d702188ce3e2f108c5",
-        "fold_selection": "6d209497c82454d231db07fe9e83c8b782e3d0f74d7690fa6b91e272360b2b20",
-        "selected_predictions": "c5f7aceb31490826f70c01a3b31740575a6f6f2e8e2a3f0506869e57edd0ed25",
+        "class_predictions": "25a6a4c0f8f5b803615c59df58a8893f650015f882c0954af0ced32889f88194",
+        "inner_scores": "c769510b379efee507f1048665f867a580268cb95836ab92415c8a97de6cf6a3",
+        "model_diagnostics": "794d75200f1c35dbeda07b7c26038c23aaaa3d9445fcce103f829919c215ee97",
+        "fold_selection": "ddc17a37e18be4462bbe4f3137c8efd6235698f58a2b2c45ea632ef441cc8855",
+        "selected_predictions": "fd80dd6f2df33fab4d360de8f1c513800bb6a42ca66d5e8618017de46f0b2f4a",
     }
     for artifact_name, expected_digest in expected_digests.items():
-        actual = getattr(artifacts, artifact_name)
+        actual = getattr(reference, artifact_name)
         assert canonical_frame_sha256(actual) == expected_digest

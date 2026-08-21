@@ -15,7 +15,11 @@ from qlab.execution.artifacts import (
     verify_checksum_frame,
     write_text_atomic,
 )
-from qlab.execution.equivalence import assert_frame_equivalent, canonical_frame_sha256
+from qlab.execution.equivalence import (
+    assert_frame_equivalent,
+    canonical_frame_bytes,
+    canonical_frame_sha256,
+)
 from qlab.execution.identity import (
     canonical_dict_sha256,
     scientific_identity,
@@ -40,6 +44,7 @@ __all__ = [
     "apply_native_thread_environment",
     "atomic_directory_finalize",
     "assert_frame_equivalent",
+    "canonical_frame_bytes",
     "canonical_frame_sha256",
     "canonical_dict_sha256",
     "checksum_manifest_frame",
