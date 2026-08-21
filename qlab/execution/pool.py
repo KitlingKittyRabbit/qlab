@@ -22,16 +22,29 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import queue
+from dataclasses import dataclass
 from typing import Callable, Sequence
 
 from qlab.execution.resources import (
     ExecutionProfile,
     MachineTopology,
+    detect_machine_topology,
     native_thread_limits,
 )
 
 _POOL_CONTEXT: dict[str, object] = {}
 POOL_START_METHOD = "fork"
+
+
+@dataclass(frozen=True)
+class DependencyTask:
+    """One deterministic work unit and its explicit completion prerequisites."""
+
+    task_id: str
+    dependencies: tuple[str, ...]
+    unit: tuple[Callable[..., object], tuple]
+    pass_dependency_results: bool = False
 
 
 def set_pool_context(context: dict[str, object] | None) -> None:
@@ -63,11 +76,7 @@ class WorkPool:
         topology: MachineTopology | None = None,
         context: dict[str, object] | None = None,
     ) -> None:
-        self._topology = topology or MachineTopology(
-            logical_cpus=max(1, int(os.cpu_count() or 1)),
-            physical_cpus=None,
-            available_ram_bytes=0,
-        )
+        self._topology = topology or detect_machine_topology()
         self._profile = profile
         self._concurrency = profile.concurrent_capacity(self._topology)
         # The context inheritance and copy-on-write contract requires Linux fork.
@@ -105,6 +114,95 @@ class WorkPool:
     def map_ordered(self, units: Sequence[tuple[Callable[..., object], tuple]]) -> list[object]:
         """Alias of map: deterministic, order-preserving collection."""
         return self.map(units)
+
+    def run_dag(self, tasks: Sequence[DependencyTask]) -> list[object]:
+        """Run dependency-ready tasks without introducing a global phase barrier.
+
+        Tasks are submitted in deterministic task-id order whenever capacity is
+        available.  Completion order affects only readiness; returned values always
+        follow the caller's canonical task sequence.
+        """
+        if self._pool is None:
+            raise RuntimeError("WorkPool must be used as a context manager")
+        ordered = list(tasks)
+        if not ordered:
+            return []
+        by_id: dict[str, DependencyTask] = {}
+        for task in ordered:
+            task_id = str(task.task_id)
+            if not task_id or task_id in by_id:
+                raise ValueError("dependency task ids must be unique and non-empty")
+            dependencies = tuple(str(value) for value in task.dependencies)
+            if len(set(dependencies)) != len(dependencies):
+                raise ValueError(f"dependency task has duplicate prerequisites: {task_id}")
+            if task_id in dependencies:
+                raise ValueError(f"dependency task depends on itself: {task_id}")
+            by_id[task_id] = DependencyTask(
+                task_id, dependencies, task.unit, bool(task.pass_dependency_results)
+            )
+        for task in by_id.values():
+            missing = sorted(set(task.dependencies).difference(by_id))
+            if missing:
+                raise ValueError(
+                    f"dependency task {task.task_id} has missing prerequisites: {missing}"
+                )
+
+        dependents: dict[str, list[str]] = {task_id: [] for task_id in by_id}
+        remaining: dict[str, set[str]] = {}
+        for task in by_id.values():
+            remaining[task.task_id] = set(task.dependencies)
+            for dependency in task.dependencies:
+                dependents[dependency].append(task.task_id)
+        ready = [task_id for task_id, dependencies in remaining.items() if not dependencies]
+        ready.sort()
+        submitted: set[str] = set()
+        completed: dict[str, object] = {}
+        running: set[str] = set()
+        completions: queue.Queue[tuple[str, bool, object]] = queue.Queue()
+
+        def submit(task_id: str) -> None:
+            task = by_id[task_id]
+            submitted.add(task_id)
+            running.add(task_id)
+            arguments = task.unit[1]
+            if task.pass_dependency_results:
+                arguments = (
+                    *arguments,
+                    tuple(completed[dependency] for dependency in task.dependencies),
+                )
+            self._pool.apply_async(
+                _dispatch_unit,
+                ((task.unit[0], arguments),),
+                callback=lambda value, task_id=task_id: completions.put(
+                    (task_id, True, value)
+                ),
+                error_callback=lambda error, task_id=task_id: completions.put(
+                    (task_id, False, error)
+                ),
+            )
+
+        try:
+            while len(completed) < len(by_id):
+                while ready and len(running) < self._concurrency:
+                    submit(ready.pop(0))
+                if not running:
+                    raise ValueError("dependency graph contains a cycle")
+                task_id, succeeded, value = completions.get()
+                running.remove(task_id)
+                if not succeeded:
+                    raise RuntimeError(f"dependency task failed: {task_id}") from value
+                completed[task_id] = value
+                for dependent in sorted(dependents[task_id]):
+                    remaining[dependent].discard(task_id)
+                    if not remaining[dependent] and dependent not in submitted:
+                        ready.append(dependent)
+                ready.sort()
+        except BaseException:
+            self._pool.terminate()
+            self._pool.join()
+            self._pool = None
+            raise
+        return [completed[str(task.task_id)] for task in ordered]
 
 
 def _dispatch_unit(unit: tuple[Callable[..., object], tuple]) -> object:

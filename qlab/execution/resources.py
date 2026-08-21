@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
+from qlab.execution.identity import canonical_dict_sha256
+
 NATIVE_THREAD_ENVIRONMENT_VARIABLES = (
     "OMP_NUM_THREADS",
     "MKL_NUM_THREADS",
@@ -29,6 +31,19 @@ class MachineTopology:
     logical_cpus: int
     physical_cpus: int | None
     available_ram_bytes: int
+
+
+def machine_topology_identity(topology: MachineTopology) -> str:
+    """Return a stable identity for CPU topology, excluding volatile RAM."""
+    return canonical_dict_sha256(
+        {
+            "logical_cpus": int(topology.logical_cpus),
+            "physical_cpus": (
+                None if topology.physical_cpus is None else int(topology.physical_cpus)
+            ),
+        },
+        schema="qlab_machine_topology_v2",
+    )
 
 
 def detect_machine_topology() -> "MachineTopology":
@@ -113,6 +128,14 @@ class ExecutionProfile:
         per_task_ram_bytes: int | None = None,
         ram_budget_bytes: int | None = None,
         oversubscription_factor: float = 1.0,
+        calibration_report_sha256: str | None = None,
+        qlab_head: str | None = None,
+        research_head: str | None = None,
+        route_identity: str | None = None,
+        machine_identity: str | None = None,
+        calibrated_effective_workers: int | None = None,
+        calibrated_ram_capacity_bytes: int | None = None,
+        estimated_eta_seconds: float | None = None,
     ) -> None:
         self.workers = int(workers)
         self.native_threads = int(native_threads)
@@ -121,6 +144,26 @@ class ExecutionProfile:
         )
         self.ram_budget_bytes = None if ram_budget_bytes is None else int(ram_budget_bytes)
         self.oversubscription_factor = float(oversubscription_factor)
+        self.calibration_report_sha256 = (
+            None if calibration_report_sha256 is None else str(calibration_report_sha256)
+        )
+        self.qlab_head = None if qlab_head is None else str(qlab_head)
+        self.research_head = None if research_head is None else str(research_head)
+        self.route_identity = None if route_identity is None else str(route_identity)
+        self.machine_identity = None if machine_identity is None else str(machine_identity)
+        self.calibrated_effective_workers = (
+            None
+            if calibrated_effective_workers is None
+            else int(calibrated_effective_workers)
+        )
+        self.calibrated_ram_capacity_bytes = (
+            None
+            if calibrated_ram_capacity_bytes is None
+            else int(calibrated_ram_capacity_bytes)
+        )
+        self.estimated_eta_seconds = (
+            None if estimated_eta_seconds is None else float(estimated_eta_seconds)
+        )
         if self.workers < 1 or self.native_threads < 1:
             raise ValueError("workers and native_threads must be at least 1")
         if not 0.0 < self.oversubscription_factor <= 4.0:
@@ -129,15 +172,25 @@ class ExecutionProfile:
             raise ValueError("per_task_ram_bytes must be positive")
         if self.ram_budget_bytes is not None and self.ram_budget_bytes < 1:
             raise ValueError("ram_budget_bytes must be positive")
+        if self.calibrated_effective_workers is not None and self.calibrated_effective_workers < 1:
+            raise ValueError("calibrated_effective_workers must be positive")
+        if self.calibrated_ram_capacity_bytes is not None and self.calibrated_ram_capacity_bytes < 1:
+            raise ValueError("calibrated_ram_capacity_bytes must be positive")
+        if self.estimated_eta_seconds is not None and self.estimated_eta_seconds < 0.0:
+            raise ValueError("estimated_eta_seconds must be non-negative")
 
     def _effective_capacity(self, topology: MachineTopology) -> int:
         capacity = self.workers
         capacity = min(capacity, max(1, topology.logical_cpus // self.native_threads))
-        if self.per_task_ram_bytes is not None and self.ram_budget_bytes is not None:
-            capacity = min(
-                capacity,
-                max(1, self.ram_budget_bytes // self.per_task_ram_bytes),
-            )
+        if self.per_task_ram_bytes is not None:
+            if int(topology.available_ram_bytes) < 1:
+                raise ValueError("current available RAM is unavailable for admission")
+            ram_capacity = int(topology.available_ram_bytes) // self.per_task_ram_bytes
+            if self.ram_budget_bytes is not None:
+                ram_capacity = min(ram_capacity, self.ram_budget_bytes // self.per_task_ram_bytes)
+            if ram_capacity < 1:
+                raise ValueError("no worker is admissible under the current RAM contract")
+            capacity = min(capacity, ram_capacity)
         return capacity
 
     def validate(self, topology: MachineTopology) -> None:
@@ -157,19 +210,95 @@ class ExecutionProfile:
         self.validate(topology)
         return self._effective_capacity(topology)
 
+    def resource_report(self, topology: MachineTopology) -> dict[str, object]:
+        """Report the same final capacity used for runtime admission."""
+        effective_workers = self.concurrent_capacity(topology)
+        ram_capacity = int(topology.available_ram_bytes)
+        if self.ram_budget_bytes is not None:
+            ram_capacity = min(ram_capacity, self.ram_budget_bytes)
+        return {
+            "requested_workers": self.workers,
+            "effective_workers": effective_workers,
+            "native_threads": self.native_threads,
+            "available_ram_bytes": int(topology.available_ram_bytes),
+            "ram_capacity_bytes": ram_capacity,
+            "per_task_ram_bytes": self.per_task_ram_bytes,
+            "ram_budget_bytes": self.ram_budget_bytes,
+            "estimated_eta_seconds": self.estimated_eta_seconds,
+        }
+
+    def validate_binding(
+        self,
+        *,
+        calibration_report_sha256: str,
+        qlab_head: str,
+        research_head: str,
+        route_identity: str,
+        topology: MachineTopology,
+    ) -> None:
+        """Reject a profile that is not bound to the current formal inputs."""
+        expected = {
+            "calibration_report_sha256": str(calibration_report_sha256),
+            "qlab_head": str(qlab_head),
+            "research_head": str(research_head),
+            "route_identity": str(route_identity),
+            "machine_identity": machine_topology_identity(topology),
+        }
+        actual = {
+            "calibration_report_sha256": self.calibration_report_sha256,
+            "qlab_head": self.qlab_head,
+            "research_head": self.research_head,
+            "route_identity": self.route_identity,
+            "machine_identity": self.machine_identity,
+        }
+        for key, value in expected.items():
+            if actual[key] != value:
+                raise ValueError(f"execution profile binding mismatch: {key}")
+        report = self.resource_report(topology)
+        if (
+            self.calibrated_effective_workers is not None
+            and self.calibrated_effective_workers != report["effective_workers"]
+        ):
+            raise ValueError("execution profile effective workers are stale")
+        if (
+            self.calibrated_ram_capacity_bytes is not None
+            and self.calibrated_ram_capacity_bytes != report["ram_capacity_bytes"]
+        ):
+            raise ValueError("execution profile RAM capacity is stale")
+
+    def identity_sha256(self) -> str:
+        # The report binding is runtime provenance, not an intrinsic profile field.
+        # Keeping it out makes this identity stable before and after binding.
+        identity_payload = self.to_dict()
+        identity_payload.pop("calibration_report_sha256", None)
+        return canonical_dict_sha256(
+            identity_payload, schema="qlab_execution_profile_identity_v3"
+        )
+
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema": "qlab_execution_profile_v1",
+            "schema": "qlab_execution_profile_v2",
             "workers": self.workers,
             "native_threads": self.native_threads,
             "per_task_ram_bytes": self.per_task_ram_bytes,
             "ram_budget_bytes": self.ram_budget_bytes,
             "oversubscription_factor": self.oversubscription_factor,
+            "calibration_report_sha256": self.calibration_report_sha256,
+            "qlab_head": self.qlab_head,
+            "research_head": self.research_head,
+            "route_identity": self.route_identity,
+            "machine_identity": self.machine_identity,
+            "calibrated_effective_workers": self.calibrated_effective_workers,
+            "calibrated_ram_capacity_bytes": self.calibrated_ram_capacity_bytes,
+            "estimated_eta_seconds": self.estimated_eta_seconds,
         }
 
     @classmethod
     def from_dict(cls, raw: object) -> "ExecutionProfile":
-        if not isinstance(raw, dict) or raw.get("schema") != "qlab_execution_profile_v1":
+        if not isinstance(raw, dict) or raw.get("schema") not in {
+            "qlab_execution_profile_v1",
+            "qlab_execution_profile_v2",
+        }:
             raise ValueError("execution profile schema is unsupported")
         return cls(
             workers=int(raw["workers"]),
@@ -181,6 +310,14 @@ class ExecutionProfile:
                 None if raw.get("ram_budget_bytes") is None else int(raw["ram_budget_bytes"])
             ),
             oversubscription_factor=float(raw.get("oversubscription_factor", 1.0)),
+            calibration_report_sha256=raw.get("calibration_report_sha256"),
+            qlab_head=raw.get("qlab_head"),
+            research_head=raw.get("research_head"),
+            route_identity=raw.get("route_identity"),
+            machine_identity=raw.get("machine_identity"),
+            calibrated_effective_workers=raw.get("calibrated_effective_workers"),
+            calibrated_ram_capacity_bytes=raw.get("calibrated_ram_capacity_bytes"),
+            estimated_eta_seconds=raw.get("estimated_eta_seconds"),
         )
 
     def to_json(self) -> str:

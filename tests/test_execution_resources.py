@@ -11,7 +11,9 @@ from qlab.execution.resources import (
     apply_native_thread_environment,
     detect_machine_topology,
     native_thread_limits,
+    machine_topology_identity,
 )
+from qlab.execution.provenance import tracked_file_provenance
 
 
 def test_native_thread_environment_is_idempotent():
@@ -58,6 +60,46 @@ def test_detect_machine_topology_reports_positive_values():
     topology = detect_machine_topology()
     assert topology.logical_cpus >= 1
     assert topology.available_ram_bytes > 0
+
+
+def test_machine_topology_identity_excludes_volatile_available_ram():
+    low = MachineTopology(logical_cpus=16, physical_cpus=8, available_ram_bytes=4 * 1024**3)
+    high = MachineTopology(logical_cpus=16, physical_cpus=8, available_ram_bytes=32 * 1024**3)
+    assert machine_topology_identity(low) == machine_topology_identity(high)
+
+
+def test_selective_provenance_requires_clean_tracked_files(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+    tracked = repository / "critical.py"
+    tracked.write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "critical.py"], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "init"],
+        cwd=repository,
+        check=True,
+    )
+    provenance = tracked_file_provenance(repository, ["critical.py"])
+    assert provenance["files"]["critical.py"]["tracked"] is True
+    (repository / "unrelated.txt").write_text("allowed\n", encoding="utf-8")
+    assert tracked_file_provenance(repository, ["critical.py"]) == provenance
+    tracked.write_text("value = 2\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="dirty"):
+        tracked_file_provenance(repository, ["critical.py"])
+
+
+def test_selective_provenance_rejects_untracked_critical_file(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+    (repository / "critical.py").write_text("value = 1\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="not Git tracked"):
+        tracked_file_provenance(repository, ["critical.py"])
 
 
 def test_profile_rejects_invalid_fields():
@@ -127,6 +169,86 @@ def test_concurrent_capacity_respects_cpu_thread_and_ram_budgets():
     assert small_ram.concurrent_capacity(topology) == 2
     no_budget = ExecutionProfile(workers=16, native_threads=1, oversubscription_factor=1.0)
     assert no_budget.concurrent_capacity(topology) == 16
+
+
+def test_concurrent_capacity_uses_current_available_ram_and_fails_closed():
+    profile = ExecutionProfile(
+        workers=4,
+        native_threads=1,
+        per_task_ram_bytes=3 * 1024**3,
+        ram_budget_bytes=8 * 1024**3,
+    )
+    constrained = MachineTopology(
+        logical_cpus=8,
+        physical_cpus=None,
+        available_ram_bytes=4 * 1024**3,
+    )
+    assert profile.concurrent_capacity(constrained) == 1
+    impossible = MachineTopology(
+        logical_cpus=8,
+        physical_cpus=None,
+        available_ram_bytes=2 * 1024**3,
+    )
+    with pytest.raises(ValueError, match="no worker is admissible"):
+        profile.concurrent_capacity(impossible)
+
+
+def test_profile_binding_and_resource_report_are_consistent():
+    topology = MachineTopology(
+        logical_cpus=8,
+        physical_cpus=4,
+        available_ram_bytes=8 * 1024**3,
+    )
+    profile = ExecutionProfile(
+        workers=4,
+        native_threads=1,
+        per_task_ram_bytes=2 * 1024**3,
+        ram_budget_bytes=8 * 1024**3,
+        calibration_report_sha256="a" * 64,
+        qlab_head="b" * 40,
+        research_head="c" * 40,
+        route_identity="route",
+        machine_identity=machine_topology_identity(topology),
+        calibrated_effective_workers=4,
+        calibrated_ram_capacity_bytes=8 * 1024**3,
+        estimated_eta_seconds=12.5,
+    )
+    report = profile.resource_report(topology)
+    assert report["effective_workers"] == 4
+    assert report["ram_capacity_bytes"] == 8 * 1024**3
+    profile.validate_binding(
+        calibration_report_sha256="a" * 64,
+        qlab_head="b" * 40,
+        research_head="c" * 40,
+        route_identity="route",
+        topology=topology,
+    )
+    with pytest.raises(ValueError, match="binding mismatch"):
+        profile.validate_binding(
+            calibration_report_sha256="d" * 64,
+            qlab_head="b" * 40,
+            research_head="c" * 40,
+            route_identity="route",
+            topology=topology,
+        )
+
+
+def test_profile_identity_is_independent_of_report_binding():
+    profile = ExecutionProfile(
+        workers=2,
+        native_threads=1,
+        per_task_ram_bytes=1024**3,
+        ram_budget_bytes=8 * 1024**3,
+        qlab_head="b" * 40,
+        research_head="c" * 40,
+        route_identity="route",
+    )
+    before = profile.identity_sha256()
+    profile.calibration_report_sha256 = "a" * 64
+    after = profile.identity_sha256()
+    profile.calibration_report_sha256 = "d" * 64
+    changed_binding = profile.identity_sha256()
+    assert before == after == changed_binding
 
 
 def test_profile_round_trip_json_and_dict():

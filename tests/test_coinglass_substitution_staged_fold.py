@@ -4,6 +4,8 @@ import pytest
 
 from qlab import coinglass_substitution as substitution
 from qlab.coinglass_substitution import REGISTERED_MODEL_CLASS_ORDER
+from qlab.execution.equivalence import assert_frame_equivalent, canonical_frame_sha256
+from qlab.walkforward import WalkForwardFold
 
 from tests.test_coinglass_substitution import (
     _registered_replica_frame,
@@ -84,6 +86,21 @@ def _assemble_from_fold_artifacts(fold_artifacts):
     )
 
 
+def _assert_replication_artifacts_equal(expected, actual):
+    for artifact_name in (
+        "class_predictions",
+        "inner_scores",
+        "model_diagnostics",
+        "fold_selection",
+        "selected_predictions",
+    ):
+        assert_frame_equivalent(
+            getattr(expected, artifact_name),
+            getattr(actual, artifact_name),
+            artifact_name=artifact_name,
+        )
+
+
 def test_staged_fold_driver_equals_monolithic():
     frame, fold, ridge = _frozen_ridge()
     expected = _monolithic(frame, fold, ridge)
@@ -100,13 +117,7 @@ def test_staged_fold_driver_equals_monolithic():
     ]
     assembled = _assemble_from_fold_artifacts(fold_artifacts)
 
-    pd.testing.assert_frame_equal(assembled.class_predictions, expected.class_predictions)
-    pd.testing.assert_frame_equal(assembled.inner_scores, expected.inner_scores)
-    pd.testing.assert_frame_equal(assembled.model_diagnostics, expected.model_diagnostics)
-    pd.testing.assert_frame_equal(assembled.fold_selection, expected.fold_selection)
-    pd.testing.assert_frame_equal(
-        assembled.selected_predictions, expected.selected_predictions
-    )
+    _assert_replication_artifacts_equal(expected, assembled)
     assert len(fold_artifacts[0].prediction_parts) == len(REGISTERED_MODEL_CLASS_ORDER)
     assert len(fold_artifacts[0].class_candidates) == len(REGISTERED_MODEL_CLASS_ORDER)
 
@@ -231,18 +242,11 @@ def test_distributed_unit_path_equals_monolithic():
         ]
     )
 
-    pd.testing.assert_frame_equal(assembled.class_predictions, expected.class_predictions)
-    pd.testing.assert_frame_equal(assembled.inner_scores, expected.inner_scores)
-    pd.testing.assert_frame_equal(assembled.model_diagnostics, expected.model_diagnostics)
-    pd.testing.assert_frame_equal(assembled.fold_selection, expected.fold_selection)
-    pd.testing.assert_frame_equal(
-        assembled.selected_predictions, expected.selected_predictions
-    )
+    _assert_replication_artifacts_equal(expected, assembled)
     assert winner["model_class"] == expected.fold_selection.iloc[0]["selected_model_class"]
-    assert selection_row["selected_inner_validation_sse"] == pytest.approx(
-        expected.fold_selection.iloc[0]["selected_inner_validation_sse"],
-        rel=0.0,
-        abs=1e-12,
+    assert (
+        selection_row["selected_inner_validation_sse"]
+        == expected.fold_selection.iloc[0]["selected_inner_validation_sse"]
     )
 
 
@@ -349,3 +353,108 @@ def test_unit_identity_keys_match_evaluated_rows():
             assert len(rows) == (
                 2 if kind == "prefix" else 1
             )
+
+
+def test_physical_workload_categories_match_full_registered_grid():
+    rng = np.random.default_rng(20260821)
+    payload = {
+        "inner_split_idx": 0,
+        "inner_train_start": pd.Timestamp("2024-01-01", tz="UTC"),
+        "inner_train_end": pd.Timestamp("2024-01-02", tz="UTC"),
+        "validation_start": pd.Timestamp("2024-01-03", tz="UTC"),
+        "validation_end": pd.Timestamp("2024-01-04", tz="UTC"),
+        "train_x": rng.normal(size=(40, 24)),
+        "train_y": rng.normal(size=40),
+        "validation_x": rng.normal(size=(20, 24)),
+        "validation_y": rng.normal(size=20),
+    }
+    units = substitution.registered_replica_physical_workload_units(
+        substitution.registered_replica_model_specs(), [payload]
+    )
+    counts = pd.Series([unit["physical_category"] for unit in units]).value_counts().to_dict()
+    assert counts == {
+        "hist_gbm:prefix": 4,
+        "hist_gbm:generic": 4,
+        "random_forest:prefix": 2,
+        "random_forest:generic": 4,
+        "poly2_ridge:generic": 9,
+        "poly2_elastic_net:generic": 27,
+    }
+    rf_generic = [
+        unit for unit in units
+        if unit["physical_category"] == "random_forest:generic"
+    ]
+    assert all("min_samples_leaf" in unit["parameters"] for unit in rf_generic)
+    assert sum(int(unit["configuration_count"]) for unit in units) == 56
+    hgbm_prefix = next(
+        unit for unit in units if unit["physical_category"] == "hist_gbm:prefix"
+    )
+    rf_prefix = next(
+        unit for unit in units if unit["physical_category"] == "random_forest:prefix"
+    )
+    assert hgbm_prefix["resource_dimensions"]["max_iter"] == [100, 300]
+    assert rf_prefix["resource_dimensions"]["n_estimators"] == [200, 500]
+
+
+def test_full_registered_grid_matches_frozen_pre_refactor_reference():
+    """Full-grid staged fold output matches the exact monolithic reference."""
+    rng = np.random.default_rng(20260821)
+    dates = pd.date_range("2025-01-01", periods=150, freq="1D", tz="UTC")
+    symbols = [f"S{index:02d}" for index in range(12)]
+    index = pd.MultiIndex.from_product(
+        [dates, symbols], names=["decision_ts", "symbol"]
+    )
+    frame = pd.DataFrame(index=index)
+    for column in substitution.PRICE_VOLUME_COLUMNS:
+        frame[column] = rng.normal(0.0, 0.2, len(index))
+    frame["combo_signal"] = (
+        0.7 * frame["return_1d"]
+        + 0.4 * np.square(frame["realized_vol_2d"])
+        - 0.3 * frame["log_dollar_volume_4d"]
+    )
+    frame["forward_return"] = frame["combo_signal"] * 0.01
+    frame["strategy_forward_return"] = frame["forward_return"]
+    fold = WalkForwardFold(
+        fold_idx=0,
+        train_start=dates[0],
+        train_end=dates[119],
+        test_start=dates[122],
+        test_end=dates[149],
+    )
+    ridge = substitution.fit_walk_forward_ridge_replicas(
+        frame,
+        [fold],
+        candidate_id="candidate",
+        model_features={"level2_full": substitution.PRICE_VOLUME_COLUMNS},
+    )
+    reference = substitution.fit_walk_forward_registered_replicas(
+        frame,
+        [fold],
+        candidate_id="candidate",
+        frozen_ridge_predictions=ridge.predictions,
+        frozen_ridge_inner_scores=ridge.inner_scores,
+        model_specs=substitution.registered_replica_model_specs(),
+    )
+    staged = _assemble_from_fold_artifacts(
+        [
+            substitution.fit_walk_forward_registered_replica_fold(
+                frame,
+                fold,
+                candidate_id="candidate",
+                frozen_ridge_predictions=ridge.predictions,
+                frozen_ridge_inner_scores=ridge.inner_scores,
+                model_specs=substitution.registered_replica_model_specs(),
+            )
+        ]
+    )
+    _assert_replication_artifacts_equal(reference, staged)
+    expected_digests = {
+        "class_predictions": "3f97d4d6ca071e6bf449bae2edb61a6140b92e4369fc583dc057c2c5788952c2",
+        "inner_scores": "67d6ca752f105ae1d5d7ca0634fc62c4ad580f32556cd62992baa434f38c9d09",
+        "model_diagnostics": "ccca8eb8335dd2f57dcf545f69ea1d0880a33d26be779858947fda3f71cadb0c",
+        "fold_selection": "ad2d3d5eb18390171aa7d373dacb1fbc87b4eb176363fb764b507ed4d1dd2c32",
+        "selected_predictions": "a004c6eb4bf17efe3620c206c68945995afc7732daf51ddf39456631adf522f8",
+    }
+    for artifact_name, expected_digest in expected_digests.items():
+        actual = getattr(reference, artifact_name)
+        assert canonical_frame_sha256(actual) == expected_digest

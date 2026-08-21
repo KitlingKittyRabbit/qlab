@@ -1520,9 +1520,11 @@ def _registered_prefix_partition(
     else:
         return [], list(tasks)
     expected = {_registered_parameter_key(parameters) for parameters in compatible}
-    by_payload: dict[int, list[tuple[Mapping[str, object], Mapping[str, object]]]] = {}
+    by_payload: dict[str, list[tuple[Mapping[str, object], Mapping[str, object]]]] = {}
     for parameters, payload in tasks:
-        by_payload.setdefault(id(payload), []).append((parameters, payload))
+        by_payload.setdefault(_registered_payload_identity(payload), []).append(
+            (parameters, payload)
+        )
     prefix_tasks: list[tuple[Mapping[str, object], Mapping[str, object]]] = []
     generic_tasks: list[tuple[Mapping[str, object], Mapping[str, object]]] = []
     for group in by_payload.values():
@@ -1561,6 +1563,31 @@ def _registered_prefix_partition(
                 ({"max_depth": depth}, payload) for depth in sorted(family_parameters)
             )
     return prefix_tasks, generic_tasks
+
+
+def _registered_payload_identity(payload: Mapping[str, object]) -> str:
+    """Identify one physical split without relying on Python object identity."""
+    digest = hashlib.sha256()
+    metadata = {
+        key: str(payload.get(key))
+        for key in (
+            "inner_split_idx",
+            "inner_train_start",
+            "inner_train_end",
+            "validation_start",
+            "validation_end",
+        )
+    }
+    digest.update(json.dumps(metadata, sort_keys=True).encode("utf-8"))
+    for key in ("train_x", "train_y", "validation_x", "validation_y"):
+        if key not in payload:
+            continue
+        values = np.ascontiguousarray(np.asarray(payload[key]))
+        digest.update(key.encode("utf-8"))
+        digest.update(str(values.dtype).encode("utf-8"))
+        digest.update(str(values.shape).encode("utf-8"))
+        digest.update(values.tobytes())
+    return digest.hexdigest()
 
 
 def _registered_prefix_tasks(
@@ -2085,6 +2112,164 @@ def registered_replica_fold_inner_tasks(
         ("generic", parameters, payload) for parameters, payload in generic_tasks
     )
     return units
+
+
+def registered_replica_physical_workload_units(
+    model_specs: Mapping[str, Sequence[Mapping[str, object]]],
+    split_payloads: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Enumerate the physical inner-fit categories used by formal execution.
+
+    Prefix units represent one estimator fit that emits two configuration rows;
+    generic units represent one estimator fit and one configuration row.  The
+    returned descriptors retain the exact qlab task partition and are intended for
+    performance-only calibration, not scientific scoring.
+    """
+    expected_classes = set(REGISTERED_MODEL_CLASS_ORDER[1:])
+    if set(model_specs) != expected_classes:
+        raise ValueError("physical workload model classes are incomplete")
+    units: list[dict[str, object]] = []
+    for model_class in REGISTERED_MODEL_CLASS_ORDER[1:]:
+        for ordinal, (kind, parameters, payload) in enumerate(
+            registered_replica_fold_inner_tasks(
+                model_class, model_specs[model_class], split_payloads
+            )
+        ):
+            configuration_count = 2 if str(kind) == "prefix" else 1
+            units.append(
+                {
+                    "physical_category": f"{model_class}:{kind}",
+                    "model_class": str(model_class),
+                    "kind": str(kind),
+                    "ordinal": int(ordinal),
+                    "parameters": dict(parameters),
+                    "resource_dimensions": _registered_physical_resource_dimensions(
+                        str(model_class), str(kind), parameters
+                    ),
+                    "payload": payload,
+                    "configuration_count": configuration_count,
+                }
+            )
+    return units
+
+
+def _registered_physical_resource_dimensions(
+    model_class: str, kind: str, parameters: Mapping[str, object]
+) -> dict[str, object]:
+    """Expose estimator dimensions of the registered physical fit partition."""
+    if kind == "prefix" and model_class == "hist_gbm":
+        return {
+            "max_depth": int(parameters["max_depth"]),
+            "learning_rate": float(parameters["learning_rate"]),
+            "max_iter": [100, 300],
+        }
+    if kind == "prefix" and model_class == "random_forest":
+        return {
+            "max_depth": int(parameters["max_depth"]),
+            "n_estimators": [200, 500],
+        }
+    return dict(parameters)
+
+
+def benchmark_registered_replica_workload(
+    features: np.ndarray,
+    target: np.ndarray,
+    *,
+    profile,
+    repetitions: int = 1,
+) -> pd.DataFrame:
+    """Measure every registered physical inner-task category performance-only."""
+    from qlab.execution.pool import WorkPool
+
+    x = np.asarray(features, dtype=float)
+    y = np.asarray(target, dtype=float)
+    if x.ndim != 2 or y.ndim != 1 or len(x) != len(y):
+        raise ValueError("features and target must be aligned 2D/1D arrays")
+    if len(x) < 40 or not np.isfinite(x).all() or not np.isfinite(y).all():
+        raise ValueError("workload benchmark requires at least 40 finite rows")
+    if int(repetitions) < 1 or int(repetitions) > 3:
+        raise ValueError("workload benchmark repetitions must be between 1 and 3")
+    split = max(20, int(np.floor(len(x) * 0.75)))
+    if split >= len(x):
+        raise ValueError("workload benchmark validation split is empty")
+    base_payload = {
+        "inner_split_idx": 0,
+        "inner_train_start": pd.Timestamp("2024-01-01", tz="UTC"),
+        "inner_train_end": pd.Timestamp("2024-01-02", tz="UTC"),
+        "validation_start": pd.Timestamp("2024-01-03", tz="UTC"),
+        "validation_end": pd.Timestamp("2024-01-04", tz="UTC"),
+        "train_x": x[:split],
+        "train_y": y[:split],
+        "validation_x": x[split:],
+        "validation_y": y[split:],
+    }
+    payloads = [
+        dict(base_payload, inner_split_idx=repeat_idx)
+        for repeat_idx in range(int(repetitions))
+    ]
+    descriptors = registered_replica_physical_workload_units(
+        registered_replica_model_specs(), payloads
+    )
+    grouped: dict[str, list[dict[str, object]]] = {}
+    for descriptor in descriptors:
+        grouped.setdefault(str(descriptor["physical_category"]), []).append(descriptor)
+    expanded_feature_counts = {
+        model_class: (
+            int(_poly2_registered_design(x[:1]).shape[1])
+            if str(model_class).startswith("poly2_")
+            else int(x.shape[1])
+        )
+        for model_class in REGISTERED_MODEL_CLASS_ORDER[1:]
+    }
+    rows: list[dict[str, object]] = []
+    with WorkPool(profile=profile) as pool:
+        for category in sorted(grouped):
+            category_units = grouped[category]
+            started_cpu = process_time()
+            started_wall = perf_counter()
+            pool.map(
+                [
+                        (
+                            _evaluate_registered_physical_unit,
+                            (
+                                descriptor["model_class"],
+                                descriptor["parameters"],
+                                descriptor["payload"],
+                                descriptor["kind"],
+                            ),
+                        )
+                    for descriptor in category_units
+                ]
+            )
+            model_class = str(category_units[0]["model_class"])
+            rows.append(
+                {
+                    "physical_category": category,
+                    "model_class": model_class,
+                    "kind": str(category_units[0]["kind"]),
+                    "fit_workers": int(profile.workers),
+                    "native_threads": int(profile.native_threads),
+                    "physical_task_count": len(category_units),
+                    "configuration_evaluation_count": int(
+                        sum(int(item["configuration_count"]) for item in category_units)
+                    ),
+                    "estimator_fit_count": len(category_units),
+                    "row_count": len(x),
+                    "feature_count": int(x.shape[1]),
+                    "expanded_feature_count": expanded_feature_counts[model_class],
+                    "repetitions": int(repetitions),
+                    "cpu_seconds": process_time() - started_cpu,
+                    "wall_seconds": perf_counter() - started_wall,
+                    "performance_only": True,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _evaluate_registered_physical_unit(model_class, parameters, payload, kind):
+    return evaluate_registered_replica_inner_task(
+        model_class, parameters, payload, kind=kind
+    )
 
 
 def evaluate_registered_replica_inner_task(
