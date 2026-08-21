@@ -384,6 +384,14 @@ def test_physical_workload_categories_match_full_registered_grid():
     ]
     assert all("min_samples_leaf" in unit["parameters"] for unit in rf_generic)
     assert sum(int(unit["configuration_count"]) for unit in units) == 56
+    hgbm_prefix = next(
+        unit for unit in units if unit["physical_category"] == "hist_gbm:prefix"
+    )
+    rf_prefix = next(
+        unit for unit in units if unit["physical_category"] == "random_forest:prefix"
+    )
+    assert hgbm_prefix["resource_dimensions"]["max_iter"] == [100, 300]
+    assert rf_prefix["resource_dimensions"]["n_estimators"] == [200, 500]
 
 
 def test_full_registered_grid_matches_frozen_pre_refactor_reference():

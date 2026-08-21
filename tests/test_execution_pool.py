@@ -31,6 +31,19 @@ def _timed_unit(seconds: float, name: str) -> dict[str, object]:
     return {"name": name, "started": started, "finished": time.monotonic()}
 
 
+def _timed_finalize(
+    seconds: float, name: str, dependency_results: tuple[object, ...]
+) -> dict[str, object]:
+    started = time.monotonic()
+    time.sleep(seconds)
+    return {
+        "name": name,
+        "started": started,
+        "finished": time.monotonic(),
+        "dependency_results": dependency_results,
+    }
+
+
 def test_work_pool_returns_results_in_submission_order():
     profile = ExecutionProfile(workers=4, native_threads=1, oversubscription_factor=1.0)
     topology = MachineTopology(
@@ -132,6 +145,29 @@ def test_dependency_scheduler_starts_ready_finalize_before_unrelated_slow_work()
         results = pool.run_dag(tasks)
     assert [result["name"] for result in results] == ["slow", "fast", "finalize"]
     assert results[2]["started"] < results[0]["finished"]
+
+
+def test_dependency_scheduler_releases_one_class_without_other_class_barrier():
+    profile = ExecutionProfile(workers=2, native_threads=1, oversubscription_factor=1.0)
+    topology = MachineTopology(
+        logical_cpus=4,
+        physical_cpus=None,
+        available_ram_bytes=2 * 1024**3,
+    )
+    tasks = [
+        DependencyTask("slow-random-forest", (), (_timed_unit, (0.25, "rf-inner"))),
+        DependencyTask("fast-hist-gbm", (), (_timed_unit, (0.05, "hgbm-inner"))),
+        DependencyTask(
+            "hist-gbm-finalize",
+            ("fast-hist-gbm",),
+            (_timed_finalize, (0.01, "hgbm-finalize")),
+            pass_dependency_results=True,
+        ),
+    ]
+    with WorkPool(profile=profile, topology=topology) as pool:
+        results = pool.run_dag(tasks)
+    assert results[2]["started"] < results[0]["finished"]
+    assert results[2]["dependency_results"] == (results[1],)
 
 
 def test_dependency_scheduler_rejects_missing_dependencies_and_cycles():

@@ -192,6 +192,24 @@ def test_profile_binding_and_resource_report_are_consistent():
         )
 
 
+def test_profile_identity_is_independent_of_report_binding():
+    profile = ExecutionProfile(
+        workers=2,
+        native_threads=1,
+        per_task_ram_bytes=1024**3,
+        ram_budget_bytes=8 * 1024**3,
+        qlab_head="b" * 40,
+        research_head="c" * 40,
+        route_identity="route",
+    )
+    before = profile.identity_sha256()
+    profile.calibration_report_sha256 = "a" * 64
+    after = profile.identity_sha256()
+    profile.calibration_report_sha256 = "d" * 64
+    changed_binding = profile.identity_sha256()
+    assert before == after == changed_binding
+
+
 def test_profile_round_trip_json_and_dict():
     profile = ExecutionProfile(
         workers=12,

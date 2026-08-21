@@ -2143,11 +2143,32 @@ def registered_replica_physical_workload_units(
                     "kind": str(kind),
                     "ordinal": int(ordinal),
                     "parameters": dict(parameters),
+                    "resource_dimensions": _registered_physical_resource_dimensions(
+                        str(model_class), str(kind), parameters
+                    ),
                     "payload": payload,
                     "configuration_count": configuration_count,
                 }
             )
     return units
+
+
+def _registered_physical_resource_dimensions(
+    model_class: str, kind: str, parameters: Mapping[str, object]
+) -> dict[str, object]:
+    """Expose estimator dimensions of the registered physical fit partition."""
+    if kind == "prefix" and model_class == "hist_gbm":
+        return {
+            "max_depth": int(parameters["max_depth"]),
+            "learning_rate": float(parameters["learning_rate"]),
+            "max_iter": [100, 300],
+        }
+    if kind == "prefix" and model_class == "random_forest":
+        return {
+            "max_depth": int(parameters["max_depth"]),
+            "n_estimators": [200, 500],
+        }
+    return dict(parameters)
 
 
 def benchmark_registered_replica_workload(

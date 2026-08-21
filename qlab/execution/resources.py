@@ -268,8 +268,12 @@ class ExecutionProfile:
             raise ValueError("execution profile RAM capacity is stale")
 
     def identity_sha256(self) -> str:
+        # The report binding is runtime provenance, not an intrinsic profile field.
+        # Keeping it out makes this identity stable before and after binding.
+        identity_payload = self.to_dict()
+        identity_payload.pop("calibration_report_sha256", None)
         return canonical_dict_sha256(
-            self.to_dict(), schema="qlab_execution_profile_identity_v2"
+            identity_payload, schema="qlab_execution_profile_identity_v3"
         )
 
     def to_dict(self) -> dict[str, object]:
