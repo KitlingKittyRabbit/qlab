@@ -13,6 +13,7 @@ from qlab.execution.resources import (
     native_thread_limits,
     machine_topology_identity,
 )
+from qlab.execution.provenance import tracked_file_provenance
 
 
 def test_native_thread_environment_is_idempotent():
@@ -59,6 +60,46 @@ def test_detect_machine_topology_reports_positive_values():
     topology = detect_machine_topology()
     assert topology.logical_cpus >= 1
     assert topology.available_ram_bytes > 0
+
+
+def test_machine_topology_identity_excludes_volatile_available_ram():
+    low = MachineTopology(logical_cpus=16, physical_cpus=8, available_ram_bytes=4 * 1024**3)
+    high = MachineTopology(logical_cpus=16, physical_cpus=8, available_ram_bytes=32 * 1024**3)
+    assert machine_topology_identity(low) == machine_topology_identity(high)
+
+
+def test_selective_provenance_requires_clean_tracked_files(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+    tracked = repository / "critical.py"
+    tracked.write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "critical.py"], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "init"],
+        cwd=repository,
+        check=True,
+    )
+    provenance = tracked_file_provenance(repository, ["critical.py"])
+    assert provenance["files"]["critical.py"]["tracked"] is True
+    (repository / "unrelated.txt").write_text("allowed\n", encoding="utf-8")
+    assert tracked_file_provenance(repository, ["critical.py"]) == provenance
+    tracked.write_text("value = 2\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="dirty"):
+        tracked_file_provenance(repository, ["critical.py"])
+
+
+def test_selective_provenance_rejects_untracked_critical_file(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+    (repository / "critical.py").write_text("value = 1\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="not Git tracked"):
+        tracked_file_provenance(repository, ["critical.py"])
 
 
 def test_profile_rejects_invalid_fields():

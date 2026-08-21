@@ -34,16 +34,15 @@ class MachineTopology:
 
 
 def machine_topology_identity(topology: MachineTopology) -> str:
-    """Return a stable identity for the resource topology used by calibration."""
+    """Return a stable identity for CPU topology, excluding volatile RAM."""
     return canonical_dict_sha256(
         {
             "logical_cpus": int(topology.logical_cpus),
             "physical_cpus": (
                 None if topology.physical_cpus is None else int(topology.physical_cpus)
             ),
-            "available_ram_bytes": int(topology.available_ram_bytes),
         },
-        schema="qlab_machine_topology_v1",
+        schema="qlab_machine_topology_v2",
     )
 
 

@@ -22,6 +22,7 @@ from qlab.execution.identity import (
     task_identity,
 )
 from qlab.execution.pool import DependencyTask, WorkPool, current_context, set_pool_context
+from qlab.execution.provenance import tracked_file_provenance
 from qlab.execution.resources import (
     ExecutionProfile,
     MachineTopology,
@@ -47,6 +48,7 @@ __all__ = [
     "machine_topology_identity",
     "finalize_checksum_manifest",
     "native_thread_limits",
+    "tracked_file_provenance",
     "scientific_identity",
     "set_pool_context",
     "task_identity",
