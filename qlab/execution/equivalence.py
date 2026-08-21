@@ -22,6 +22,31 @@ def _length_prefixed(value: bytes) -> bytes:
     return len(value).to_bytes(8, byteorder="big") + value
 
 
+def _canonical_attr(value: object) -> object:
+    if isinstance(value, dict):
+        items = [(_canonical_attr(key), _canonical_attr(item)) for key, item in value.items()]
+        return (
+            "dict",
+            tuple(
+                sorted(
+                    items,
+                    key=lambda item: pickle.dumps(item[0], protocol=5),
+                )
+            ),
+        )
+    if isinstance(value, list):
+        return ("list", tuple(_canonical_attr(item) for item in value))
+    if isinstance(value, tuple):
+        return ("tuple", tuple(_canonical_attr(item) for item in value))
+    if isinstance(value, set):
+        items = [_canonical_attr(item) for item in value]
+        return (
+            "set",
+            tuple(sorted(items, key=lambda item: pickle.dumps(item, protocol=5))),
+        )
+    return value
+
+
 def canonical_frame_bytes(frame: pd.DataFrame) -> bytes:
     """Serialize a frame without lossy float formatting.
 
@@ -37,7 +62,7 @@ def canonical_frame_bytes(frame: pd.DataFrame) -> bytes:
         "columns": frame.columns,
         "dtypes": tuple(frame.dtypes),
         "allows_duplicate_labels": frame.flags.allows_duplicate_labels,
-        "attrs": frame.attrs,
+        "attrs": _canonical_attr(frame.attrs),
     }
     parts = [_length_prefixed(_CANONICAL_FRAME_SCHEMA)]
     parts.append(_length_prefixed(pickle.dumps(metadata, protocol=5)))

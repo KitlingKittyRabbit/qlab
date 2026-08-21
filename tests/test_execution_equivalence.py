@@ -36,3 +36,11 @@ def test_equivalence_digest_preserves_dtype_and_signed_zero():
     negative_zero = pd.DataFrame({"score": [-0.0]})
     assert canonical_frame_sha256(float32) != canonical_frame_sha256(float64)
     assert canonical_frame_sha256(positive_zero) != canonical_frame_sha256(negative_zero)
+
+
+def test_equivalence_digest_ignores_attrs_insertion_order():
+    first = pd.DataFrame({"score": [1.0]})
+    second = first.copy()
+    first.attrs = {"b": 2, "a": 1}
+    second.attrs = {"a": 1, "b": 2}
+    assert_frame_equivalent(first, second, artifact_name="attrs_order")

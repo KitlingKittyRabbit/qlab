@@ -449,11 +449,11 @@ def test_full_registered_grid_matches_frozen_pre_refactor_reference():
     )
     _assert_replication_artifacts_equal(reference, staged)
     expected_digests = {
-        "class_predictions": "25a6a4c0f8f5b803615c59df58a8893f650015f882c0954af0ced32889f88194",
-        "inner_scores": "c769510b379efee507f1048665f867a580268cb95836ab92415c8a97de6cf6a3",
-        "model_diagnostics": "794d75200f1c35dbeda07b7c26038c23aaaa3d9445fcce103f829919c215ee97",
-        "fold_selection": "ddc17a37e18be4462bbe4f3137c8efd6235698f58a2b2c45ea632ef441cc8855",
-        "selected_predictions": "fd80dd6f2df33fab4d360de8f1c513800bb6a42ca66d5e8618017de46f0b2f4a",
+        "class_predictions": "3f97d4d6ca071e6bf449bae2edb61a6140b92e4369fc583dc057c2c5788952c2",
+        "inner_scores": "67d6ca752f105ae1d5d7ca0634fc62c4ad580f32556cd62992baa434f38c9d09",
+        "model_diagnostics": "ccca8eb8335dd2f57dcf545f69ea1d0880a33d26be779858947fda3f71cadb0c",
+        "fold_selection": "ad2d3d5eb18390171aa7d373dacb1fbc87b4eb176363fb764b507ed4d1dd2c32",
+        "selected_predictions": "a004c6eb4bf17efe3620c206c68945995afc7732daf51ddf39456631adf522f8",
     }
     for artifact_name, expected_digest in expected_digests.items():
         actual = getattr(reference, artifact_name)
