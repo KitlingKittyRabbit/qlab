@@ -32,6 +32,7 @@ from qlab.true_oos import (
     build_source_equivalence_record,
     build_source_equivalence_consistency_amendments,
     build_source_consistency_queue_records,
+    build_source_reference_time_contract,
     build_source_reference_queue_records,
     build_source_value_equivalence_record,
     build_source_observation_rows,
@@ -58,6 +59,7 @@ from qlab.true_oos import (
     sha256_file,
     score_epoch_candidate_signals,
     safe_snapshot_source_id,
+    source_values_at_exact_label,
     validate_source_freshness,
     validate_source_consistency_capture_contract,
     verify_sha256_manifest,
@@ -759,6 +761,53 @@ def test_source_reference_queue_freezes_initial_retry_revision_and_timeout() -> 
             revision_query_delay_seconds=900,
             maximum_wait_seconds=259200,
         )
+
+
+def test_source_reference_time_contract_aligns_label_and_query_window() -> None:
+    for duration in ("1h", "12h", "1d"):
+        target = pd.Timestamp("2026-08-16T15:00:00Z")
+        start_contract = build_source_reference_time_contract(
+            target_label_ts=target,
+            timestamp_kind="bar_start",
+            bar_duration=duration,
+        )
+        expected_end = target + pd.Timedelta(duration)
+        assert start_contract["target_label_ts"] == target
+        assert start_contract["native_bar_end_ts"] == expected_end
+        assert start_contract["query_end_ts"] == expected_end
+        assert start_contract["query_end_time_ms"] == int(
+            expected_end.timestamp() * 1000
+        )
+
+        end_contract = build_source_reference_time_contract(
+            target_label_ts=expected_end,
+            timestamp_kind="bar_end",
+            bar_duration=duration,
+        )
+        assert end_contract["native_bar_end_ts"] == expected_end
+        assert end_contract["query_end_ts"] == expected_end
+        assert end_contract["query_end_time_ms"] == int(
+            expected_end.timestamp() * 1000
+        )
+
+    with pytest.raises(ValueError, match="positive"):
+        build_source_reference_time_contract(
+            target_label_ts="2026-08-16T15:00:00Z",
+            timestamp_kind="bar_start",
+            bar_duration="0s",
+        )
+
+
+def test_source_values_require_exact_label_and_do_not_use_nearest_row() -> None:
+    target = pd.Timestamp("2026-08-16T15:00:00Z")
+    frame = pd.DataFrame(
+        {"close": [1.0, 2.0]},
+        index=pd.DatetimeIndex(
+            [target - pd.Timedelta(hours=1), target + pd.Timedelta(hours=1)]
+        ),
+    )
+    with pytest.raises(RuntimeError, match="target label"):
+        source_values_at_exact_label(frame, target)
 
 
 def test_source_consistency_capture_contract_and_queue_are_candidate_independent() -> None:

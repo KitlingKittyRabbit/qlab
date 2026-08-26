@@ -993,6 +993,58 @@ def build_source_consistency_queue_records(
     return records
 
 
+def build_source_reference_time_contract(
+    *,
+    target_label_ts: str | pd.Timestamp,
+    timestamp_kind: str,
+    bar_duration: str | pd.Timedelta,
+) -> dict[str, object]:
+    """Build the exact label/end-time contract for one delayed history query.
+
+    The current KSV4 ``bar_start`` contract uses an exclusive ``end_time``
+    boundary.  Therefore a start label at ``t`` needs a query end at
+    ``t + duration`` to include that record.  An end-labelled record already
+    uses its native end as the label and keeps ``end_time=t``.  The caller must
+    still select the exact returned label; this helper never authorizes
+    nearest-row matching.
+    """
+    target = _utc_timestamp(target_label_ts, field="target_label_ts")
+    kind = str(timestamp_kind).strip()
+    if kind not in {"bar_start", "bar_end"}:
+        raise ValueError(f"unsupported source timestamp_kind: {kind}")
+    duration = pd.Timedelta(bar_duration)
+    if duration <= pd.Timedelta(0):
+        raise ValueError("source bar duration must be positive")
+    native_end = target + duration if kind == "bar_start" else target
+    query_end = native_end if kind == "bar_start" else target
+    return {
+        "target_label_ts": target,
+        "native_bar_end_ts": native_end,
+        "query_end_ts": query_end,
+        "query_end_time_ms": int(query_end.timestamp() * 1000),
+        "timestamp_kind": kind,
+        "bar_duration": duration,
+    }
+
+
+def source_values_at_exact_label(
+    frame: pd.DataFrame,
+    target_label_ts: str | pd.Timestamp,
+) -> dict[str, object]:
+    """Return numeric values only for an exact canonical source label."""
+    target = _utc_timestamp(target_label_ts, field="target_label_ts")
+    if target not in frame.index:
+        raise RuntimeError(f"reference does not contain target label {target}")
+    row = frame.loc[target]
+    if isinstance(row, pd.DataFrame):
+        raise RuntimeError("reference target label is not unique")
+    return {
+        str(column): float(value)
+        for column, value in row.items()
+        if pd.notna(value)
+    }
+
+
 def classify_source_consistency_reference_action(
     queue_record: Mapping[str, object],
     comparison_records: Sequence[Mapping[str, object]],
@@ -3887,6 +3939,7 @@ __all__ = [
     "build_shadow_decision_artifacts",
     "build_source_revision_event",
     "build_source_equivalence_record",
+    "build_source_reference_time_contract",
     "build_source_reference_queue_records",
     "classify_source_reference_action",
     "build_source_equivalence_consistency_amendments",
@@ -3914,6 +3967,7 @@ __all__ = [
     "require_true_oos_runtime_contract",
     "sha256_file",
     "stable_json_sha256",
+    "source_values_at_exact_label",
     "validate_source_freshness",
     "verify_sha256_manifest",
     "verify_activation_intent",
