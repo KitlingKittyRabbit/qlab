@@ -780,15 +780,17 @@ def test_source_reference_time_contract_aligns_label_and_query_window() -> None:
         )
 
         end_contract = build_source_reference_time_contract(
-            target_label_ts=expected_end,
+            target_label_ts=target,
             timestamp_kind="bar_end",
             bar_duration=duration,
         )
-        assert end_contract["native_bar_end_ts"] == expected_end
+        assert end_contract["target_label_ts"] == target
+        assert end_contract["native_bar_end_ts"] == target
         assert end_contract["query_end_ts"] == expected_end
         assert end_contract["query_end_time_ms"] == int(
             expected_end.timestamp() * 1000
         )
+        assert start_contract["native_bar_end_ts"] != end_contract["native_bar_end_ts"]
 
     with pytest.raises(ValueError, match="positive"):
         build_source_reference_time_contract(

@@ -1001,12 +1001,12 @@ def build_source_reference_time_contract(
 ) -> dict[str, object]:
     """Build the exact label/end-time contract for one delayed history query.
 
-    The current KSV4 ``bar_start`` contract uses an exclusive ``end_time``
-    boundary.  Therefore a start label at ``t`` needs a query end at
-    ``t + duration`` to include that record.  An end-labelled record already
-    uses its native end as the label and keeps ``end_time=t``.  The caller must
-    still select the exact returned label; this helper never authorizes
-    nearest-row matching.
+    The current KSV4 history API uses an exclusive ``end_time`` boundary.
+    Therefore both a start label and an end label at ``t`` need a query end at
+    ``t + duration`` to include that record.  The native end remains distinct:
+    a start label at ``t`` has native end ``t + duration``, while an end label
+    at ``t`` has native end ``t``.  The caller must still select the exact
+    returned label; this helper never authorizes nearest-row matching.
     """
     target = _utc_timestamp(target_label_ts, field="target_label_ts")
     kind = str(timestamp_kind).strip()
@@ -1016,7 +1016,7 @@ def build_source_reference_time_contract(
     if duration <= pd.Timedelta(0):
         raise ValueError("source bar duration must be positive")
     native_end = target + duration if kind == "bar_start" else target
-    query_end = native_end if kind == "bar_start" else target
+    query_end = target + duration
     return {
         "target_label_ts": target,
         "native_bar_end_ts": native_end,
