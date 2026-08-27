@@ -321,8 +321,14 @@ def _identity_equal(left: Mapping[str, object], right: Mapping[str, object]) -> 
 def _identity_matches_registry(
     identity: Mapping[str, object],
     registry_row: Mapping[str, object],
+    *,
+    expected_symbol: str | None = None,
 ) -> bool:
     """Check that an observed source identity really belongs to this factor row."""
+    if str(identity.get("identity_version", "")).strip() != SOURCE_IDENTITY_CONTRACT_VERSION:
+        return False
+    if expected_symbol is not None and str(identity.get("symbol", "")).upper() != str(expected_symbol).upper():
+        return False
     endpoint = str(registry_row.get("endpoint", ""))
     timeframe = str(registry_row.get("signal_timeframe", ""))
     timestamp_kind = str(registry_row.get("timestamp_kind", ""))
@@ -682,10 +688,12 @@ def build_factor_equivalence_records(
             realtime_identity_valid = _identity_matches_registry(
                 _as_mapping(item["realtime_source_identity"], name="realtime_source_identity"),
                 row,
+                expected_symbol=symbol,
             )
             historical_identity_valid = _identity_matches_registry(
                 _as_mapping(item["historical_source_identity"], name="historical_source_identity"),
                 row,
+                expected_symbol=symbol,
             )
             identity_contract_valid = realtime_identity_valid and historical_identity_valid
             record = _factor_record_for_pair(

@@ -619,3 +619,32 @@ def test_registry_source_identity_version_rejects_stale_contract() -> None:
     )[0]
     assert record["status"] == "native_identity_mismatch"
     assert record["final_strategy_input_equal"] is False
+
+
+def test_observed_identity_version_and_symbol_are_bound_to_the_comparison() -> None:
+    row = {
+        "feature_name": "funding__1h",
+        "endpoint": "fr",
+        "signal_timeframe": "1h",
+        "required_columns": "fr_close",
+        "panel_transform": "raw_column",
+        "cross_section_standardization": "none",
+        "timestamp_kind": "bar_start",
+    }
+    stale = _item(
+        symbol="BTC", registry_row=row,
+        realtime={"fr_close": 0.1}, historical={"fr_close": 0.1},
+    )
+    stale["realtime_source_identity"]["identity_version"] = "old_source_contract"
+    record = build_factor_equivalence_records([stale])[0]
+    assert record["status"] == "native_identity_mismatch"
+    assert record["final_strategy_input_equal"] is False
+
+    wrong_symbol = _item(
+        symbol="BTC", registry_row=row,
+        realtime={"fr_close": 0.1}, historical={"fr_close": 0.1},
+    )
+    wrong_symbol["realtime_source_identity"]["symbol"] = "ETH"
+    record = build_factor_equivalence_records([wrong_symbol])[0]
+    assert record["status"] == "native_identity_mismatch"
+    assert record["final_strategy_input_equal"] is False
