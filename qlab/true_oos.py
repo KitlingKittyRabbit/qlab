@@ -20,10 +20,31 @@ import pandas as pd
 
 from . import factor_research
 from .data.crypto import panel as crypto_panel
+from .data.crypto.factor_equivalence import (
+    FACTOR_EQUIVALENCE_CONTRACT_VERSION,
+    FACTOR_EQUIVALENCE_STATUSES,
+    SOURCE_IDENTITY_CONTRACT_VERSION,
+    apply_factor_registry_transform,
+    aggregate_factor_equivalence_records,
+    build_factor_equivalence_record,
+    build_factor_equivalence_records,
+    build_source_equivalence_identity,
+    factor_required_columns,
+    previous_native_label,
+    rank_standardize_cross_section,
+    source_semantic_contract_from_request,
+)
 from .data.crypto.strategy_time_contract import ContinuousHoldingTimeContract
 
 
 TRUE_OOS_RUNTIME_CONTRACT_VERSION = "replay_live_consistency_v4"
+SOURCE_CONSISTENCY_REQUEST_COUNT = 138
+SOURCE_CONSISTENCY_SOURCE_COUNTS = {
+    "keystore": 46,
+    "binance_public": 58,
+    "bybit_public": 17,
+    "okx_public": 17,
+}
 CONSISTENCY_DIMENSIONS = (
     "data_availability_consistency",
     "decision_clock_consistency",
@@ -873,7 +894,7 @@ def validate_source_consistency_capture_contract(
     raw_receipts: pd.DataFrame,
     normalized_receipts: pd.DataFrame,
     *,
-    expected_request_count: int = 118,
+    expected_request_count: int = SOURCE_CONSISTENCY_REQUEST_COUNT,
     expected_normalized_count: int = 360,
     expected_source_counts: Mapping[str, int] | None = None,
 ) -> dict[str, object]:
@@ -881,10 +902,7 @@ def validate_source_consistency_capture_contract(
     source_counts = dict(
         expected_source_counts
         or {
-            "keystore": 26,
-            "binance_public": 58,
-            "bybit_public": 17,
-            "okx_public": 17,
+            **SOURCE_CONSISTENCY_SOURCE_COUNTS,
         }
     )
     contract_required = {"request_id", "source", "source_contract_version"}
@@ -1080,12 +1098,115 @@ def classify_source_consistency_reference_action(
             result["decision_ts"] = result.pop("capture_ts")
         return result
 
+    # The ledger is append-only.  A prior error record for the same role is
+    # historical evidence once a later completed comparison exists; it must
+    # not make the action classifier see two attempts as two current roles.
+    completed_comparisons = [
+        record
+        for record in comparison_records
+        if _source_reference_role_completed(record)
+    ]
     return classify_source_reference_action(
         legacy(queue_record),
-        [legacy(record) for record in comparison_records],
+        [legacy(record) for record in completed_comparisons],
         observed_ts=observed_ts,
         failed_attempts=[legacy(record) for record in failed_attempts],
     )
+
+
+_SOURCE_REFERENCE_COMPLETED_STATUSES = frozenset(
+    {
+        "exact_match",
+        "value_mismatch_decision_equivalent",
+        "decision_material_mismatch",
+        "scope_not_comparable",
+        # Legacy source-value records used these two labels before the factor
+        # layer was introduced.  They remain completed observations, not
+        # pending work.
+        "value_mismatch",
+        "field_mismatch",
+    }
+)
+
+
+def _source_reference_role_completed(record: Mapping[str, object]) -> bool:
+    status = str(record.get("status", "")).strip()
+    return not status or status in _SOURCE_REFERENCE_COMPLETED_STATUSES
+
+
+def derive_source_consistency_status(
+    queue_record: Mapping[str, object],
+    comparison_records: Sequence[Mapping[str, object]],
+    *,
+    observed_ts: str | pd.Timestamp,
+    failed_attempts: Sequence[Mapping[str, object]] = (),
+) -> str:
+    """Derive a human-readable state from append-only evidence.
+
+    The queue's original ``pending_reference`` value is an immutable creation
+    record, not the current state.  This function combines queue, comparison,
+    failure, and timeout evidence without rewriting that record.
+    """
+    completed_comparisons = [
+        record
+        for record in comparison_records
+        if _source_reference_role_completed(record)
+    ]
+    action = classify_source_consistency_reference_action(
+        queue_record,
+        completed_comparisons,
+        observed_ts=observed_ts,
+        failed_attempts=failed_attempts,
+    )
+    identity = (
+        str(queue_record["collector_id"]),
+        str(queue_record["realtime_receipt_id"]),
+    )
+    matching = [
+        record
+        for record in comparison_records
+        if (
+            str(record.get("collector_id", "")),
+            str(record.get("realtime_receipt_id", "")),
+        ) == identity
+    ]
+    roles = {
+        str(record.get("reference_role", ""))
+        for record in matching
+        if _source_reference_role_completed(record)
+    }
+    if action in {"expired", "timeout"}:
+        return "超时，需停止受影响范围"
+    # A successful comparison for a role supersedes an older incomplete
+    # attempt.  Queue and ledger entries remain append-only; status is about
+    # the role that is still outstanding, not about any historical failure.
+    if "revision" in roles:
+        return "全部参照已完成"
+    if "initial" in roles:
+        return "首次参照已完成，等待修订到期"
+    incomplete_roles = {
+        str(record.get("reference_role", ""))
+        for record in matching
+        if str(record.get("status", "")) == "cross_section_incomplete"
+    }
+    if incomplete_roles:
+        return "横截面不完整，等待重试"
+    if any(
+        str(record.get("collector_id", "")) == identity[0]
+        and str(record.get("realtime_receipt_id", "")) == identity[1]
+        for record in failed_attempts
+    ) or any(
+        str(record.get("reference_role", "")) in {"initial", "revision"}
+        and not _source_reference_role_completed(record)
+        for record in matching
+    ):
+        if action in {"initial", "revision", "not_due"}:
+            return "失败后等待重试"
+    if action == "initial":
+        return "首次参照待执行"
+    if action == "revision":
+        return "修订参照待执行"
+    return "等待首次参照时间"
 
 
 def build_source_value_equivalence_record(
@@ -3916,7 +4037,12 @@ __all__ = [
     "BookQuote",
     "CANONICAL_SYMBOLS",
     "CONSISTENCY_DIMENSIONS",
+    "FACTOR_EQUIVALENCE_CONTRACT_VERSION",
+    "FACTOR_EQUIVALENCE_STATUSES",
+    "SOURCE_IDENTITY_CONTRACT_VERSION",
     "SOURCE_EQUIVALENCE_STATUSES",
+    "SOURCE_CONSISTENCY_REQUEST_COUNT",
+    "SOURCE_CONSISTENCY_SOURCE_COUNTS",
     "DecisionReadiness",
     "EXPECTED_HORIZON_COUNTS",
     "EpochWindow",
@@ -3927,11 +4053,15 @@ __all__ = [
     "SourceFreshness",
     "TRUE_OOS_RUNTIME_CONTRACT_VERSION",
     "aggregate_testnet_canary",
+    "apply_factor_registry_transform",
+    "aggregate_factor_equivalence_records",
     "apply_fill_to_position",
     "build_activation_intent",
     "build_activation_manifest",
     "build_candidate_freeze_manifest",
     "build_epoch_window",
+    "build_factor_equivalence_record",
+    "build_factor_equivalence_records",
     "build_epoch_training_panels",
     "build_missed_decision_records",
     "build_replay_live_consistency_record",
@@ -3942,7 +4072,10 @@ __all__ = [
     "build_source_reference_time_contract",
     "build_source_reference_queue_records",
     "classify_source_reference_action",
+    "derive_source_consistency_status",
     "build_source_equivalence_consistency_amendments",
+    "build_source_equivalence_identity",
+    "source_semantic_contract_from_request",
     "build_source_observation_rows",
     "book_quotes_from_binance",
     "classify_decision_readiness",
@@ -3953,10 +4086,12 @@ __all__ = [
     "fit_epoch_candidate_parameters",
     "fit_epoch_candidate_signals",
     "first_eligible_decision_ts",
+    "factor_required_columns",
     "lifecycle_metadata",
     "marked_equity",
     "initial_shadow_state",
     "persist_shadow_fill_events",
+    "previous_native_label",
     "plan_shadow_decision",
     "plan_candidate_transitions",
     "quantity_toward_zero",
@@ -3964,6 +4099,7 @@ __all__ = [
     "select_long_short_memberships",
     "score_epoch_candidate_signals",
     "reduce_shadow_fill_event",
+    "rank_standardize_cross_section",
     "require_true_oos_runtime_contract",
     "sha256_file",
     "stable_json_sha256",

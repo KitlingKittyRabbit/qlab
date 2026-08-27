@@ -33,8 +33,15 @@ ENDPOINTS = [
 def _dependencies() -> pd.DataFrame:
     return pd.DataFrame(
         {
-            "endpoint": [*ENDPOINTS, "top_pos"],
-            "signal_timeframe": ["1h", "1h", "1h", "12h", "1d", "1h", "1h", "1d", "12h"],
+            "endpoint": [
+                "fr", "fr_oi_weight", "fr_vol_weight", "oi",
+                "futures_net_pos_v2", "futures_net_pos_v2", "top_pos",
+                "ob_pair", "ob_agg", "top_pos",
+            ],
+            "signal_timeframe": [
+                "1h", "1h", "1h", "12h", "1h", "1d", "1h",
+                "1h", "1d", "12h",
+            ],
         }
     )
 
@@ -48,16 +55,20 @@ def _registry() -> pd.DataFrame:
     )
 
 
-def test_repaired_source_plan_uses_26_keystore_requests_and_no_basis() -> None:
+def test_repaired_source_plan_uses_native_net_intervals_and_no_basis() -> None:
     symbols = ("BTC", "ETH", "FET", *(f"C{index:02d}" for index in range(1, 18)))
     plan = build_realtime_source_plan(_dependencies(), symbols=symbols)
     keystore = plan.loc[plan["source"].eq("keystore")]
-    assert len(keystore) == 26
+    assert len(keystore) == 46
     assert set(keystore["route"]) == {
         "coins-markets", "funding-rate/exchange-list", "futures/v2/net-position/history",
         "orderbook/ask-bids-history", "orderbook/aggregated-ask-bids-history",
     }
     assert not plan["route"].str.contains("pairs-markets").any()
+    net = keystore.loc[keystore["route"].eq("futures/v2/net-position/history")]
+    assert len(net) == 40
+    assert set(net["signal_timeframe"]) == {"1h", "1d"}
+    assert net["request_id"].nunique() == 40
     assert len(plan.loc[plan["source"].eq("binance_public") & plan["route"].eq("top-position-ratio")]) == 40
     assert len(plan.loc[plan["route"].eq("orderbook")]) == 54
     keystore_books = keystore.loc[keystore["route"].str.startswith("orderbook/")]
@@ -92,19 +103,31 @@ def test_orderbook_plan_removes_only_proven_unavailable_route() -> None:
     assert fet_sources == {"binance_public"}
 
     contract = build_shadow_source_contract(filtered)
-    assert len(contract) == 118
+    assert len(contract) == 138
     assert contract.groupby("source").size().to_dict() == {
         "binance_public": 58,
         "bybit_public": 17,
-        "keystore": 26,
+        "keystore": 46,
         "okx_public": 17,
     }
-    assert contract["request_id"].nunique() == 118
+    assert contract["request_id"].nunique() == 138
     top = contract.loc[
         contract["request_id"].eq("binance_public|top-position-ratio|BTC|12h")
     ].iloc[0]
     assert top["request_path"] == "/futures/data/topLongShortPositionRatio"
     assert '"period":"12h"' in top["request_params_json"]
+    net_1h = contract.loc[
+        contract["request_id"].eq(
+            "keystore|futures/v2/net-position/history|BTC|1h"
+        )
+    ].iloc[0]
+    net_1d = contract.loc[
+        contract["request_id"].eq(
+            "keystore|futures/v2/net-position/history|BTC|1d"
+        )
+    ].iloc[0]
+    assert '"interval":"1h"' in net_1h["request_params_json"]
+    assert '"interval":"1d"' in net_1d["request_params_json"]
     keystore_books = contract.loc[
         contract["source"].eq("keystore")
         & contract["route"].str.startswith("orderbook/")

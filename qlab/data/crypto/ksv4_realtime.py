@@ -21,18 +21,19 @@ from qlab.data.crypto.binance_um_market import BinanceUmProductionMarketClient
 from qlab.data.crypto.keystore_coinglass_client import KeystoreCoinglassClient
 
 
-SHADOW_SOURCE_CONTRACT_VERSION = "ksv4_shadow_sources_v4"
+SHADOW_SOURCE_CONTRACT_VERSION = "ksv4_shadow_sources_v5"
 SHADOW_SOURCE_DEADLINE_SECONDS = 210
 SHADOW_PUBLIC_WORKERS = 16
 SHADOW_PUBLIC_RETRIES = 3
 SHADOW_REQUEST_TIMEOUT_SECONDS = 20.0
 SHADOW_ORDERBOOK_HISTORY_LIMIT = 10
 SHADOW_EXPECTED_SOURCE_COUNTS = {
-    "keystore": 26,
+    "keystore": 46,
     "binance_public": 58,
     "bybit_public": 17,
     "okx_public": 17,
 }
+SHADOW_SOURCE_REQUEST_COUNT = sum(SHADOW_EXPECTED_SOURCE_COUNTS.values())
 KEYSTORE_REALTIME_PATHS = {
     "coins_markets": "/api/futures/coins-markets",
     "funding_exchange_list": "/api/futures/funding-rate/exchange-list",
@@ -141,7 +142,7 @@ class ShadowSourceResponse:
 
 
 def build_shadow_source_contract(source_plan: pd.DataFrame) -> pd.DataFrame:
-    """Turn the repaired 118-row logical plan into exact HTTP requests."""
+    """Turn the repaired logical plan into exact HTTP requests."""
     required = {
         "request_id", "request_order", "source", "route", "symbol",
         "signal_timeframe", "serialized",
@@ -152,7 +153,7 @@ def build_shadow_source_contract(source_plan: pd.DataFrame) -> pd.DataFrame:
     if source_plan["request_id"].astype(str).duplicated().any():
         raise ValueError("source plan request_id must be unique")
     counts = source_plan.groupby("source").size().astype(int).to_dict()
-    if counts != SHADOW_EXPECTED_SOURCE_COUNTS or len(source_plan) != 118:
+    if counts != SHADOW_EXPECTED_SOURCE_COUNTS or len(source_plan) != SHADOW_SOURCE_REQUEST_COUNT:
         raise ValueError(
             f"shadow source counts mismatch: expected={SHADOW_EXPECTED_SOURCE_COUNTS}, "
             f"actual={counts}"
@@ -173,7 +174,7 @@ def build_shadow_source_contract(source_plan: pd.DataFrame) -> pd.DataFrame:
             if route == "futures/v2/net-position/history":
                 return KEYSTORE_REALTIME_PATHS["net_position_v2"], {
                     "exchange": "Binance", "symbol": f"{symbol}USDT",
-                    "interval": "1h", "limit": 2,
+                    "interval": timeframe, "limit": 2,
                 }
             if route == "orderbook/ask-bids-history":
                 return "/api/futures/orderbook/ask-bids-history", {
@@ -240,8 +241,8 @@ def collect_shadow_source_responses(
     if missing:
         raise ValueError("shadow source contract missing columns: " + ", ".join(missing))
     counts = contract.groupby("source").size().astype(int).to_dict()
-    if counts != SHADOW_EXPECTED_SOURCE_COUNTS or len(contract) != 118:
-        raise ValueError("shadow source contract no longer contains the frozen 118 requests")
+    if counts != SHADOW_EXPECTED_SOURCE_COUNTS or len(contract) != SHADOW_SOURCE_REQUEST_COUNT:
+        raise ValueError("shadow source contract no longer contains the reviewed request set")
     if not contract["source_contract_version"].eq(SHADOW_SOURCE_CONTRACT_VERSION).all():
         raise ValueError("shadow source contract version mismatch")
     deadline = pd.Timestamp(deadline_ts)
@@ -323,8 +324,8 @@ def collect_shadow_source_responses(
             return output
         public_future = routes.submit(collect_public)
         responses = [*keystore_future.result(), *public_future.result()]
-    if len(responses) != 118 or len({row.request_id for row in responses}) != 118:
-        raise RuntimeError("shadow source collection did not return all 118 responses")
+    if len(responses) != SHADOW_SOURCE_REQUEST_COUNT or len({row.request_id for row in responses}) != SHADOW_SOURCE_REQUEST_COUNT:
+        raise RuntimeError("shadow source collection did not return all reviewed responses")
     return sorted(responses, key=lambda row: row.request_order)
 
 
@@ -447,6 +448,51 @@ def net_position_observation_at(
     return latest_net_position_observation(matches)
 
 
+def net_position_history_frame(payload: object) -> pd.DataFrame:
+    """Return every exact native net-position observation in a response.
+
+    This is a raw realtime adapter. It never fills a missing row from a
+    historical cache and never selects a nearest timestamp.
+    """
+    rows = _rows(payload)
+    output: list[tuple[pd.Timestamp, float]] = []
+    for row in rows:
+        raw_ts = next(
+            (
+                row.get(key)
+                for key in ("time", "timestamp", "t")
+                if row.get(key) is not None
+            ),
+            None,
+        )
+        if raw_ts is None:
+            raise ValueError("net-position row lacks a native timestamp")
+        value = next(
+            (
+                row.get(key)
+                for key in (
+                    "net_position_change_cum",
+                    "netPositionChangeCum",
+                    "net_position_cum",
+                )
+                if row.get(key) is not None
+            ),
+            None,
+        )
+        if value is None:
+            raise ValueError("net-position row lacks cumulative net-position field")
+        output.append((_market_timestamp(raw_ts), float(value)))
+    if not output:
+        raise ValueError("net-position payload is empty")
+    frame = pd.DataFrame(
+        {"net_position_change_cum": [value for _, value in output]},
+        index=pd.DatetimeIndex([timestamp for timestamp, _ in output], name="ts"),
+    ).sort_index()
+    if frame.index.duplicated().any():
+        raise ValueError("net-position payload contains duplicate native labels")
+    return frame
+
+
 def latest_net_position_value(payload: object) -> float:
     return latest_net_position_observation(payload)[0]
 
@@ -480,6 +526,26 @@ def ratio_observation_at(
             f"expected one ratio row at {target.isoformat()}, got {len(matching)}"
         )
     return latest_ratio_observation(matching)
+
+
+def ratio_history_frame(payload: object) -> pd.DataFrame:
+    """Return every exact native top-position ratio observation in a response."""
+    rows = _rows(payload)
+    output: list[tuple[pd.Timestamp, float]] = []
+    for row in rows:
+        raw_ts = row.get("timestamp")
+        if raw_ts is None or row.get("longShortRatio") is None:
+            raise ValueError("ratio row lacks timestamp or longShortRatio")
+        output.append((_market_timestamp(raw_ts), float(row["longShortRatio"])))
+    if not output:
+        raise ValueError("ratio payload is empty")
+    frame = pd.DataFrame(
+        {"top_pos_ls_ratio": [value for _, value in output]},
+        index=pd.DatetimeIndex([timestamp for timestamp, _ in output], name="ts"),
+    ).sort_index()
+    if frame.index.duplicated().any():
+        raise ValueError("ratio payload contains duplicate native labels")
+    return frame
 
 
 def latest_ratio_value(payload: object) -> float:
@@ -552,6 +618,42 @@ def orderbook_history_imbalance_at(
         bid_key=bid_key,
         ask_key=ask_key,
     )
+
+
+def orderbook_history_depth_at(
+    payload: object,
+    *,
+    target_label_ts: str | pd.Timestamp,
+    bid_key: str,
+    ask_key: str,
+) -> tuple[float, float, pd.Timestamp]:
+    """Return the exact historical USD depth row without inventing values."""
+    target = pd.Timestamp(target_label_ts)
+    target = target.tz_localize("UTC") if target.tz is None else target.tz_convert("UTC")
+    matching = []
+    for row in _rows(payload):
+        raw_ts = next(
+            (
+                row.get(key)
+                for key in ("time", "timestamp", "t")
+                if row.get(key) is not None
+            ),
+            None,
+        )
+        if raw_ts is not None and _market_timestamp(raw_ts) == target:
+            matching.append(row)
+    if len(matching) != 1:
+        raise ValueError(
+            f"expected one orderbook row at {target.isoformat()}, got {len(matching)}"
+        )
+    row = matching[0]
+    if row.get(bid_key) is None or row.get(ask_key) is None:
+        raise ValueError("orderbook history target row lacks both USD depth fields")
+    bid = float(row[bid_key])
+    ask = float(row[ask_key])
+    if bid <= 0.0 or ask <= 0.0:
+        raise ValueError("orderbook history target row must contain positive USD depth")
+    return bid, ask, target
 
 
 def usd_depth_within_band(
@@ -674,14 +776,14 @@ def realtime_raw_values(
     coins_row: Mapping[str, object],
     funding_rate: float,
     pair_row: Mapping[str, object],
-    net_position_value: float,
+    net_position_values: Mapping[str, float],
     global_ratio: float,
     top_account_ratio: float,
     top_position_ratio: float,
     pair_depth: tuple[float, float],
     aggregate_depth: tuple[float, float],
 ) -> dict[str, dict[str, float]]:
-    """Return endpoint-keyed raw columns expected by the frozen registry."""
+    """Return endpoint-keyed raw columns with native net-position identities."""
     required = (
         "avg_funding_rate_by_oi",
         "avg_funding_rate_by_vol",
@@ -694,7 +796,13 @@ def realtime_raw_values(
         raise ValueError(
             f"coins-markets row for {str(symbol).upper()} missing: {', '.join(missing)}"
         )
-    return {
+    normalized_net_positions = {
+        str(timeframe): float(value)
+        for timeframe, value in net_position_values.items()
+    }
+    if set(normalized_net_positions) != {"1h", "1d"}:
+        raise ValueError("realtime raw values require native 1h and 1d net positions")
+    result = {
         "basis": {"close_basis": close_basis_percent(pair_row)},
         "fr": {"fr_close": float(funding_rate)},
         "fr_oi_weight": {"close": float(coins_row["avg_funding_rate_by_oi"])},
@@ -707,22 +815,24 @@ def realtime_raw_values(
         "global_ls": {"global_ls_ratio": float(global_ratio)},
         "top_acct": {"top_acct_ls_ratio": float(top_account_ratio)},
         "top_pos": {"top_pos_ls_ratio": float(top_position_ratio)},
-        "futures_net_pos_v2": {
-            "net_position_change_cum": float(net_position_value)
-        },
         "ob_pair": {"bids_usd": float(pair_depth[0]), "asks_usd": float(pair_depth[1])},
         "ob_agg": {
             "aggregated_bids_usd": float(aggregate_depth[0]),
             "aggregated_asks_usd": float(aggregate_depth[1]),
         },
     }
+    for timeframe, value in normalized_net_positions.items():
+        result[f"ksv4_{timeframe}:futures_net_pos_v2"] = {
+            "net_position_change_cum": value
+        }
+    return result
 
 
 def repaired_realtime_raw_values(
     *,
     coins_row: Mapping[str, object],
     funding_rate: float,
-    net_position_value: float,
+    net_position_values: Mapping[str, float],
     top_position_ratio_1h: float,
     top_position_ratio_12h: float,
     pair_depth: tuple[float, float],
@@ -735,20 +845,26 @@ def repaired_realtime_raw_values(
     missing = [key for key in required if coins_row.get(key) is None]
     if missing:
         raise ValueError("coins-markets row missing: " + ", ".join(missing))
+    net_position_values = {
+        str(timeframe): float(value)
+        for timeframe, value in net_position_values.items()
+    }
+    if set(net_position_values) != {"1h", "1d"}:
+        raise ValueError("repaired source requires native 1h and 1d net positions")
     common = {
         "fr": {"fr_close": float(funding_rate)},
         "fr_oi_weight": {"close": float(coins_row["avg_funding_rate_by_oi"])},
         "fr_vol_weight": {"close": float(coins_row["avg_funding_rate_by_vol"])},
         "oi": {"oi_close": float(coins_row["open_interest_usd"])},
-        "futures_net_pos_v2": {
-            "net_position_change_cum": float(net_position_value)
-        },
         "ob_pair": {"bids_usd": float(pair_depth[0]), "asks_usd": float(pair_depth[1])},
         "ob_agg": {
             "aggregated_bids_usd": float(aggregate_depth[0]),
             "aggregated_asks_usd": float(aggregate_depth[1]),
         },
     }
+    for timeframe, value in net_position_values.items():
+        key = f"ksv4_{timeframe}:futures_net_pos_v2"
+        common[key] = {"net_position_change_cum": value}
     common["ksv4_1h:top_pos"] = {"top_pos_ls_ratio": float(top_position_ratio_1h)}
     common["ksv4_12h:top_pos"] = {"top_pos_ls_ratio": float(top_position_ratio_12h)}
     return common
@@ -825,7 +941,8 @@ def shadow_response_native_identity(
     route = str(response.route)
     if route == "futures/v2/net-position/history":
         label, native_end = latest_completed_native_identity(
-            signal_timeframe="1h", timestamp_kind="bar_start", as_of_ts=decision
+            signal_timeframe=str(response.signal_timeframe),
+            timestamp_kind="bar_start", as_of_ts=decision
         )
         _, observed = net_position_observation_at(payload, label)
         if observed != label:
@@ -871,9 +988,17 @@ def build_realtime_cache_payloads(
     registry_frame: pd.DataFrame,
     decision_ts: str | pd.Timestamp,
     values_by_symbol: Mapping[str, Mapping[str, Mapping[str, float]]],
-    historical_payloads: Mapping[str, Mapping[str, pd.DataFrame]],
+    previous_realtime_payloads: Mapping[str, Mapping[str, pd.DataFrame]] | None = None,
+    allow_missing_previous: bool = False,
 ) -> dict[str, dict[str, pd.DataFrame]]:
-    """Overlay one observed decision row on prior cache rows for delta transforms."""
+    """Build realtime frames without using historical data as a prior.
+
+    A delta factor may use only the immediately preceding native observation
+    from the same realtime source. ``previous_realtime_payloads`` is an
+    explicit collection of those source observations. A historical cache is
+    intentionally not accepted here: using it would make a realtime delta
+    look complete while silently changing its source identity.
+    """
     decision = pd.Timestamp(decision_ts)
     decision = decision.tz_localize("UTC") if decision.tz is None else decision.tz_convert("UTC")
     result: dict[str, dict[str, pd.DataFrame]] = {}
@@ -895,17 +1020,43 @@ def build_realtime_cache_payloads(
                 value_key = scoped_endpoint if scoped_endpoint in symbol_values else endpoint
                 if symbol_upper not in values_by_symbol or value_key not in symbol_values:
                     raise ValueError(f"missing realtime raw values: {symbol_upper}/{endpoint}")
-                prior = historical_payloads.get(str(scope), {}).get(cache_key)
-                if prior is None or prior.empty:
-                    raise ValueError(f"missing historical seed frame: {scope}/{cache_key}")
-                seeded = prior.loc[
-                    pd.to_datetime(prior.index, utc=True) < label
-                ].sort_index().tail(2).copy()
-                if seeded.empty:
-                    raise ValueError(
-                        f"historical seed has no row before realtime label: "
-                        f"{scope}/{cache_key}/{label.isoformat()}"
+                endpoint_rows = rows.loc[rows["endpoint"].astype(str).eq(endpoint)]
+                delta_required = bool(
+                    "panel_transform" in endpoint_rows.columns
+                    and endpoint_rows["panel_transform"]
+                    .astype(str)
+                    .eq("delta1_raw_column")
+                    .any()
+                )
+                seeded = pd.DataFrame()
+                if delta_required:
+                    prior = (
+                        (previous_realtime_payloads or {})
+                        .get(str(scope), {})
+                        .get(cache_key)
                     )
+                    if prior is not None and not prior.empty:
+                        normalized_prior = prior.copy()
+                        normalized_prior.index = pd.to_datetime(
+                            normalized_prior.index, utc=True
+                        )
+                        normalized_prior = normalized_prior.sort_index()
+                        expected_previous = label - pd.Timedelta(timeframe)
+                        exact_previous = normalized_prior.loc[
+                            normalized_prior.index == expected_previous
+                        ]
+                        if len(exact_previous) > 1:
+                            raise ValueError(
+                                f"previous realtime frame has duplicate native label: "
+                                f"{scope}/{cache_key}/{expected_previous.isoformat()}"
+                            )
+                        if len(exact_previous) == 1:
+                            seeded = exact_previous.copy()
+                    if seeded.empty and not allow_missing_previous:
+                        raise ValueError(
+                            f"missing exact previous realtime observation: "
+                            f"{scope}/{cache_key}/{(label - pd.Timedelta(timeframe)).isoformat()}"
+                        )
                 current = pd.DataFrame(
                     [dict(symbol_values[value_key])],
                     index=pd.DatetimeIndex([label], name="ts"),
@@ -925,6 +1076,7 @@ __all__ = [
     "SHADOW_PUBLIC_WORKERS",
     "SHADOW_REQUEST_TIMEOUT_SECONDS",
     "SHADOW_SOURCE_CONTRACT_VERSION",
+    "SHADOW_SOURCE_REQUEST_COUNT",
     "SHADOW_SOURCE_DEADLINE_SECONDS",
     "ShadowSourceResponse",
     "aggregate_depth_usd",
@@ -938,12 +1090,15 @@ __all__ = [
     "depth_covers_band",
     "index_coins_markets",
     "index_funding_exchange_list",
+    "net_position_history_frame",
     "latest_net_position_value",
     "latest_net_position_observation",
     "net_position_observation_at",
     "latest_orderbook_history_imbalance",
     "orderbook_history_imbalance_at",
+    "orderbook_history_depth_at",
     "latest_ratio_observation",
+    "ratio_history_frame",
     "ratio_observation_at",
     "latest_ratio_value",
     "latest_completed_native_identity",

@@ -68,6 +68,20 @@ def _parse_ohlc(rows: list[Any], *, prefix: str | None = None) -> pd.DataFrame:
     source_columns = ["open", "high", "low", "close"]
     if not all(column in frame.columns for column in source_columns):
         source_columns = ["o", "h", "l", "c"]
+    if not all(column in frame.columns for column in source_columns):
+        # Normalized realtime projections intentionally carry only the
+        # registry-required close.  Do not manufacture OHLC values from it.
+        close_column = "close" if "close" in frame.columns else "c"
+        if close_column not in frame.columns:
+            raise ValueError(
+                "OHLC response lacks open/high/low and has no close-only field"
+            )
+        output = pd.DataFrame(index=frame["ts"])
+        column_name = f"{prefix}_close" if prefix else "close"
+        output[column_name] = pd.to_numeric(
+            frame[close_column], errors="coerce"
+        ).to_numpy()
+        return normalize_timeseries_frame(output)
     output = pd.DataFrame(index=frame["ts"])
     names = ["open", "high", "low", "close"]
     for source, name in zip(source_columns, names):

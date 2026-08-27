@@ -215,6 +215,14 @@ def test_parse_oi_and_funding_frames_match_replacement_schema():
     assert fr.iloc[0]["fr_close"] == 1.5
 
 
+def test_parse_close_only_projection_does_not_invent_ohlc_fields():
+    rows = [{"time": 1780012800000, "close": "1.5"}]
+    weighted = parse_history_frame("ohlc", rows)
+    oi = parse_history_frame("oi_ohlc", rows)
+    assert list(weighted.columns) == ["close"]
+    assert list(oi.columns) == ["oi_close"]
+
+
 def test_parse_long_short_ratio_uses_keystore_v4_field_names():
     frame = parse_history_frame(
         "global_ls",

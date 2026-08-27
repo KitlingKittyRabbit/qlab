@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -55,6 +56,75 @@ def test_extract_feature_series_applies_ob_imbalance_column_order():
     series = panel_builder.extract_feature_series(row, frame)
 
     assert series.iloc[0] == pytest.approx(0.5)
+
+
+def test_extract_feature_series_drops_only_zero_depth_rows() -> None:
+    """A zero-depth placeholder must not invalidate the surrounding history."""
+    row = registry.feature_registry_for_panel(("ob_pair_imbalance__1h",)).iloc[0]
+    index = pd.date_range("2026-01-01", periods=3, freq="1h", tz="UTC", name="ts")
+    frame = pd.DataFrame(
+        {
+            "bids_usd": [30.0, 0.0, 15.0],
+            "asks_usd": [10.0, 0.0, 5.0],
+        },
+        index=index,
+    )
+
+    series = panel_builder.extract_feature_series(row, frame)
+
+    assert series.index.tolist() == [index[0], index[2]]
+    assert series.tolist() == pytest.approx([0.5, 0.5])
+
+
+def test_extract_feature_series_keeps_preexisting_raw_numeric_coercion_semantics() -> None:
+    """The public historical panel still coerces bool/inf and drops NaN rowwise."""
+    row = pd.Series(
+        {
+            "feature_name": "raw_test__1h",
+            "required_columns": "value",
+            "panel_transform": "raw_column",
+        }
+    )
+    index = pd.date_range("2026-01-01", periods=4, freq="1h", tz="UTC", name="ts")
+    frame = pd.DataFrame(
+        {"value": [True, np.nan, np.inf, 2.0]},
+        index=index,
+    )
+
+    series = panel_builder.extract_feature_series(row, frame)
+
+    assert series.index.tolist() == [index[0], index[2], index[3]]
+    assert series.iloc[0] == 1.0
+    assert np.isposinf(series.iloc[1])
+    assert series.iloc[2] == 2.0
+
+
+@pytest.mark.parametrize(
+    ("transform", "values", "message"),
+    [
+        ("log_ratio", {"left": [1.0, 0.0], "right": [1.0, 1.0]}, "strictly positive"),
+        ("log1p_ratio", {"left": [1.0, -1.0], "right": [1.0, 1.0]}, "non-negative"),
+    ],
+)
+def test_extract_feature_series_keeps_historical_log_domain_behavior(
+    transform: str,
+    values: dict[str, list[float]],
+    message: str,
+) -> None:
+    row = pd.Series(
+        {
+            "feature_name": f"{transform}__1h",
+            "required_columns": "left,right",
+            "panel_transform": transform,
+        }
+    )
+    frame = pd.DataFrame(
+        values,
+        index=pd.date_range("2026-01-01", periods=2, freq="1h", tz="UTC", name="ts"),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        panel_builder.extract_feature_series(row, frame)
 
 
 def test_observed_overlay_is_copy_on_write_and_latest_observation_wins():
