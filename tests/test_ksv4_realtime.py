@@ -21,11 +21,13 @@ from qlab.data.crypto.ksv4_realtime import (
     latest_net_position_value,
     latest_net_position_observation,
     latest_completed_native_identity,
+    net_position_history_frame,
     net_position_observation_at,
     latest_orderbook_history_imbalance,
     orderbook_history_imbalance_at,
     orderbook_history_depth_at,
     ratio_observation_at,
+    ratio_history_frame,
     realtime_projection_identity,
     latest_ratio_observation,
     latest_ratio_value,
@@ -248,13 +250,14 @@ def test_realtime_values_and_delta_seed_build_existing_panel_contract() -> None:
 
     registry = pd.DataFrame(
         [
-            {
-                "feature_name": "oi_close_delta1__12h",
-                "source_scope": "ksv4_12h",
-                "signal_timeframe": "12h",
-                "endpoint": "oi",
-                "timestamp_kind": "bar_start",
-            },
+                {
+                    "feature_name": "oi_close_delta1__12h",
+                    "source_scope": "ksv4_12h",
+                    "signal_timeframe": "12h",
+                    "endpoint": "oi",
+                    "timestamp_kind": "bar_start",
+                    "panel_transform": "delta1_raw_column",
+                },
             {
                 "feature_name": "funding_close__12h",
                 "source_scope": "ksv4_12h",
@@ -272,7 +275,7 @@ def test_realtime_values_and_delta_seed_build_existing_panel_contract() -> None:
         ]
     )
     prior_index = pd.DatetimeIndex(["2026-07-30T00:00:00Z"], name="ts")
-    historical = {
+    prior_realtime = {
         "ksv4_12h": {
             "ADA_oi": pd.DataFrame({"oi_close": [100.0]}, index=prior_index),
             "ADA_fr": pd.DataFrame({"fr_close": [0.2]}, index=prior_index),
@@ -287,15 +290,17 @@ def test_realtime_values_and_delta_seed_build_existing_panel_contract() -> None:
         registry_frame=registry,
         decision_ts="2026-07-31T00:00:00Z",
         values_by_symbol={"ADA": raw},
-        historical_payloads=historical,
+        previous_realtime_payloads=prior_realtime,
     )
     assert list(built["ksv4_12h"]["ADA_oi"].index) == [
         pd.Timestamp("2026-07-30T00:00:00Z"),
         pd.Timestamp("2026-07-30T12:00:00Z"),
     ]
     assert built["ksv4_12h"]["ADA_oi"].iloc[-1]["oi_close"] == 110.0
+    # Non-delta endpoints must not inherit a historical/prior row merely
+    # because a caller supplied one; the current realtime observation is the
+    # only row needed for this projection.
     assert list(built["ksv4_12h"]["ADA_ob_agg"].index) == [
-        pd.Timestamp("2026-07-30T00:00:00Z"),
         pd.Timestamp("2026-07-31T00:00:00Z"),
     ]
 
@@ -336,7 +341,7 @@ def test_repaired_overlay_keeps_1h_and_12h_top_position_distinct() -> None:
     built = build_realtime_cache_payloads(
         symbols=["ADA"], registry_frame=registry,
         decision_ts="2026-07-31T00:00:00Z",
-        values_by_symbol={"ADA": values}, historical_payloads=historical,
+        values_by_symbol={"ADA": values}, previous_realtime_payloads=historical,
     )
     assert built["ksv4_1h"]["ADA_top_pos"].iloc[-1, 0] == 1.1
     assert built["ksv4_12h"]["ADA_top_pos"].iloc[-1, 0] == 1.2
@@ -404,6 +409,85 @@ def test_exact_native_observation_selectors_reject_adjacent_rows() -> None:
     )[0] == pytest.approx(1.0 / 3.0)
     with pytest.raises(ValueError, match="got 0"):
         net_position_observation_at(net_payload, decision)
+
+
+def test_realtime_history_frames_keep_all_exact_native_observations() -> None:
+    payload = {
+        "code": "0",
+        "data": [
+            {
+                "time": int(pd.Timestamp("2026-08-06T18:00:00Z").timestamp() * 1000),
+                "net_position_change_cum": 10.0,
+            },
+            {
+                "time": int(pd.Timestamp("2026-08-06T19:00:00Z").timestamp() * 1000),
+                "net_position_change_cum": 12.0,
+            },
+        ],
+    }
+    frame = net_position_history_frame(payload)
+    assert frame["net_position_change_cum"].tolist() == [10.0, 12.0]
+    ratio = ratio_history_frame(
+        {
+            "code": "0",
+            "data": [
+                {
+                    "timestamp": int(
+                        pd.Timestamp("2026-08-06T18:00:00Z").timestamp() * 1000
+                    ),
+                    "longShortRatio": "1.1",
+                },
+                {
+                    "timestamp": int(
+                        pd.Timestamp("2026-08-06T19:00:00Z").timestamp() * 1000
+                    ),
+                    "longShortRatio": "1.2",
+                },
+            ],
+        }
+    )
+    assert ratio["top_pos_ls_ratio"].tolist() == [1.1, 1.2]
+    with pytest.raises(ValueError, match="duplicate native labels"):
+        net_position_history_frame(
+            {
+                "code": "0",
+                "data": [
+                    {
+                        "time": int(
+                            pd.Timestamp("2026-08-06T19:00:00Z").timestamp() * 1000
+                        ),
+                        "net_position_change_cum": 12.0,
+                    },
+                    {
+                        "time": int(
+                            pd.Timestamp("2026-08-06T19:00:00Z").timestamp() * 1000
+                        ),
+                        "net_position_change_cum": 13.0,
+                    },
+                ],
+            }
+        )
+
+
+def test_delta_projection_fails_without_exact_realtime_prior() -> None:
+    registry = pd.DataFrame(
+        [
+            {
+                "source_scope": "ksv4_1h",
+                "signal_timeframe": "1h",
+                "endpoint": "oi",
+                "timestamp_kind": "bar_start",
+                "panel_transform": "delta1_raw_column",
+            }
+        ]
+    )
+    with pytest.raises(ValueError, match="missing exact previous realtime observation"):
+        build_realtime_cache_payloads(
+            symbols=["BTC"],
+            registry_frame=registry,
+            decision_ts="2026-08-06T20:00:00Z",
+            values_by_symbol={"BTC": {"oi": {"oi_close": 120.0}}},
+        )
 
 
 def test_net_response_identity_uses_the_requested_native_interval() -> None:
@@ -555,6 +639,7 @@ def test_off_phase_source_can_be_acquired_but_not_projected() -> None:
                 "endpoint": "oi",
                 "signal_timeframe": "1h",
                 "timestamp_kind": "bar_start",
+                "panel_transform": "delta1_raw_column",
             },
             {
                 "source_scope": "ksv4_12h",
@@ -571,7 +656,7 @@ def test_off_phase_source_can_be_acquired_but_not_projected() -> None:
         registry_frame=due_registry,
         decision_ts=decision,
         values_by_symbol={"BTC": {"oi": {"oi_close": 120.0}}},
-        historical_payloads={
+        previous_realtime_payloads={
             "ksv4_1h": {
                 "BTC_oi": pd.DataFrame(
                     {"oi_close": [100.0]},
@@ -596,7 +681,7 @@ def test_off_phase_source_can_be_acquired_but_not_projected() -> None:
                     "ksv4_12h:top_pos": {"top_pos_ls_ratio": 1.2},
                 }
             },
-            historical_payloads={
+            previous_realtime_payloads={
                 "ksv4_1h": {
                     "BTC_oi": pd.DataFrame(
                         {"oi_close": [100.0]},

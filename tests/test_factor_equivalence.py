@@ -4,6 +4,7 @@ import pytest
 
 from qlab.data.crypto.factor_equivalence import (
     apply_factor_registry_transform,
+    aggregate_factor_equivalence_records,
     build_factor_equivalence_records,
     build_source_equivalence_identity,
 )
@@ -298,6 +299,7 @@ def test_raw_factor_difference_can_preserve_the_cross_section_rank() -> None:
     )
     assert all(record["factor_value_equal"] is False for record in records)
     assert all(record["cross_section_equal"] is True for record in records)
+    assert all(record["final_strategy_input_equal"] is True for record in records)
     assert all(
         record["status"] == "value_mismatch_decision_equivalent"
         for record in records
@@ -314,6 +316,8 @@ def test_top_position_native_timestamp_mapping_is_explicit_and_comparable() -> N
     assert realtime["source_native_timestamp_kind"] == "bar_start"
     assert historical["source_native_timestamp_kind"] == "bar_end"
     assert realtime["strategy_timestamp_kind"] == historical["strategy_timestamp_kind"] == "bar_end"
+    assert realtime["field_precision"] == historical["field_precision"]
+    assert realtime["rounding"] == historical["rounding"] == "none_before_comparison"
     row = {
         "feature_name": "top_pos_level__1h",
         "endpoint": "top_pos",
@@ -569,3 +573,49 @@ def test_expected_cross_section_is_fail_closed_before_rank_standardization() -> 
     assert record["status"] == "cross_section_incomplete"
     assert record["cross_section_complete"] is False
     assert record["realtime_standardized_value"] is None
+
+
+def test_event_aggregation_is_the_qlab_only_status_reduction() -> None:
+    row = {
+        "feature_name": "funding__1h",
+        "endpoint": "fr",
+        "signal_timeframe": "1h",
+        "required_columns": "fr_close",
+        "panel_transform": "raw_column",
+        "cross_section_standardization": "none",
+        "timestamp_kind": "bar_start",
+    }
+    records = build_factor_equivalence_records(
+        [_item(
+            symbol="BTC", registry_row=row,
+            realtime={"fr_close": 0.1}, historical={"fr_close": 0.1},
+        )]
+    )
+    records[0]["realtime_receipt_id"] = "same-receipt"
+    records[0]["reference_role"] = "initial"
+    aggregate = aggregate_factor_equivalence_records(records)
+    assert len(aggregate) == 1
+    assert aggregate[0]["status"] == "exact_match"
+    assert aggregate[0]["final_strategy_input_equal"] is True
+    assert aggregate[0]["factor_equivalence_count"] == 1
+
+
+def test_registry_source_identity_version_rejects_stale_contract() -> None:
+    row = {
+        "feature_name": "funding__1h",
+        "endpoint": "fr",
+        "signal_timeframe": "1h",
+        "required_columns": "fr_close",
+        "panel_transform": "raw_column",
+        "cross_section_standardization": "none",
+        "timestamp_kind": "bar_start",
+        "source_identity_contract_version": "old_source_contract",
+    }
+    record = build_factor_equivalence_records(
+        [_item(
+            symbol="BTC", registry_row=row,
+            realtime={"fr_close": 0.1}, historical={"fr_close": 0.1},
+        )]
+    )[0]
+    assert record["status"] == "native_identity_mismatch"
+    assert record["final_strategy_input_equal"] is False

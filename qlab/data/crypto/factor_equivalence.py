@@ -19,6 +19,7 @@ import pandas as pd
 
 
 FACTOR_EQUIVALENCE_CONTRACT_VERSION = "ksv4_factor_equivalence_v1"
+SOURCE_IDENTITY_CONTRACT_VERSION = "ksv4_source_semantics_v1"
 FACTOR_EQUIVALENCE_STATUSES = frozenset(
     {
         "exact_match",
@@ -59,6 +60,32 @@ def factor_required_columns(registry_row: Mapping[str, object]) -> tuple[str, ..
     if not columns:
         raise ValueError("factor registry required_columns must not be empty")
     return columns
+
+
+def _registry_identity_contract(
+    registry_row: Mapping[str, object], *, side: str
+) -> dict[str, object]:
+    """Read optional versioned source-identity rules from a registry row."""
+    raw = registry_row.get("source_identity_contract")
+    if raw is None or (isinstance(raw, float) and math.isnan(raw)):
+        return {}
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError("source_identity_contract is not valid JSON") from exc
+    if not isinstance(raw, Mapping):
+        raise ValueError("source_identity_contract must be a mapping")
+    selected = raw.get(side, raw)
+    if not isinstance(selected, Mapping):
+        raise ValueError(f"source_identity_contract has no {side} mapping")
+    return {str(key): value for key, value in selected.items()}
+
+
+def _identity_value_matches(actual: object, expected: object) -> bool:
+    if isinstance(expected, (list, tuple, set, frozenset)):
+        return any(_identity_value_matches(actual, item) for item in expected)
+    return str(actual) == str(expected)
 
 
 def _duration(signal_timeframe: str) -> float:
@@ -196,11 +223,12 @@ def build_source_equivalence_identity(
     if side not in {"realtime", "historical"}:
         raise ValueError("source identity side must be realtime or historical")
     identity: dict[str, object] = {
-        "identity_version": "ksv4_source_semantics_v1",
+        "identity_version": SOURCE_IDENTITY_CONTRACT_VERSION,
         "endpoint": endpoint_name,
         "symbol": symbol_name,
         "signal_timeframe": timeframe,
         "timestamp_kind": str(timestamp_kind),
+        "source_side": side,
     }
     if endpoint_name == "fr":
         identity.update(metric="funding_rate", unit="rate", aggregation="close")
@@ -238,6 +266,8 @@ def build_source_equivalence_identity(
             ),
             strategy_timestamp_kind="bar_end",
             market_scope="Binance USDT perpetual",
+            field_precision="source decimal parsed to float64",
+            rounding="none_before_comparison",
             extra_fields_ignored=("top_pos_long_pct", "top_pos_short_pct"),
         )
     elif endpoint_name in {"ob_pair", "ob_agg"}:
@@ -261,6 +291,9 @@ def build_source_equivalence_identity(
             contract_type="USD-margined perpetual",
             depth_band="+/-1%",
             depth_formula="sum(price*quantity*contract_multiplier), then (bid-ask)/(bid+ask)",
+            contract_multiplier=(
+                "1 for USD depth sources; OKX ctVal from bound instrument metadata"
+            ),
             snapshot_granularity=granularity,
             snapshot_time_semantics="exact_target_label_ts",
             aggregation=("single venue" if endpoint_name == "ob_pair" else "venue sum"),
@@ -273,12 +306,12 @@ def build_source_equivalence_identity(
 def _identity_equal(left: Mapping[str, object], right: Mapping[str, object]) -> bool:
     def comparable(identity: Mapping[str, object]) -> dict[str, object]:
         result = dict(identity)
+        result.pop("source_side", None)
         if str(result.get("endpoint", "")) == "top_pos":
             # Binance supplies bar_start while the historical KeyStore row is
             # bar_end; both are mapped to the same strategy bar_end.  Keep
             # the side-specific mapping in diagnostics, but compare the
             # canonical strategy identity here.
-            result.pop("source_side", None)
             result.pop("source_native_timestamp_kind", None)
         return result
 
@@ -302,6 +335,61 @@ def _identity_matches_registry(
         )
     ):
         return False
+    if "source_scope" in registry_row:
+        if (
+            "source_scope" not in identity
+            or str(identity.get("source_scope", ""))
+            != str(registry_row["source_scope"])
+        ):
+            return False
+
+    registry_identity_version = str(
+        registry_row.get("source_identity_contract_version", "")
+    ).strip()
+    if registry_identity_version and registry_identity_version != SOURCE_IDENTITY_CONTRACT_VERSION:
+        return False
+
+    required_identity_fields = {
+        "fr": {"metric", "unit", "aggregation"},
+        "fr_oi_weight": {"metric", "unit", "aggregation"},
+        "fr_vol_weight": {"metric", "unit", "aggregation"},
+        "futures_net_pos_v2": {
+            "metric", "unit", "native_interval", "observations", "exchange_scope",
+        },
+        "oi": {
+            "metric", "unit", "contract_scope", "exchange_scope", "native_interval",
+        },
+        "top_pos": {
+            "metric", "unit", "source_native_timestamp_kind", "strategy_timestamp_kind",
+            "market_scope", "field_precision", "rounding",
+        },
+        "ob_pair": {
+            "metric", "raw_input_unit", "unit", "contract_type", "depth_band",
+            "depth_formula", "contract_multiplier", "snapshot_granularity",
+            "snapshot_time_semantics", "aggregation", "venue_scope",
+        },
+        "ob_agg": {
+            "metric", "raw_input_unit", "unit", "contract_type", "depth_band",
+            "depth_formula", "contract_multiplier", "snapshot_granularity",
+            "snapshot_time_semantics", "aggregation", "venue_scope",
+        },
+    }
+    if not required_identity_fields.get(endpoint, set()).issubset(identity):
+        return False
+
+    try:
+        contract = _registry_identity_contract(
+            registry_row,
+            side=str(identity.get("source_side", "")),
+        )
+    except ValueError:
+        return False
+    for key, expected in contract.items():
+        if key == "source_side":
+            continue
+        if key not in identity or not _identity_value_matches(identity[key], expected):
+            return False
+
     if endpoint == "futures_net_pos_v2" and str(
         identity.get("native_interval", "")
     ) != timeframe:
@@ -463,7 +551,6 @@ def _factor_record_for_pair(
             and source_identity_contract_valid
             and native_identity_equal
             and required_equal
-            and factor_equal
             and rank_equal
         ),
         "status": status,
@@ -543,18 +630,28 @@ def build_factor_equivalence_records(
             required_diagnostics[symbol] = _registry_required_diagnostic(required, realtime, historical)
             if not required_diagnostics[symbol]["realtime_required_present"] or not required_diagnostics[symbol]["historical_required_present"]:
                 errors[symbol] = "required_field_mismatch"
-                continue
-            try:
-                realtime_factors[symbol] = apply_factor_registry_transform(
-                    row, realtime, previous_values=item.get("realtime_previous_values")
-                )
-                historical_factors[symbol] = apply_factor_registry_transform(
-                    row, historical, previous_values=item.get("reference_previous_values")
-                )
-            except KeyError:
-                errors[symbol] = "missing_prior_observation"
-            except (TypeError, ValueError):
-                errors[symbol] = "required_field_mismatch"
+        if cross_section_complete and not errors:
+            for item, symbol in zip(group_items, symbols):
+                realtime = _as_mapping(item["realtime_values"], name="realtime_values")
+                historical = _as_mapping(item["reference_values"], name="reference_values")
+                try:
+                    realtime_factors[symbol] = apply_factor_registry_transform(
+                        row, realtime, previous_values=item.get("realtime_previous_values")
+                    )
+                    historical_factors[symbol] = apply_factor_registry_transform(
+                        row, historical, previous_values=item.get("reference_previous_values")
+                    )
+                except KeyError:
+                    errors[symbol] = "missing_prior_observation"
+                except (TypeError, ValueError):
+                    errors[symbol] = "required_field_mismatch"
+        if errors:
+            cross_section_complete = False
+            for symbol in symbols:
+                errors.setdefault(symbol, "cross_section_incomplete")
+        if not cross_section_complete:
+            for symbol in symbols:
+                errors.setdefault(symbol, "cross_section_incomplete")
         policy = str(row.get("cross_section_standardization", "none"))
         if policy == "none":
             realtime_standardized = dict(realtime_factors)
@@ -567,8 +664,6 @@ def build_factor_equivalence_records(
         if not cross_section_complete:
             realtime_standardized = {}
             historical_standardized = {}
-            for symbol in symbols:
-                errors.setdefault(symbol, "cross_section_incomplete")
         for item, symbol in zip(group_items, symbols):
             realtime_native = _utc_timestamp(item["realtime_native_bar_end_ts"])
             reference_native = _utc_timestamp(item["reference_native_bar_end_ts"])
@@ -638,6 +733,82 @@ def build_factor_equivalence_records(
     )
 
 
+def aggregate_factor_equivalence_records(
+    records: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Aggregate feature rows into one source-event comparison.
+
+    This event-level reduction is part of the qlab contract.  A research
+    caller may persist its result, but may not independently decide the
+    aggregate status or final strategy-input equality.
+    """
+    grouped: dict[tuple[str, str], list[dict[str, object]]] = {}
+    for record in records:
+        item = dict(record)
+        grouped.setdefault(
+            (str(item["realtime_receipt_id"]), str(item["reference_role"])),
+            [],
+        ).append(item)
+
+    status_priority = {
+        "scope_not_comparable": 0,
+        "native_identity_mismatch": 1,
+        "required_field_mismatch": 2,
+        "missing_prior_observation": 3,
+        "cross_section_incomplete": 4,
+        "decision_material_mismatch": 5,
+        "value_mismatch_decision_equivalent": 6,
+        "exact_match": 7,
+    }
+    output: list[dict[str, object]] = []
+    for factor_records in grouped.values():
+        ordered = sorted(
+            factor_records,
+            key=lambda record: str(record.get("feature_name", "")),
+        )
+        statuses = [str(record["status"]) for record in ordered]
+        aggregate = dict(ordered[0])
+        aggregate.pop("registry_spec", None)
+        aggregate.pop("raw_values_sha256", None)
+        aggregate["factor_equivalence_records"] = ordered
+        aggregate["factor_statuses"] = {
+            str(record.get("feature_name", "")): str(record["status"])
+            for record in ordered
+        }
+        aggregate["status"] = min(
+            statuses,
+            key=lambda status: status_priority.get(status, -1),
+        )
+        aggregate["final_strategy_input_equal"] = all(
+            bool(record["final_strategy_input_equal"]) for record in ordered
+        )
+        aggregate["raw_structure_diagnostics"] = {
+            str(record.get("feature_name", "")): record["raw_structure_diagnostic"]
+            for record in ordered
+        }
+        aggregate["registry_required_field_diagnostics"] = {
+            str(record.get("feature_name", "")): record[
+                "registry_required_field_diagnostic"
+            ]
+            for record in ordered
+        }
+        aggregate["factor_equivalence_count"] = len(ordered)
+        aggregate["record_sha256"] = _stable_hash(
+            {key: value for key, value in aggregate.items() if key != "record_sha256"}
+        )
+        output.append(aggregate)
+    return sorted(
+        output,
+        key=lambda record: (
+            str(record.get("source_scope", "")),
+            str(record.get("endpoint", "")),
+            str(record.get("signal_timeframe", "")),
+            str(record.get("target_label_ts", "")),
+            str(record.get("realtime_receipt_id", "")),
+        ),
+    )
+
+
 def build_factor_equivalence_record(**kwargs: object) -> dict[str, object]:
     """Convenience wrapper for a one-symbol comparison."""
     records = build_factor_equivalence_records([kwargs])
@@ -649,7 +820,9 @@ def build_factor_equivalence_record(**kwargs: object) -> dict[str, object]:
 __all__ = [
     "FACTOR_EQUIVALENCE_CONTRACT_VERSION",
     "FACTOR_EQUIVALENCE_STATUSES",
+    "SOURCE_IDENTITY_CONTRACT_VERSION",
     "apply_factor_registry_transform",
+    "aggregate_factor_equivalence_records",
     "build_factor_equivalence_record",
     "build_factor_equivalence_records",
     "build_source_equivalence_identity",

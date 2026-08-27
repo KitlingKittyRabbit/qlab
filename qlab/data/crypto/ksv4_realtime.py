@@ -448,6 +448,51 @@ def net_position_observation_at(
     return latest_net_position_observation(matches)
 
 
+def net_position_history_frame(payload: object) -> pd.DataFrame:
+    """Return every exact native net-position observation in a response.
+
+    This is a raw realtime adapter. It never fills a missing row from a
+    historical cache and never selects a nearest timestamp.
+    """
+    rows = _rows(payload)
+    output: list[tuple[pd.Timestamp, float]] = []
+    for row in rows:
+        raw_ts = next(
+            (
+                row.get(key)
+                for key in ("time", "timestamp", "t")
+                if row.get(key) is not None
+            ),
+            None,
+        )
+        if raw_ts is None:
+            raise ValueError("net-position row lacks a native timestamp")
+        value = next(
+            (
+                row.get(key)
+                for key in (
+                    "net_position_change_cum",
+                    "netPositionChangeCum",
+                    "net_position_cum",
+                )
+                if row.get(key) is not None
+            ),
+            None,
+        )
+        if value is None:
+            raise ValueError("net-position row lacks cumulative net-position field")
+        output.append((_market_timestamp(raw_ts), float(value)))
+    if not output:
+        raise ValueError("net-position payload is empty")
+    frame = pd.DataFrame(
+        {"net_position_change_cum": [value for _, value in output]},
+        index=pd.DatetimeIndex([timestamp for timestamp, _ in output], name="ts"),
+    ).sort_index()
+    if frame.index.duplicated().any():
+        raise ValueError("net-position payload contains duplicate native labels")
+    return frame
+
+
 def latest_net_position_value(payload: object) -> float:
     return latest_net_position_observation(payload)[0]
 
@@ -481,6 +526,26 @@ def ratio_observation_at(
             f"expected one ratio row at {target.isoformat()}, got {len(matching)}"
         )
     return latest_ratio_observation(matching)
+
+
+def ratio_history_frame(payload: object) -> pd.DataFrame:
+    """Return every exact native top-position ratio observation in a response."""
+    rows = _rows(payload)
+    output: list[tuple[pd.Timestamp, float]] = []
+    for row in rows:
+        raw_ts = row.get("timestamp")
+        if raw_ts is None or row.get("longShortRatio") is None:
+            raise ValueError("ratio row lacks timestamp or longShortRatio")
+        output.append((_market_timestamp(raw_ts), float(row["longShortRatio"])))
+    if not output:
+        raise ValueError("ratio payload is empty")
+    frame = pd.DataFrame(
+        {"top_pos_ls_ratio": [value for _, value in output]},
+        index=pd.DatetimeIndex([timestamp for timestamp, _ in output], name="ts"),
+    ).sort_index()
+    if frame.index.duplicated().any():
+        raise ValueError("ratio payload contains duplicate native labels")
+    return frame
 
 
 def latest_ratio_value(payload: object) -> float:
@@ -915,9 +980,17 @@ def build_realtime_cache_payloads(
     registry_frame: pd.DataFrame,
     decision_ts: str | pd.Timestamp,
     values_by_symbol: Mapping[str, Mapping[str, Mapping[str, float]]],
-    historical_payloads: Mapping[str, Mapping[str, pd.DataFrame]],
+    previous_realtime_payloads: Mapping[str, Mapping[str, pd.DataFrame]] | None = None,
+    allow_missing_previous: bool = False,
 ) -> dict[str, dict[str, pd.DataFrame]]:
-    """Overlay one observed decision row on prior cache rows for delta transforms."""
+    """Build realtime frames without using historical data as a prior.
+
+    A delta factor may use only the immediately preceding native observation
+    from the same realtime source. ``previous_realtime_payloads`` is an
+    explicit collection of those source observations. A historical cache is
+    intentionally not accepted here: using it would make a realtime delta
+    look complete while silently changing its source identity.
+    """
     decision = pd.Timestamp(decision_ts)
     decision = decision.tz_localize("UTC") if decision.tz is None else decision.tz_convert("UTC")
     result: dict[str, dict[str, pd.DataFrame]] = {}
@@ -939,17 +1012,43 @@ def build_realtime_cache_payloads(
                 value_key = scoped_endpoint if scoped_endpoint in symbol_values else endpoint
                 if symbol_upper not in values_by_symbol or value_key not in symbol_values:
                     raise ValueError(f"missing realtime raw values: {symbol_upper}/{endpoint}")
-                prior = historical_payloads.get(str(scope), {}).get(cache_key)
-                if prior is None or prior.empty:
-                    raise ValueError(f"missing historical seed frame: {scope}/{cache_key}")
-                seeded = prior.loc[
-                    pd.to_datetime(prior.index, utc=True) < label
-                ].sort_index().tail(2).copy()
-                if seeded.empty:
-                    raise ValueError(
-                        f"historical seed has no row before realtime label: "
-                        f"{scope}/{cache_key}/{label.isoformat()}"
+                endpoint_rows = rows.loc[rows["endpoint"].astype(str).eq(endpoint)]
+                delta_required = bool(
+                    "panel_transform" in endpoint_rows.columns
+                    and endpoint_rows["panel_transform"]
+                    .astype(str)
+                    .eq("delta1_raw_column")
+                    .any()
+                )
+                seeded = pd.DataFrame()
+                if delta_required:
+                    prior = (
+                        (previous_realtime_payloads or {})
+                        .get(str(scope), {})
+                        .get(cache_key)
                     )
+                    if prior is not None and not prior.empty:
+                        normalized_prior = prior.copy()
+                        normalized_prior.index = pd.to_datetime(
+                            normalized_prior.index, utc=True
+                        )
+                        normalized_prior = normalized_prior.sort_index()
+                        expected_previous = label - pd.Timedelta(timeframe)
+                        exact_previous = normalized_prior.loc[
+                            normalized_prior.index == expected_previous
+                        ]
+                        if len(exact_previous) > 1:
+                            raise ValueError(
+                                f"previous realtime frame has duplicate native label: "
+                                f"{scope}/{cache_key}/{expected_previous.isoformat()}"
+                            )
+                        if len(exact_previous) == 1:
+                            seeded = exact_previous.copy()
+                    if seeded.empty and not allow_missing_previous:
+                        raise ValueError(
+                            f"missing exact previous realtime observation: "
+                            f"{scope}/{cache_key}/{(label - pd.Timedelta(timeframe)).isoformat()}"
+                        )
                 current = pd.DataFrame(
                     [dict(symbol_values[value_key])],
                     index=pd.DatetimeIndex([label], name="ts"),
@@ -983,6 +1082,7 @@ __all__ = [
     "depth_covers_band",
     "index_coins_markets",
     "index_funding_exchange_list",
+    "net_position_history_frame",
     "latest_net_position_value",
     "latest_net_position_observation",
     "net_position_observation_at",
@@ -990,6 +1090,7 @@ __all__ = [
     "orderbook_history_imbalance_at",
     "orderbook_history_depth_at",
     "latest_ratio_observation",
+    "ratio_history_frame",
     "ratio_observation_at",
     "latest_ratio_value",
     "latest_completed_native_identity",
