@@ -15,14 +15,10 @@ import json
 import math
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
-from .keystore_coinglass_panel import (
-    FactorTransformError,
-    InvalidNumericValueError,
-    RequiredColumnMissingError,
-    extract_feature_series,
-)
+from .keystore_coinglass_panel import extract_feature_series
 from .panel_statistics import rank_grouped_series, rank_standardize_grouped_series
 
 
@@ -59,6 +55,18 @@ _NATIVE_INTERVAL_BOUND_ENDPOINTS = frozenset(
         "top_pos",
     }
 )
+
+
+class RequiredColumnMissingError(ValueError, KeyError):
+    """A registry-required field is absent at the comparison target."""
+
+
+class InvalidNumericValueError(ValueError):
+    """A registry-required target value is not finite numeric data."""
+
+
+class FactorTransformError(ValueError):
+    """The target observation cannot be transformed under the registry rule."""
 
 
 def _stable_hash(value: object) -> str:
@@ -171,19 +179,91 @@ def apply_factor_registry_transform(
     row = _as_mapping(registry_row, name="registry_row")
     current = _as_mapping(values, name="values")
     transform = str(row.get("panel_transform", "")).strip()
+    required = factor_required_columns(row)
+    missing_current = [column for column in required if column not in current]
+    if missing_current:
+        raise RequiredColumnMissingError(
+            "target observation missing required columns: "
+            + ", ".join(missing_current)
+        )
+
+    def finite_numeric(
+        source: Mapping[str, object], column: str, *, observation: str
+    ) -> float:
+        raw = source[column]
+        if isinstance(raw, (bool, np.bool_)):
+            raise InvalidNumericValueError(
+                f"{observation} {column} is boolean rather than numeric"
+            )
+        try:
+            converted = float(raw)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise InvalidNumericValueError(
+                f"{observation} {column} is not numeric"
+            ) from exc
+        if not math.isfinite(converted):
+            raise InvalidNumericValueError(
+                f"{observation} {column} is not finite"
+            )
+        return converted
+
+    current_numeric = {
+        column: finite_numeric(current, column, observation="target observation")
+        for column in required
+    }
+    previous: dict[str, object] | None = None
     if transform == "delta1_raw_column" and previous_values is None:
         raise KeyError("delta1 factor requires the immediately preceding observation")
-    rows = [current] if previous_values is None else [
-        _as_mapping(previous_values, name="previous_values"), current
-    ]
+    if transform == "delta1_raw_column":
+        previous = _as_mapping(previous_values, name="previous_values")
+        missing_previous = [column for column in required if column not in previous]
+        if missing_previous:
+            raise KeyError(
+                "preceding observation missing required columns: "
+                + ", ".join(missing_previous)
+            )
+        for column in required:
+            finite_numeric(previous, column, observation="preceding observation")
+
+    if transform in {"raw_column", "delta1_raw_column"}:
+        if len(required) < 1:
+            raise FactorTransformError(f"{transform} requires one registry column")
+    elif transform in {"log_ratio", "log1p_ratio", "buy_minus_sell", "buy_sell_imbalance"}:
+        if len(required) < 2:
+            raise FactorTransformError(f"{transform} requires two registry columns")
+    else:
+        raise FactorTransformError("unsupported panel_transform: " + transform)
+
+    if transform == "log_ratio" and any(
+        current_numeric[column] <= 0.0 for column in required[:2]
+    ):
+        raise FactorTransformError("log_ratio requires strictly positive target inputs")
+    if transform == "log1p_ratio" and any(
+        current_numeric[column] < 0.0 for column in required[:2]
+    ):
+        raise FactorTransformError("log1p_ratio requires non-negative target inputs")
+    if transform == "buy_sell_imbalance" and sum(
+        current_numeric[column] for column in required[:2]
+    ) <= 0.0:
+        raise FactorTransformError("buy_sell_imbalance requires positive target total depth")
+
+    rows = [current] if previous is None else [previous, current]
     index = pd.date_range(
         "2000-01-01T00:00:00Z", periods=len(rows), freq="1s", name="ts"
     )
     frame = pd.DataFrame(rows, index=index)
-    series = extract_feature_series(pd.Series(row), frame)
+    try:
+        series = extract_feature_series(pd.Series(row), frame)
+    except RequiredColumnMissingError:
+        raise
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise FactorTransformError("shared panel transform failed") from exc
     if series.empty:
         raise FactorTransformError("factor transform returned no value")
-    return float(series.iloc[-1])
+    result = float(series.iloc[-1])
+    if not math.isfinite(result):
+        raise FactorTransformError("factor transform returned a non-finite value")
+    return result
 
 
 def rank_standardize_cross_section(values: Mapping[str, float]) -> dict[str, float]:
@@ -633,7 +713,8 @@ def _factor_record_for_pair(
         "factor_value_equal": factor_equal,
         "cross_section_equal": rank_equal,
         "final_strategy_input_equal": bool(
-            source_identity_equal
+            error_status is None
+            and source_identity_equal
             and source_identity_contract_valid
             and native_identity_equal
             and required_equal
@@ -696,7 +777,9 @@ def build_factor_equivalence_records(
         symbols = [str(item["symbol"]).upper() for item in group_items]
         if len(symbols) != len(set(symbols)):
             raise ValueError("factor equivalence cross-section contains duplicate symbols")
-        cross_section_complete = expected is None or set(symbols) == set(expected)
+        cross_section_membership_complete = (
+            expected is None or set(symbols) == set(expected)
+        )
         row = _as_mapping(group_items[0]["registry_row"], name="registry_row")
         invariant = ("required_columns", "panel_transform", "cross_section_standardization", "timestamp_kind", "signal_timeframe")
         if any(_as_mapping(item["registry_row"], name="registry_row").get(key) != row.get(key) for item in group_items for key in invariant):
@@ -716,7 +799,7 @@ def build_factor_equivalence_records(
             required_diagnostics[symbol] = _registry_required_diagnostic(required, realtime, historical)
             if not required_diagnostics[symbol]["realtime_required_present"] or not required_diagnostics[symbol]["historical_required_present"]:
                 errors[symbol] = "required_field_missing"
-        if cross_section_complete:
+        if cross_section_membership_complete:
             for item, symbol in zip(group_items, symbols):
                 if symbol in errors:
                     continue
@@ -739,28 +822,44 @@ def build_factor_equivalence_records(
                     errors[symbol] = "missing_prior_observation"
                 except (TypeError, ValueError):
                     errors[symbol] = "transform_failed"
-        if not cross_section_complete:
+        if not cross_section_membership_complete:
             for symbol in symbols:
                 errors.setdefault(symbol, "cross_section_incomplete")
         policy = str(row.get("cross_section_standardization", "none"))
+        transformed_cross_section_complete = bool(
+            cross_section_membership_complete
+            and not errors
+            and set(realtime_factors) == set(symbols)
+            and set(historical_factors) == set(symbols)
+        )
+        if (
+            not transformed_cross_section_complete
+            and (policy == "rank_to_minus1_1" or expected is not None)
+        ):
+            # Keep each bad symbol's precise transform/root-cause status.  A
+            # healthy peer cannot be ranked on a reduced universe, so it is
+            # explicitly indeterminate rather than a strategy mismatch.
+            for symbol in symbols:
+                errors.setdefault(symbol, "cross_section_incomplete")
         if policy == "none":
-            realtime_standardized = dict(realtime_factors) if not errors else {}
-            historical_standardized = dict(historical_factors) if not errors else {}
+            realtime_standardized = dict(realtime_factors)
+            historical_standardized = dict(historical_factors)
         elif policy == "rank_to_minus1_1":
             realtime_standardized = (
-                rank_standardize_cross_section(realtime_factors) if not errors else {}
+                rank_standardize_cross_section(realtime_factors)
+                if transformed_cross_section_complete
+                else {}
             )
             historical_standardized = (
-                rank_standardize_cross_section(historical_factors) if not errors else {}
+                rank_standardize_cross_section(historical_factors)
+                if transformed_cross_section_complete
+                else {}
             )
         else:
             raise ValueError("unsupported cross_section_standardization: " + policy)
-        if not cross_section_complete:
-            realtime_standardized = {}
-            historical_standardized = {}
         raw_rank_realtime: dict[str, float] = {}
         raw_rank_historical: dict[str, float] = {}
-        if realtime_factors:
+        if transformed_cross_section_complete:
             realtime_raw_rank_series = rank_grouped_series(
                 pd.Series(
                     list(realtime_factors.values()),
@@ -774,7 +873,7 @@ def build_factor_equivalence_records(
                 str(symbol): float(value)
                 for (_, symbol), value in realtime_raw_rank_series.items()
             }
-        if historical_factors:
+        if transformed_cross_section_complete:
             historical_raw_rank_series = rank_grouped_series(
                 pd.Series(
                     list(historical_factors.values()),
@@ -831,7 +930,10 @@ def build_factor_equivalence_records(
             )
             record["panel_transform"] = str(row["panel_transform"])
             record["cross_section_standardization"] = policy
-            record["cross_section_complete"] = cross_section_complete
+            record["cross_section_membership_complete"] = (
+                cross_section_membership_complete
+            )
+            record["cross_section_complete"] = transformed_cross_section_complete
             record["expected_symbols"] = None if expected is None else list(expected)
             record["observed_symbols"] = sorted(symbols)
             record["expected_native_bar_end_ts"] = expected_native.isoformat()

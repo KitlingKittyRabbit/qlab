@@ -1077,3 +1077,162 @@ def test_missing_invalid_and_transform_errors_remain_distinct() -> None:
         )
     ])[0]
     assert failed["status"] == "transform_failed"
+
+
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), True])
+def test_target_numeric_validation_is_strict_without_changing_public_panel(
+    bad_value: object,
+) -> None:
+    row = {
+        "feature_name": "strict_target__1h",
+        "endpoint": "fr",
+        "signal_timeframe": "1h",
+        "required_columns": "fr_close",
+        "panel_transform": "raw_column",
+        "cross_section_standardization": "none",
+        "timestamp_kind": "bar_start",
+    }
+
+    record = build_factor_equivalence_records([
+        _item(
+            symbol="BTC",
+            registry_row=row,
+            realtime={"fr_close": bad_value},
+            historical={"fr_close": 0.1},
+        )
+    ])[0]
+
+    assert record["status"] == "invalid_numeric_value"
+    assert record["final_strategy_input_equal"] is False
+
+
+@pytest.mark.parametrize(
+    ("row", "btc_values", "eth_values", "bad_status"),
+    [
+        (
+            {
+                "feature_name": "top_pos_invalid__1h",
+                "endpoint": "top_pos",
+                "signal_timeframe": "1h",
+                "required_columns": "top_pos_ls_ratio",
+                "panel_transform": "raw_column",
+                "cross_section_standardization": "rank_to_minus1_1",
+                "timestamp_kind": "bar_end",
+            },
+            {
+                "realtime": {"top_pos_ls_ratio": 1.0},
+                "historical": {"top_pos_ls_ratio": 1.0},
+            },
+            {
+                "realtime": {"top_pos_ls_ratio": float("nan")},
+                "historical": {"top_pos_ls_ratio": 2.0},
+            },
+            "invalid_numeric_value",
+        ),
+        (
+            {
+                "feature_name": "top_pos_missing__1h",
+                "endpoint": "top_pos",
+                "signal_timeframe": "1h",
+                "required_columns": "top_pos_ls_ratio",
+                "panel_transform": "raw_column",
+                "cross_section_standardization": "rank_to_minus1_1",
+                "timestamp_kind": "bar_end",
+            },
+            {
+                "realtime": {"top_pos_ls_ratio": 1.0},
+                "historical": {"top_pos_ls_ratio": 1.0},
+            },
+            {
+                "realtime": {},
+                "historical": {"top_pos_ls_ratio": 2.0},
+            },
+            "required_field_missing",
+        ),
+        (
+            {
+                "feature_name": "net_delta_missing_prior__1h",
+                "endpoint": "futures_net_pos_v2",
+                "signal_timeframe": "1h",
+                "required_columns": "net_position_change_cum",
+                "panel_transform": "delta1_raw_column",
+                "cross_section_standardization": "rank_to_minus1_1",
+                "timestamp_kind": "bar_start",
+            },
+            {
+                "realtime": {"net_position_change_cum": 2.0},
+                "historical": {"net_position_change_cum": 2.0},
+                "realtime_previous": {"net_position_change_cum": 1.0},
+                "historical_previous": {"net_position_change_cum": 1.0},
+            },
+            {
+                "realtime": {"net_position_change_cum": 3.0},
+                "historical": {"net_position_change_cum": 3.0},
+            },
+            "missing_prior_observation",
+        ),
+        (
+            {
+                "feature_name": "ob_transform_failed__1h",
+                "endpoint": "ob_agg",
+                "signal_timeframe": "1h",
+                "required_columns": "bids_usd,asks_usd",
+                "panel_transform": "buy_sell_imbalance",
+                "cross_section_standardization": "rank_to_minus1_1",
+                "timestamp_kind": "bar_end",
+            },
+            {
+                "realtime": {"bids_usd": 3.0, "asks_usd": 1.0},
+                "historical": {"bids_usd": 3.0, "asks_usd": 1.0},
+            },
+            {
+                "realtime": {"bids_usd": 0.0, "asks_usd": 0.0},
+                "historical": {"bids_usd": 1.0, "asks_usd": 1.0},
+            },
+            "transform_failed",
+        ),
+    ],
+    ids=["invalid-numeric", "required-missing", "prior-missing", "transform-failed"],
+)
+def test_bad_symbol_does_not_turn_healthy_peer_into_strategy_mismatch(
+    row: dict[str, object],
+    btc_values: dict[str, dict[str, object]],
+    eth_values: dict[str, dict[str, object]],
+    bad_status: str,
+) -> None:
+    items = []
+    for symbol, values in (("BTC", btc_values), ("ETH", eth_values)):
+        items.append(
+            _item(
+                symbol=symbol,
+                registry_row=row,
+                realtime=values["realtime"],
+                historical=values["historical"],
+                realtime_previous=values.get("realtime_previous"),
+                historical_previous=values.get("historical_previous"),
+            )
+        )
+
+    records = build_factor_equivalence_records(
+        items,
+        expected_symbols=("BTC", "ETH"),
+    )
+    by_symbol = {record["symbol"]: record for record in records}
+
+    assert by_symbol["ETH"]["status"] == bad_status
+    assert by_symbol["BTC"]["status"] == "cross_section_incomplete"
+    assert all(record["cross_section_membership_complete"] for record in records)
+    assert all(not record["cross_section_complete"] for record in records)
+    assert all(record["realtime_standardized_value"] is None for record in records)
+    assert all(record["historical_standardized_value"] is None for record in records)
+    assert all(record["realtime_raw_rank"] is None for record in records)
+    assert all(record["historical_raw_rank"] is None for record in records)
+    assert all(not record["final_strategy_input_equal"] for record in records)
+
+    for record in records:
+        record["realtime_receipt_id"] = "same-cross-section-event"
+    aggregate = aggregate_factor_equivalence_records(records)
+    assert len(aggregate) == 1
+    assert aggregate[0]["status"] == bad_status
+    assert aggregate[0]["final_strategy_input_equal"] is False
+    assert aggregate[0]["factor_equivalence_count"] == 2
