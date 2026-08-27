@@ -26,8 +26,8 @@ REALTIME_EQUIVALENCE_CONTRACT = {
     "fr": ("funding-rate/exchange-list", "funding_close", "raw", "rate"),
     "fr_oi_weight": ("coins-markets", "funding_oi_weight_close", "raw", "rate"),
     "fr_vol_weight": ("coins-markets", "funding_vol_weight_close", "raw", "rate"),
-    "oi": ("coins-markets", "oi_close", "delta1", "usd"),
-    "futures_net_pos_v2": ("futures/v2/net-position/history", "net_pos_delta1", "delta1", "usd"),
+    "oi": ("coins-markets", "oi_close", "delta1_native_interval", "usd; explicit exchange scope"),
+    "futures_net_pos_v2": ("futures/v2/net-position/history", "net_pos_delta1", "delta1_native_interval", "usd"),
     "top_pos": ("binance_top_position_ratio", "top_pos_ls_ratio", "raw_or_delta1", "ratio"),
     "ob_pair": ("frozen_mixed_orderbook", "ob_pair_imbalance", "raw", "unitless_imbalance"),
     "ob_agg": ("frozen_mixed_orderbook", "ob_agg_imbalance", "raw", "unitless_imbalance"),
@@ -49,38 +49,33 @@ REALTIME_SOURCE_DEFINITIONS = {
         "native_window": "current CoinGlass volume-weighted funding observation",
     },
     "oi": {
-        "mapping_id": "oi:coins_markets_open_interest_usd:delta1",
+        "mapping_id": "oi:coins_markets_open_interest_usd:delta1_native_interval",
         "direction": "current minus previous native observation", "unit": "USD",
-        "native_window": "current OI plus persisted prior boundary",
+        "native_window": "current and previous observations in the explicit frozen exchange and contract scope",
+        "scope_contract": "exchange set, USD-margined perpetual coverage, and native label must match history",
     },
     "futures_net_pos_v2": {
         "mapping_id": "futures_net_pos_v2:net_position_change_cum:delta1",
         "direction": "current minus previous native observation", "unit": "USD",
-        "native_window": "requested native interval plus prior row",
+        "native_window": "requested native interval plus prior row; 1h and 1d are separate identities",
     },
     "top_pos": {
         "mapping_id": "top_pos:binance_top_position_long_short_ratio:raw_or_delta1",
         "direction": "long divided by short; delta is current minus previous", "unit": "ratio",
         "native_window": "Binance period 1h or 12h",
+        "timestamp_mapping": "Binance bar_start maps to strategy bar_end; historical KeyStore bar_end maps to the same strategy bar_end",
     },
     "ob_pair": {
         "mapping_id": "ob_pair:frozen_source_depth_pm1pct:imbalance",
         "direction": "(bid_usd-ask_usd)/(bid_usd+ask_usd)",
         "unit": "unitless imbalance from USD depth",
-        "native_window": (
-            "KeyStore fixed +/-1% history for BTC/ETH; as-received Binance "
-            "USD-M snapshot spanning +/-1% for the other symbols"
-        ),
+        "native_window": "versioned source identity: venue, USD-M contract, +/-1% band, price*quantity*multiplier, native granularity, and snapshot time",
     },
     "ob_agg": {
         "mapping_id": "ob_agg:frozen_source_depth_pm1pct:imbalance",
         "direction": "sum venue bid/ask USD depth, then (bid-ask)/(bid+ask)",
         "unit": "unitless imbalance from USD depth",
-        "native_window": (
-            "KeyStore fixed +/-1% aggregate history for BTC/ETH; as-received snapshots "
-            "spanning +/-1% from all frozen available venues for the other symbols; FET "
-            "uses Binance only because OKX/FET is unavailable and Bybit/FET is closed"
-        ),
+        "native_window": "versioned venue set, USD-M contract, +/-1% band, price*quantity*multiplier, native granularity, and snapshot time",
     },
 }
 
@@ -146,8 +141,21 @@ def build_realtime_source_plan(
     if "fr" in endpoints:
         add("keystore", "funding-rate/exchange-list", serialized=True)
     if "futures_net_pos_v2" in endpoints:
-        for symbol in clean_symbols:
-            add("keystore", "futures/v2/net-position/history", symbol, serialized=True)
+        net_timeframes = sorted(
+            dependencies.loc[
+                dependencies["endpoint"].astype(str).eq("futures_net_pos_v2"),
+                "signal_timeframe",
+            ].astype(str).unique(),
+            key=lambda value: (value == "1d", value),
+        )
+        for timeframe in net_timeframes:
+            for symbol in clean_symbols:
+                # The interval is part of the native identity.  A 1h
+                # response may never be projected into the 1d identity.
+                add(
+                    "keystore", "futures/v2/net-position/history", symbol,
+                    timeframe, serialized=True,
+                )
     if "top_pos" in endpoints:
         periods = sorted(
             dependencies.loc[dependencies["endpoint"].eq("top_pos"), "signal_timeframe"].astype(str).unique()

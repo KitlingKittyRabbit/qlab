@@ -40,6 +40,7 @@ from qlab.true_oos import (
     classify_decision_readiness,
     classify_source_reference_action,
     classify_source_consistency_reference_action,
+    derive_source_consistency_status,
     consistency_evidence_sha256,
     book_quotes_from_binance,
     fit_epoch_candidate_parameters,
@@ -814,23 +815,23 @@ def test_source_values_require_exact_label_and_do_not_use_nearest_row() -> None:
 
 def test_source_consistency_capture_contract_and_queue_are_candidate_independent() -> None:
     sources = (
-        ["keystore"] * 26
+        ["keystore"] * 46
         + ["binance_public"] * 58
         + ["bybit_public"] * 17
         + ["okx_public"] * 17
     )
     contract = pd.DataFrame(
         {
-            "request_id": [f"request-{index:03d}" for index in range(118)],
+            "request_id": [f"request-{index:03d}" for index in range(138)],
             "source": sources,
-            "source_contract_version": ["ksv4_shadow_sources_v4"] * 118,
+            "source_contract_version": ["ksv4_shadow_sources_v5"] * 138,
         }
     )
     raw = pd.DataFrame(
         {
             "request_id": contract["request_id"],
-            "receipt_id": [f"raw-{index:03d}" for index in range(118)],
-            "payload_sha256": [f"sha-{index:03d}" for index in range(118)],
+            "receipt_id": [f"raw-{index:03d}" for index in range(138)],
+            "payload_sha256": [f"sha-{index:03d}" for index in range(138)],
         }
     )
     normalized = pd.DataFrame(
@@ -848,12 +849,12 @@ def test_source_consistency_capture_contract_and_queue_are_candidate_independent
         ]
     )
     result = validate_source_consistency_capture_contract(contract, raw, normalized)
-    assert result["request_count"] == 118
+    assert result["request_count"] == 138
     assert result["normalized_count"] == 360
     assert result["source_counts"] == {
         "binance_public": 58,
         "bybit_public": 17,
-        "keystore": 26,
+        "keystore": 46,
         "okx_public": 17,
     }
 
@@ -1039,6 +1040,67 @@ def test_source_consistency_timeout_is_terminal() -> None:
         observed_ts="2026-08-05T01:00:00Z",
         failed_attempts=[timeout],
     ) == "expired"
+
+
+def test_source_consistency_status_derives_from_append_only_evidence() -> None:
+    queue = build_source_consistency_queue_records(
+        pd.DataFrame(
+            [{
+                "source_scope": "ksv4_1h",
+                "signal_timeframe": "1h",
+                "endpoint": "fr",
+                "symbol": "BTC",
+                "receipt_id": "receipt-status",
+                "target_label_ts": "2026-08-01T23:00:00Z",
+            }]
+        ),
+        collector_id="collector-status",
+        capture_ts="2026-08-02T00:00:00Z",
+        initial_query_delay_seconds=900,
+        retry_interval_seconds=3600,
+        revision_query_delay_seconds=86400,
+        maximum_wait_seconds=259200,
+    )[0]
+    base = {
+        "collector_id": "collector-status",
+        "realtime_receipt_id": "receipt-status",
+    }
+    assert derive_source_consistency_status(
+        queue, [], observed_ts="2026-08-02T00:14:59Z"
+    ) == "等待首次参照时间"
+    assert derive_source_consistency_status(
+        queue, [], observed_ts="2026-08-02T00:15:00Z"
+    ) == "首次参照待执行"
+    initial = {**base, "reference_role": "initial"}
+    assert derive_source_consistency_status(
+        queue, [initial], observed_ts="2026-08-02T01:00:00Z"
+    ) == "首次参照已完成，等待修订到期"
+    partial = {**initial, "status": "cross_section_incomplete"}
+    assert derive_source_consistency_status(
+        queue, [partial], observed_ts="2026-08-02T01:00:00Z"
+    ) == "横截面不完整，等待重试"
+    revision = {**base, "reference_role": "revision"}
+    assert derive_source_consistency_status(
+        queue, [initial, revision], observed_ts="2026-08-03T00:00:00Z"
+    ) == "全部参照已完成"
+    failure = {
+        **base,
+        "reference_role": "initial",
+        "attempt_ts": "2026-08-02T00:15:00Z",
+    }
+    assert derive_source_consistency_status(
+        queue,
+        [],
+        observed_ts="2026-08-02T00:15:01Z",
+        failed_attempts=[failure],
+    ) == "失败后等待重试"
+    timeout = {**base, "reference_role": "timeout", "attempt_ts": "2026-08-05T00:00:00Z"}
+    assert derive_source_consistency_status(
+        queue,
+        [],
+        observed_ts="2026-08-05T00:00:01Z",
+        failed_attempts=[timeout],
+    ) == "超时，需停止受影响范围"
 
 
 def test_source_reference_action_follows_the_frozen_schedule() -> None:

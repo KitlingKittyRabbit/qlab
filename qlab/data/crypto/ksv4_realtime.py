@@ -21,18 +21,19 @@ from qlab.data.crypto.binance_um_market import BinanceUmProductionMarketClient
 from qlab.data.crypto.keystore_coinglass_client import KeystoreCoinglassClient
 
 
-SHADOW_SOURCE_CONTRACT_VERSION = "ksv4_shadow_sources_v4"
+SHADOW_SOURCE_CONTRACT_VERSION = "ksv4_shadow_sources_v5"
 SHADOW_SOURCE_DEADLINE_SECONDS = 210
 SHADOW_PUBLIC_WORKERS = 16
 SHADOW_PUBLIC_RETRIES = 3
 SHADOW_REQUEST_TIMEOUT_SECONDS = 20.0
 SHADOW_ORDERBOOK_HISTORY_LIMIT = 10
 SHADOW_EXPECTED_SOURCE_COUNTS = {
-    "keystore": 26,
+    "keystore": 46,
     "binance_public": 58,
     "bybit_public": 17,
     "okx_public": 17,
 }
+SHADOW_SOURCE_REQUEST_COUNT = sum(SHADOW_EXPECTED_SOURCE_COUNTS.values())
 KEYSTORE_REALTIME_PATHS = {
     "coins_markets": "/api/futures/coins-markets",
     "funding_exchange_list": "/api/futures/funding-rate/exchange-list",
@@ -141,7 +142,7 @@ class ShadowSourceResponse:
 
 
 def build_shadow_source_contract(source_plan: pd.DataFrame) -> pd.DataFrame:
-    """Turn the repaired 118-row logical plan into exact HTTP requests."""
+    """Turn the repaired logical plan into exact HTTP requests."""
     required = {
         "request_id", "request_order", "source", "route", "symbol",
         "signal_timeframe", "serialized",
@@ -152,7 +153,7 @@ def build_shadow_source_contract(source_plan: pd.DataFrame) -> pd.DataFrame:
     if source_plan["request_id"].astype(str).duplicated().any():
         raise ValueError("source plan request_id must be unique")
     counts = source_plan.groupby("source").size().astype(int).to_dict()
-    if counts != SHADOW_EXPECTED_SOURCE_COUNTS or len(source_plan) != 118:
+    if counts != SHADOW_EXPECTED_SOURCE_COUNTS or len(source_plan) != SHADOW_SOURCE_REQUEST_COUNT:
         raise ValueError(
             f"shadow source counts mismatch: expected={SHADOW_EXPECTED_SOURCE_COUNTS}, "
             f"actual={counts}"
@@ -173,7 +174,7 @@ def build_shadow_source_contract(source_plan: pd.DataFrame) -> pd.DataFrame:
             if route == "futures/v2/net-position/history":
                 return KEYSTORE_REALTIME_PATHS["net_position_v2"], {
                     "exchange": "Binance", "symbol": f"{symbol}USDT",
-                    "interval": "1h", "limit": 2,
+                    "interval": timeframe, "limit": 2,
                 }
             if route == "orderbook/ask-bids-history":
                 return "/api/futures/orderbook/ask-bids-history", {
@@ -240,8 +241,8 @@ def collect_shadow_source_responses(
     if missing:
         raise ValueError("shadow source contract missing columns: " + ", ".join(missing))
     counts = contract.groupby("source").size().astype(int).to_dict()
-    if counts != SHADOW_EXPECTED_SOURCE_COUNTS or len(contract) != 118:
-        raise ValueError("shadow source contract no longer contains the frozen 118 requests")
+    if counts != SHADOW_EXPECTED_SOURCE_COUNTS or len(contract) != SHADOW_SOURCE_REQUEST_COUNT:
+        raise ValueError("shadow source contract no longer contains the reviewed request set")
     if not contract["source_contract_version"].eq(SHADOW_SOURCE_CONTRACT_VERSION).all():
         raise ValueError("shadow source contract version mismatch")
     deadline = pd.Timestamp(deadline_ts)
@@ -323,8 +324,8 @@ def collect_shadow_source_responses(
             return output
         public_future = routes.submit(collect_public)
         responses = [*keystore_future.result(), *public_future.result()]
-    if len(responses) != 118 or len({row.request_id for row in responses}) != 118:
-        raise RuntimeError("shadow source collection did not return all 118 responses")
+    if len(responses) != SHADOW_SOURCE_REQUEST_COUNT or len({row.request_id for row in responses}) != SHADOW_SOURCE_REQUEST_COUNT:
+        raise RuntimeError("shadow source collection did not return all reviewed responses")
     return sorted(responses, key=lambda row: row.request_order)
 
 
@@ -554,6 +555,42 @@ def orderbook_history_imbalance_at(
     )
 
 
+def orderbook_history_depth_at(
+    payload: object,
+    *,
+    target_label_ts: str | pd.Timestamp,
+    bid_key: str,
+    ask_key: str,
+) -> tuple[float, float, pd.Timestamp]:
+    """Return the exact historical USD depth row without inventing values."""
+    target = pd.Timestamp(target_label_ts)
+    target = target.tz_localize("UTC") if target.tz is None else target.tz_convert("UTC")
+    matching = []
+    for row in _rows(payload):
+        raw_ts = next(
+            (
+                row.get(key)
+                for key in ("time", "timestamp", "t")
+                if row.get(key) is not None
+            ),
+            None,
+        )
+        if raw_ts is not None and _market_timestamp(raw_ts) == target:
+            matching.append(row)
+    if len(matching) != 1:
+        raise ValueError(
+            f"expected one orderbook row at {target.isoformat()}, got {len(matching)}"
+        )
+    row = matching[0]
+    if row.get(bid_key) is None or row.get(ask_key) is None:
+        raise ValueError("orderbook history target row lacks both USD depth fields")
+    bid = float(row[bid_key])
+    ask = float(row[ask_key])
+    if bid <= 0.0 or ask <= 0.0:
+        raise ValueError("orderbook history target row must contain positive USD depth")
+    return bid, ask, target
+
+
 def usd_depth_within_band(
     bids: Sequence[Sequence[object]],
     asks: Sequence[Sequence[object]],
@@ -722,7 +759,7 @@ def repaired_realtime_raw_values(
     *,
     coins_row: Mapping[str, object],
     funding_rate: float,
-    net_position_value: float,
+    net_position_values: Mapping[str, float],
     top_position_ratio_1h: float,
     top_position_ratio_12h: float,
     pair_depth: tuple[float, float],
@@ -735,20 +772,26 @@ def repaired_realtime_raw_values(
     missing = [key for key in required if coins_row.get(key) is None]
     if missing:
         raise ValueError("coins-markets row missing: " + ", ".join(missing))
+    net_position_values = {
+        str(timeframe): float(value)
+        for timeframe, value in net_position_values.items()
+    }
+    if set(net_position_values) != {"1h", "1d"}:
+        raise ValueError("repaired source requires native 1h and 1d net positions")
     common = {
         "fr": {"fr_close": float(funding_rate)},
         "fr_oi_weight": {"close": float(coins_row["avg_funding_rate_by_oi"])},
         "fr_vol_weight": {"close": float(coins_row["avg_funding_rate_by_vol"])},
         "oi": {"oi_close": float(coins_row["open_interest_usd"])},
-        "futures_net_pos_v2": {
-            "net_position_change_cum": float(net_position_value)
-        },
         "ob_pair": {"bids_usd": float(pair_depth[0]), "asks_usd": float(pair_depth[1])},
         "ob_agg": {
             "aggregated_bids_usd": float(aggregate_depth[0]),
             "aggregated_asks_usd": float(aggregate_depth[1]),
         },
     }
+    for timeframe, value in net_position_values.items():
+        key = f"ksv4_{timeframe}:futures_net_pos_v2"
+        common[key] = {"net_position_change_cum": value}
     common["ksv4_1h:top_pos"] = {"top_pos_ls_ratio": float(top_position_ratio_1h)}
     common["ksv4_12h:top_pos"] = {"top_pos_ls_ratio": float(top_position_ratio_12h)}
     return common
@@ -825,7 +868,8 @@ def shadow_response_native_identity(
     route = str(response.route)
     if route == "futures/v2/net-position/history":
         label, native_end = latest_completed_native_identity(
-            signal_timeframe="1h", timestamp_kind="bar_start", as_of_ts=decision
+            signal_timeframe=str(response.signal_timeframe),
+            timestamp_kind="bar_start", as_of_ts=decision
         )
         _, observed = net_position_observation_at(payload, label)
         if observed != label:
@@ -925,6 +969,7 @@ __all__ = [
     "SHADOW_PUBLIC_WORKERS",
     "SHADOW_REQUEST_TIMEOUT_SECONDS",
     "SHADOW_SOURCE_CONTRACT_VERSION",
+    "SHADOW_SOURCE_REQUEST_COUNT",
     "SHADOW_SOURCE_DEADLINE_SECONDS",
     "ShadowSourceResponse",
     "aggregate_depth_usd",
@@ -943,6 +988,7 @@ __all__ = [
     "net_position_observation_at",
     "latest_orderbook_history_imbalance",
     "orderbook_history_imbalance_at",
+    "orderbook_history_depth_at",
     "latest_ratio_observation",
     "ratio_observation_at",
     "latest_ratio_value",

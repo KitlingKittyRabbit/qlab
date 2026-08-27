@@ -24,6 +24,7 @@ from qlab.data.crypto.ksv4_realtime import (
     net_position_observation_at,
     latest_orderbook_history_imbalance,
     orderbook_history_imbalance_at,
+    orderbook_history_depth_at,
     ratio_observation_at,
     realtime_projection_identity,
     latest_ratio_observation,
@@ -37,10 +38,10 @@ from qlab.data.crypto.ksv4_realtime import (
 )
 
 
-def test_public_exports_are_defined_and_use_only_shadow_contract_v4() -> None:
+def test_public_exports_are_defined_and_use_only_shadow_contract_v5() -> None:
     assert set(ksv4_realtime.__all__).issubset(vars(ksv4_realtime))
     assert "REALTIME_SOURCE_CONTRACT_VERSION" not in ksv4_realtime.__all__
-    assert ksv4_realtime.SHADOW_SOURCE_CONTRACT_VERSION == "ksv4_shadow_sources_v4"
+    assert ksv4_realtime.SHADOW_SOURCE_CONTRACT_VERSION == "ksv4_shadow_sources_v5"
 
 
 def test_pairs_markets_params_requires_base_asset_not_pair() -> None:
@@ -319,7 +320,7 @@ def test_repaired_overlay_keeps_1h_and_12h_top_position_distinct() -> None:
             "open_interest_usd": 100.0,
         },
         funding_rate=0.3,
-        net_position_value=10.0,
+        net_position_values={"1h": 10.0, "1d": 20.0},
         top_position_ratio_1h=1.1,
         top_position_ratio_12h=1.2,
         pair_depth=(2.0, 1.0),
@@ -339,6 +340,28 @@ def test_repaired_overlay_keeps_1h_and_12h_top_position_distinct() -> None:
     )
     assert built["ksv4_1h"]["ADA_top_pos"].iloc[-1, 0] == 1.1
     assert built["ksv4_12h"]["ADA_top_pos"].iloc[-1, 0] == 1.2
+
+
+def test_repaired_values_require_both_native_net_position_identities() -> None:
+    kwargs = {
+        "coins_row": {
+            "avg_funding_rate_by_oi": 0.1,
+            "avg_funding_rate_by_vol": 0.2,
+            "open_interest_usd": 100.0,
+        },
+        "funding_rate": 0.3,
+        "top_position_ratio_1h": 1.1,
+        "top_position_ratio_12h": 1.2,
+        "pair_depth": (2.0, 1.0),
+        "aggregate_depth": (3.0, 1.5),
+    }
+    with pytest.raises(ValueError, match="native 1h and 1d"):
+        repaired_realtime_raw_values(net_position_values={"1h": 10.0}, **kwargs)
+    values = repaired_realtime_raw_values(
+        net_position_values={"1h": 10.0, "1d": 20.0}, **kwargs
+    )
+    assert values["ksv4_1h:futures_net_pos_v2"]["net_position_change_cum"] == 10.0
+    assert values["ksv4_1d:futures_net_pos_v2"]["net_position_change_cum"] == 20.0
 
 
 def test_exact_native_observation_selectors_reject_adjacent_rows() -> None:
@@ -381,6 +404,49 @@ def test_exact_native_observation_selectors_reject_adjacent_rows() -> None:
     )[0] == pytest.approx(1.0 / 3.0)
     with pytest.raises(ValueError, match="got 0"):
         net_position_observation_at(net_payload, decision)
+
+
+def test_net_response_identity_uses_the_requested_native_interval() -> None:
+    decision = pd.Timestamp("2026-08-06T00:00:00Z")
+    for timeframe, label in (
+        ("1h", decision - pd.Timedelta(hours=1)),
+        ("1d", decision - pd.Timedelta(days=1)),
+    ):
+        response = ksv4_realtime.ShadowSourceResponse(
+            request_id=f"net-{timeframe}", request_order=1,
+            source="keystore", route="futures/v2/net-position/history",
+            symbol="BTC", signal_timeframe=timeframe,
+            request_path="/api/futures/v2/net-position/history",
+            request_params={"interval": timeframe}, raw_payload=b"{}",
+            request_ts=decision.isoformat(), response_ts=decision.isoformat(),
+        )
+        payload = {
+            "code": "0",
+            "data": [{"time": int(label.timestamp() * 1000), "net_position_change_cum": 1.0}],
+        }
+        observed, native_end = shadow_response_native_identity(
+            response, payload, decision_ts=decision
+        )
+        assert observed == label
+        assert native_end == decision
+
+
+def test_orderbook_depth_selector_returns_real_fields_without_pseudo_depth() -> None:
+    target = pd.Timestamp("2026-08-06T00:00:00Z")
+    depth = orderbook_history_depth_at(
+        {
+            "code": "0",
+            "data": [{
+                "time": int(target.timestamp() * 1000),
+                "bids_usd": 125.0,
+                "asks_usd": 75.0,
+            }],
+        },
+        target_label_ts=target,
+        bid_key="bids_usd",
+        ask_key="asks_usd",
+    )
+    assert depth == (125.0, 75.0, target)
 
 
 def test_realtime_projection_identity_distinguishes_start_and_end_labels() -> None:
