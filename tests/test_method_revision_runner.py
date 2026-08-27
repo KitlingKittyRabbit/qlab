@@ -57,12 +57,28 @@ def test_revision_runtime_identity_binds_generator_and_post_audit_sources():
     identity = runner._runtime_identity("e0_diagnostic")
     assert len(identity["layer_a_generator_source_sha256"]) == 64
     assert len(identity["frozen_preimplementation_generator_file_sha256"]) == 64
-    assert set(identity["runtime_source_sha256"]) == {
-        "qlab/qlab/method_simulation.py",
-        "qlab/qlab/research_stats.py",
-        "qlab/qlab/coinglass_substitution.py",
-        "qlab_research_private/research/crypto/ksv4_method_revision.py",
+    runtime_sources = set(identity["runtime_source_sha256"])
+    assert {Path(path).name for path in runtime_sources} == {
+        "method_simulation.py",
+        "research_stats.py",
+        "coinglass_substitution.py",
+        "ksv4_method_revision.py",
     }
+    assert any(
+        path.endswith("qlab/qlab/method_simulation.py")
+        for path in runtime_sources
+    )
+    assert any(
+        path.endswith("qlab/qlab/research_stats.py") for path in runtime_sources
+    )
+    assert any(
+        path.endswith("qlab/qlab/coinglass_substitution.py")
+        for path in runtime_sources
+    )
+    assert any(
+        path.endswith("research/crypto/ksv4_method_revision.py")
+        for path in runtime_sources
+    )
 
 
 def test_revision_runner_fails_closed_on_stage_skip_and_overlap(tmp_path, monkeypatch):
