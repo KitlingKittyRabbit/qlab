@@ -32,6 +32,7 @@ from .data.crypto.factor_equivalence import (
     factor_required_columns,
     previous_native_label,
     rank_standardize_cross_section,
+    source_semantic_contract_from_request,
 )
 from .data.crypto.strategy_time_contract import ContinuousHoldingTimeContract
 
@@ -1097,12 +1098,40 @@ def classify_source_consistency_reference_action(
             result["decision_ts"] = result.pop("capture_ts")
         return result
 
+    # The ledger is append-only.  A prior error record for the same role is
+    # historical evidence once a later completed comparison exists; it must
+    # not make the action classifier see two attempts as two current roles.
+    completed_comparisons = [
+        record
+        for record in comparison_records
+        if _source_reference_role_completed(record)
+    ]
     return classify_source_reference_action(
         legacy(queue_record),
-        [legacy(record) for record in comparison_records],
+        [legacy(record) for record in completed_comparisons],
         observed_ts=observed_ts,
         failed_attempts=[legacy(record) for record in failed_attempts],
     )
+
+
+_SOURCE_REFERENCE_COMPLETED_STATUSES = frozenset(
+    {
+        "exact_match",
+        "value_mismatch_decision_equivalent",
+        "decision_material_mismatch",
+        "scope_not_comparable",
+        # Legacy source-value records used these two labels before the factor
+        # layer was introduced.  They remain completed observations, not
+        # pending work.
+        "value_mismatch",
+        "field_mismatch",
+    }
+)
+
+
+def _source_reference_role_completed(record: Mapping[str, object]) -> bool:
+    status = str(record.get("status", "")).strip()
+    return not status or status in _SOURCE_REFERENCE_COMPLETED_STATUSES
 
 
 def derive_source_consistency_status(
@@ -1118,9 +1147,14 @@ def derive_source_consistency_status(
     record, not the current state.  This function combines queue, comparison,
     failure, and timeout evidence without rewriting that record.
     """
+    completed_comparisons = [
+        record
+        for record in comparison_records
+        if _source_reference_role_completed(record)
+    ]
     action = classify_source_consistency_reference_action(
         queue_record,
-        comparison_records,
+        completed_comparisons,
         observed_ts=observed_ts,
         failed_attempts=failed_attempts,
     )
@@ -1136,25 +1170,38 @@ def derive_source_consistency_status(
             str(record.get("realtime_receipt_id", "")),
         ) == identity
     ]
-    roles = {str(record.get("reference_role", "")) for record in matching}
+    roles = {
+        str(record.get("reference_role", ""))
+        for record in matching
+        if _source_reference_role_completed(record)
+    }
     if action in {"expired", "timeout"}:
         return "超时，需停止受影响范围"
-    if any(
-        str(record.get("status", "")) == "cross_section_incomplete"
+    # A successful comparison for a role supersedes an older incomplete
+    # attempt.  Queue and ledger entries remain append-only; status is about
+    # the role that is still outstanding, not about any historical failure.
+    if "revision" in roles:
+        return "全部参照已完成"
+    if "initial" in roles:
+        return "首次参照已完成，等待修订到期"
+    incomplete_roles = {
+        str(record.get("reference_role", ""))
         for record in matching
-    ):
+        if str(record.get("status", "")) == "cross_section_incomplete"
+    }
+    if incomplete_roles:
         return "横截面不完整，等待重试"
     if any(
         str(record.get("collector_id", "")) == identity[0]
         and str(record.get("realtime_receipt_id", "")) == identity[1]
         for record in failed_attempts
+    ) or any(
+        str(record.get("reference_role", "")) in {"initial", "revision"}
+        and not _source_reference_role_completed(record)
+        for record in matching
     ):
         if action in {"initial", "revision", "not_due"}:
             return "失败后等待重试"
-    if "revision" in roles:
-        return "全部参照已完成"
-    if "initial" in roles:
-        return "首次参照已完成，等待修订到期"
     if action == "initial":
         return "首次参照待执行"
     if action == "revision":
@@ -4028,6 +4075,7 @@ __all__ = [
     "derive_source_consistency_status",
     "build_source_equivalence_consistency_amendments",
     "build_source_equivalence_identity",
+    "source_semantic_contract_from_request",
     "build_source_observation_rows",
     "book_quotes_from_binance",
     "classify_decision_readiness",

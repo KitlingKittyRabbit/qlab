@@ -776,14 +776,14 @@ def realtime_raw_values(
     coins_row: Mapping[str, object],
     funding_rate: float,
     pair_row: Mapping[str, object],
-    net_position_value: float,
+    net_position_values: Mapping[str, float],
     global_ratio: float,
     top_account_ratio: float,
     top_position_ratio: float,
     pair_depth: tuple[float, float],
     aggregate_depth: tuple[float, float],
 ) -> dict[str, dict[str, float]]:
-    """Return endpoint-keyed raw columns expected by the frozen registry."""
+    """Return endpoint-keyed raw columns with native net-position identities."""
     required = (
         "avg_funding_rate_by_oi",
         "avg_funding_rate_by_vol",
@@ -796,7 +796,13 @@ def realtime_raw_values(
         raise ValueError(
             f"coins-markets row for {str(symbol).upper()} missing: {', '.join(missing)}"
         )
-    return {
+    normalized_net_positions = {
+        str(timeframe): float(value)
+        for timeframe, value in net_position_values.items()
+    }
+    if set(normalized_net_positions) != {"1h", "1d"}:
+        raise ValueError("realtime raw values require native 1h and 1d net positions")
+    result = {
         "basis": {"close_basis": close_basis_percent(pair_row)},
         "fr": {"fr_close": float(funding_rate)},
         "fr_oi_weight": {"close": float(coins_row["avg_funding_rate_by_oi"])},
@@ -809,15 +815,17 @@ def realtime_raw_values(
         "global_ls": {"global_ls_ratio": float(global_ratio)},
         "top_acct": {"top_acct_ls_ratio": float(top_account_ratio)},
         "top_pos": {"top_pos_ls_ratio": float(top_position_ratio)},
-        "futures_net_pos_v2": {
-            "net_position_change_cum": float(net_position_value)
-        },
         "ob_pair": {"bids_usd": float(pair_depth[0]), "asks_usd": float(pair_depth[1])},
         "ob_agg": {
             "aggregated_bids_usd": float(aggregate_depth[0]),
             "aggregated_asks_usd": float(aggregate_depth[1]),
         },
     }
+    for timeframe, value in normalized_net_positions.items():
+        result[f"ksv4_{timeframe}:futures_net_pos_v2"] = {
+            "net_position_change_cum": value
+        }
+    return result
 
 
 def repaired_realtime_raw_values(

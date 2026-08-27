@@ -37,6 +37,18 @@ CACHE_FILENAME_BY_SCOPE = {
 MIN_COMMON_PANEL_ROWS = 720
 
 
+class RequiredColumnMissingError(ValueError, KeyError):
+    """A registry-required raw column is absent from a source frame."""
+
+
+class InvalidNumericValueError(ValueError):
+    """A required raw value is not finite numeric data."""
+
+
+class FactorTransformError(ValueError):
+    """A registry transform cannot be evaluated for the supplied frame."""
+
+
 @dataclass(frozen=True)
 class PanelArtifacts:
     panel: pd.DataFrame
@@ -112,41 +124,67 @@ def extract_feature_series(spec_row: pd.Series, frame: pd.DataFrame) -> pd.Serie
     needed = required_columns(spec_row)
     missing = [column for column in needed if column not in normalized.columns]
     if missing:
-        raise ValueError(f"feature {spec_row['feature_name']} missing required columns: {', '.join(missing)}")
+        raise RequiredColumnMissingError(
+            f"feature {spec_row['feature_name']} missing required columns: {', '.join(missing)}"
+        )
 
     transform = str(spec_row["panel_transform"])
     feature_name = str(spec_row["feature_name"])
+
+    def numeric(column: str) -> pd.Series:
+        raw = normalized[column]
+        if raw.map(lambda value: isinstance(value, bool)).any():
+            raise InvalidNumericValueError(
+                f"feature {feature_name} contains boolean values in {column}"
+            )
+        converted = pd.to_numeric(raw, errors="coerce")
+        if converted.isna().any() or not np.isfinite(converted.to_numpy()).all():
+            raise InvalidNumericValueError(
+                f"feature {feature_name} contains non-finite numeric values in {column}"
+            )
+        return converted.astype(float)
+
     if transform == "raw_column":
-        series = normalized[needed[0]].astype(float)
+        series = numeric(needed[0])
     elif transform == "delta1_raw_column":
-        series = normalized[needed[0]].astype(float).diff()
+        series = numeric(needed[0]).diff()
     elif transform == "log_ratio":
-        numerator = normalized[needed[0]].astype(float)
-        denominator = normalized[needed[1]].astype(float)
+        numerator = numeric(needed[0])
+        denominator = numeric(needed[1])
         invalid = (numerator <= 0.0) | (denominator <= 0.0)
         if invalid.any():
-            raise ValueError(f"feature {feature_name} requires strictly positive inputs for log_ratio")
+            raise FactorTransformError(
+                f"feature {feature_name} requires strictly positive inputs for log_ratio"
+            )
         series = np.log(numerator) - np.log(denominator)
     elif transform == "log1p_ratio":
-        numerator = normalized[needed[0]].astype(float)
-        denominator = normalized[needed[1]].astype(float)
+        numerator = numeric(needed[0])
+        denominator = numeric(needed[1])
         invalid = (numerator < 0.0) | (denominator < 0.0)
         if invalid.any():
-            raise ValueError(f"feature {feature_name} requires non-negative inputs for log1p_ratio")
+            raise FactorTransformError(
+                f"feature {feature_name} requires non-negative inputs for log1p_ratio"
+            )
         series = np.log1p(numerator) - np.log1p(denominator)
     elif transform == "buy_minus_sell":
-        series = normalized[needed[0]].astype(float) - normalized[needed[1]].astype(float)
+        series = numeric(needed[0]) - numeric(needed[1])
     elif transform == "buy_sell_imbalance":
-        buy = normalized[needed[0]].astype(float)
-        sell = normalized[needed[1]].astype(float)
-        denominator = (buy + sell).replace(0.0, pd.NA)
+        buy = numeric(needed[0])
+        sell = numeric(needed[1])
+        denominator = buy + sell
+        if (denominator <= 0.0).any():
+            raise FactorTransformError(
+                f"feature {feature_name} requires positive total depth"
+            )
         series = (buy - sell) / denominator
     else:
-        raise ValueError(f"unsupported ksv4 panel_transform for {feature_name}: {transform}")
+        raise FactorTransformError(
+            f"unsupported ksv4 panel_transform for {feature_name}: {transform}"
+        )
 
     series = series.rename(feature_name).dropna()
     if series.empty:
-        raise ValueError(f"feature {feature_name} is empty after transform")
+        raise FactorTransformError(f"feature {feature_name} is empty after transform")
     return series
 
 
@@ -447,6 +485,9 @@ __all__ = [
     "build_panel_from_payloads",
     "build_symbol_frame_on_grid",
     "extract_feature_series",
+    "FactorTransformError",
+    "InvalidNumericValueError",
+    "RequiredColumnMissingError",
     "load_admitted_symbols_from_audit",
     "load_cache_payloads",
     "normalize_cache_frame",

@@ -238,7 +238,7 @@ def test_realtime_values_and_delta_seed_build_existing_panel_contract() -> None:
         },
         funding_rate=0.3,
         pair_row={"current_price": 99, "index_price": 100},
-        net_position_value=50,
+        net_position_values={"1h": 50, "1d": 75},
         global_ratio=1.1,
         top_account_ratio=1.2,
         top_position_ratio=1.3,

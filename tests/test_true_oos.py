@@ -1103,6 +1103,125 @@ def test_source_consistency_status_derives_from_append_only_evidence() -> None:
     ) == "超时，需停止受影响范围"
 
 
+def test_source_consistency_status_old_failure_is_superseded_by_success() -> None:
+    queue = build_source_consistency_queue_records(
+        pd.DataFrame(
+            [{
+                "source_scope": "ksv4_1h",
+                "signal_timeframe": "1h",
+                "endpoint": "fr",
+                "symbol": "BTC",
+                "receipt_id": "receipt-retry",
+                "target_label_ts": "2026-08-01T23:00:00Z",
+            }]
+        ),
+        collector_id="collector-retry",
+        capture_ts="2026-08-02T00:00:00Z",
+        initial_query_delay_seconds=900,
+        retry_interval_seconds=3600,
+        revision_query_delay_seconds=86400,
+        maximum_wait_seconds=259200,
+    )[0]
+    base = {
+        "collector_id": "collector-retry",
+        "realtime_receipt_id": "receipt-retry",
+    }
+    initial_failure = {
+        **base,
+        "reference_role": "initial",
+        "attempt_ts": "2026-08-02T00:15:00Z",
+    }
+    initial_success = {
+        **base,
+        "reference_role": "initial",
+        "status": "exact_match",
+    }
+    initial_incomplete = {
+        **base,
+        "reference_role": "initial",
+        "status": "cross_section_incomplete",
+    }
+    assert derive_source_consistency_status(
+        queue,
+        [initial_incomplete, initial_success],
+        observed_ts="2026-08-02T01:00:00Z",
+        failed_attempts=[initial_failure],
+    ) == "首次参照已完成，等待修订到期"
+
+
+def test_source_consistency_status_revision_failure_then_success_is_complete() -> None:
+    queue = build_source_consistency_queue_records(
+        pd.DataFrame(
+            [{
+                "source_scope": "ksv4_1h",
+                "signal_timeframe": "1h",
+                "endpoint": "fr",
+                "symbol": "BTC",
+                "receipt_id": "receipt-revision-retry",
+                "target_label_ts": "2026-08-01T23:00:00Z",
+            }]
+        ),
+        collector_id="collector-revision-retry",
+        capture_ts="2026-08-02T00:00:00Z",
+        initial_query_delay_seconds=900,
+        retry_interval_seconds=3600,
+        revision_query_delay_seconds=86400,
+        maximum_wait_seconds=259200,
+    )[0]
+    base = {
+        "collector_id": "collector-revision-retry",
+        "realtime_receipt_id": "receipt-revision-retry",
+    }
+    failure = {
+        **base,
+        "reference_role": "revision",
+        "attempt_ts": "2026-08-03T00:00:00Z",
+    }
+    comparisons = [
+        {**base, "reference_role": "initial", "status": "exact_match"},
+        {**base, "reference_role": "revision", "status": "decision_material_mismatch"},
+    ]
+    assert derive_source_consistency_status(
+        queue,
+        comparisons,
+        observed_ts="2026-08-03T01:00:00Z",
+        failed_attempts=[failure],
+    ) == "全部参照已完成"
+
+
+def test_source_consistency_status_current_failed_role_waits_for_retry() -> None:
+    queue = build_source_consistency_queue_records(
+        pd.DataFrame(
+            [{
+                "source_scope": "ksv4_1h",
+                "signal_timeframe": "1h",
+                "endpoint": "fr",
+                "symbol": "BTC",
+                "receipt_id": "receipt-current-failure",
+                "target_label_ts": "2026-08-01T23:00:00Z",
+            }]
+        ),
+        collector_id="collector-current-failure",
+        capture_ts="2026-08-02T00:00:00Z",
+        initial_query_delay_seconds=900,
+        retry_interval_seconds=3600,
+        revision_query_delay_seconds=86400,
+        maximum_wait_seconds=259200,
+    )[0]
+    failure = {
+        "collector_id": "collector-current-failure",
+        "realtime_receipt_id": "receipt-current-failure",
+        "reference_role": "initial",
+        "attempt_ts": "2026-08-02T00:15:00Z",
+    }
+    assert derive_source_consistency_status(
+        queue,
+        [],
+        observed_ts="2026-08-02T00:15:01Z",
+        failed_attempts=[failure],
+    ) == "失败后等待重试"
+
+
 def test_source_reference_action_follows_the_frozen_schedule() -> None:
     queue = build_source_reference_queue_records(
         pd.DataFrame(
