@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from qlab.data.crypto.keystore_coinglass_client import RawKeystoreDiagnosticResponse
 from qlab.data.crypto.orderbook_timeframe_audit import (
+    audit_archived_orderbook_request_provenance,
     audit_orderbook_timeframe_relationship,
     build_minimal_pair_probe_contract,
     compare_minimal_pair_probe,
     compare_cache_to_raw_history,
     one_hour_hypotheses,
     persist_minimal_pair_probe_response,
+    summarize_archived_request_provenance,
 )
 
 
@@ -199,3 +202,196 @@ def test_minimal_pair_probe_fails_closed_without_exact_comparison(tmp_path, mode
     result = compare_minimal_pair_probe(tmp_path, contract)
     assert result["all_three_comparable"] is False
     assert result["all_raw_and_imbalance_equal"] is None
+
+
+def test_archived_request_provenance_uses_receipt_times_and_verified_bytes(tmp_path):
+    symbols = ("BTC", "ETH")
+    for endpoint in ("ob_pair", "ob_agg"):
+        fields = (
+            ("bids_usd", "bids_quantity", "asks_usd", "asks_quantity")
+            if endpoint == "ob_pair"
+            else (
+                "aggregated_bids_usd", "aggregated_bids_quantity",
+                "aggregated_asks_usd", "aggregated_asks_quantity",
+            )
+        )
+        for timeframe, request_minute in (("12h", 0), ("1h", 22)):
+            for offset, symbol in enumerate(symbols):
+                values = [10.0 + offset, 1.0, 20.0, 2.0]
+                if timeframe == "1h":
+                    values[0] += 1.0
+                row = {"time": 1785283200000, **dict(zip(fields, values))}
+                raw = json.dumps({"code": "0", "data": [row]}).encode()
+                sha = __import__("hashlib").sha256(raw).hexdigest()
+                object_path = tmp_path / "objects" / sha[:2] / f"{sha}.bin"
+                object_path.parent.mkdir(parents=True, exist_ok=True)
+                object_path.write_bytes(raw)
+                receipt_dir = (
+                    tmp_path / "receipts"
+                    / f"keystore_v4_{endpoint}_{timeframe}_{symbol}"
+                )
+                receipt_dir.mkdir(parents=True, exist_ok=True)
+                receipt = {
+                    "payload_sha256": sha,
+                    "source_request_ts": (
+                        pd.Timestamp("2026-07-29T01:00:00Z")
+                        + pd.Timedelta(minutes=request_minute, seconds=offset)
+                    ).isoformat(),
+                }
+                (receipt_dir / "receipt.json").write_text(
+                    json.dumps(receipt), encoding="utf-8"
+                )
+    result = summarize_archived_request_provenance(
+        tmp_path, expected_symbols=symbols
+    )
+    assert len(result) == 2
+    assert {row["endpoint"] for row in result} == {"ob_pair", "ob_agg"}
+    assert all(row["symbols"] == 2 for row in result)
+    assert all(
+        row["one_hour_minus_twelve_hour_request_lag_seconds_median"] == 1320.0
+        for row in result
+    )
+    assert all(
+        row["symbols_with_different_raw_fields_at_latest_common_label"] == 2
+        for row in result
+    )
+
+
+def _write_archived_provenance_fixture(tmp_path):
+    symbols = ("BTC", "ETH")
+    endpoint_registry = Path(__import__(
+        "qlab.data.crypto.keystore_coinglass_endpoints", fromlist=["x"]
+    ).__file__)
+    endpoint_sha = __import__("hashlib").sha256(endpoint_registry.read_bytes()).hexdigest()
+    source_manifest = {
+        "runtime_contract_version": "test-contract",
+        "sources": [
+            {
+                "path": "qlab/qlab/data/crypto/keystore_coinglass_endpoints.py",
+                "sha256": endpoint_sha,
+            },
+            {
+                "path": "qlab_research_private/research/crypto/live/ksv4_true_oos_shadow.py",
+                "sha256": "frozen-runner-content-sha",
+            },
+        ],
+    }
+    manifests = []
+    for freeze in ("r6", "r12"):
+        path = tmp_path / f"{freeze}_source_manifest.json"
+        path.write_text(json.dumps(source_manifest), encoding="utf-8")
+        manifests.append(path)
+
+    smoke_roots = []
+    for freeze in ("r6", "r12"):
+        root = tmp_path / freeze / "preflight" / "smoke"
+        smoke_roots.append(root)
+        for endpoint in ("ob_pair", "ob_agg"):
+            fields = (
+                ("bids_usd", "bids_quantity", "asks_usd", "asks_quantity")
+                if endpoint == "ob_pair"
+                else (
+                    "aggregated_bids_usd", "aggregated_bids_quantity",
+                    "aggregated_asks_usd", "aggregated_asks_quantity",
+                )
+            )
+            for timeframe, request_minute, selected_label in (
+                ("12h", 0, "2026-07-28T12:00:00+00:00"),
+                ("1h", 22, "2026-07-28T23:00:00+00:00"),
+            ):
+                for offset, symbol in enumerate(symbols):
+                    value = 10.0 + offset + (1.0 if timeframe == "1h" else 0.0)
+                    row = {
+                        "time": 1785283200000,
+                        **dict(zip(fields, (value, 1.0, 20.0, 2.0))),
+                    }
+                    raw = json.dumps({"code": "0", "data": [row]}).encode()
+                    sha = __import__("hashlib").sha256(raw).hexdigest()
+                    object_path = root / "as_received" / "objects" / sha[:2] / f"{sha}.bin"
+                    object_path.parent.mkdir(parents=True, exist_ok=True)
+                    object_path.write_bytes(raw)
+                    source_id = f"keystore_v4_{endpoint}_{timeframe}_{symbol}"
+                    receipt_dir = root / "as_received" / "receipts" / source_id
+                    receipt_dir.mkdir(parents=True, exist_ok=True)
+                    request_ts = (
+                        pd.Timestamp("2026-07-29T01:00:00Z")
+                        + pd.Timedelta(minutes=request_minute, seconds=offset)
+                    ).isoformat()
+                    receipt = {
+                        "source_id": source_id,
+                        "source_request_ts": request_ts,
+                        "source_response_ts": request_ts,
+                        "source_bar_label_ts": selected_label,
+                        "native_bar_end_ts": "2026-07-29T00:00:00+00:00",
+                        "data_observed_ts": request_ts,
+                        "payload_sha256": sha,
+                    }
+                    (receipt_dir / "receipt.json").write_text(
+                        json.dumps(receipt), encoding="utf-8"
+                    )
+
+    commands = []
+    for index in range(6, 13):
+        resume = "" if index == 6 else " --resume-root /evidence/v2_20260729_r6/preflight/real_signal_smoke_20260729T024640Z"
+        commands.append(
+            "python qlab_research_private/research/crypto/live/ksv4_true_oos_shadow.py "
+            f"real-signal-smoke --freeze-version v2_20260729_r{index} "
+            f"--decision-ts 2026-07-29T00:00:00Z{resume} --output /evidence/r{index}"
+        )
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        json.dumps(
+            {
+                "commands": commands,
+                "source": (
+                    "params = build_history_params(\n"
+                    "    endpoint, symbol=symbol, interval=timeframe, limit=args.limit,\n"
+                    ")\n"
+                    "observed = client.request_raw(endpoint.path, params=params)\n"
+                    "real_signal_smoke.add_argument(\"--limit\", type=int, default=3)"
+                ),
+            }
+        ) + "\n",
+        encoding="utf-8",
+    )
+    return symbols, smoke_roots, manifests, transcript
+
+
+def test_formal_archived_provenance_preserves_commands_and_grades_query_as_c(tmp_path):
+    symbols, roots, manifests, transcript = _write_archived_provenance_fixture(tmp_path)
+    result = audit_archived_orderbook_request_provenance(
+        r6_smoke_root=roots[0], r12_smoke_root=roots[1],
+        r6_source_manifest=manifests[0], r12_source_manifest=manifests[1],
+        session_transcript=transcript, expected_symbols=symbols,
+    )
+    assert result["original_command"].endswith("--output /evidence/r6")
+    assert result["replay_chain_commands"][-1].endswith("--output /evidence/r12")
+    assert "/preflight/real_signal_smoke_20260729T024640Z" in result["replay_chain_commands"][1]
+    assert {row["grade"] for row in result["parameter_evidence"] if row["parameter"] == "limit"} == {"C"}
+    assert result["exact_runner_git_commit"] is None
+    assert result["r6_r12_receipts_verified"] == 8
+    assert result["r6_r12_payload_objects_sha_verified"] == 16
+    identity = {
+        (row["endpoint"], row["timeframe"]): row
+        for row in result["request_identity_records"]
+    }
+    assert identity[("ob_pair", "1h")]["supported_historical_exchange_scope"] == "Binance"
+    assert identity[("ob_agg", "12h")]["supported_historical_exchange_scope"] == "Binance,OKX,Bybit"
+    assert identity[("ob_pair", "1d")]["supported_historical_exchange_scope"] == "unknown"
+    assert all(
+        row["historical_code_and_invocation_recovery"].startswith("C:")
+        for row in result["request_identity_records"]
+        if row["timeframe"] in {"1h", "12h"}
+    )
+
+
+def test_formal_archived_provenance_fails_when_either_freeze_object_is_tampered(tmp_path):
+    symbols, roots, manifests, transcript = _write_archived_provenance_fixture(tmp_path)
+    object_path = next((roots[0] / "as_received" / "objects").glob("*/*.bin"))
+    object_path.write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="payload SHA mismatch"):
+        audit_archived_orderbook_request_provenance(
+            r6_smoke_root=roots[0], r12_smoke_root=roots[1],
+            r6_source_manifest=manifests[0], r12_source_manifest=manifests[1],
+            session_transcript=transcript, expected_symbols=symbols,
+        )
