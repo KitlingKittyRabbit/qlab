@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 import pytest
 
+from qlab.data.crypto.keystore_coinglass_client import RawKeystoreDiagnosticResponse
 from qlab.data.crypto.orderbook_timeframe_audit import (
     audit_orderbook_timeframe_relationship,
+    build_minimal_pair_probe_contract,
+    compare_minimal_pair_probe,
     compare_cache_to_raw_history,
     one_hour_hypotheses,
+    persist_minimal_pair_probe_response,
 )
 
 
@@ -89,3 +95,107 @@ def test_raw_factor_and_rank_use_one_complete_symbol_label_support():
     assert set(same_ranks.label) == {labels[1]}
     assert same_values.groupby("label").symbol.nunique().eq(2).all()
     assert same_ranks.groupby("label").symbol.nunique().eq(2).all()
+
+
+def _diagnostic_response(record, rows, *, status=200, code="0"):
+    payload = json.dumps({"code": code, "data": rows}, separators=(",", ":")).encode()
+    return RawKeystoreDiagnosticResponse(
+        path=record["path"], request_params=record["params"],
+        request_ts="2026-08-29T00:00:00+00:00",
+        response_ts="2026-08-29T00:00:01+00:00",
+        http_status=status, business_code=code,
+        business_message="" if status == 200 else "rejected", raw_payload=payload,
+    )
+
+
+def test_minimal_pair_contract_and_exact_target_comparison(tmp_path):
+    target = 1787788800000
+    contract = build_minimal_pair_probe_contract(
+        target_label_ms=target,
+        start_time_ms=target - 86_400_000,
+        end_time_ms=target + 86_400_000,
+    )
+    assert [row["timeframe"] for row in contract] == ["1h", "12h", "1d"]
+    common = [
+        {key: value for key, value in row["params"].items() if key != "interval"}
+        for row in contract
+    ]
+    assert common[0] == common[1] == common[2]
+    assert common[0] == {
+        "exchange": "Binance", "symbol": "BTCUSDT", "range": "1",
+        "limit": 1000, "start_time": target - 86_400_000,
+        "end_time": target + 86_400_000,
+    }
+    row = {
+        "time": target, "bids_usd": 30, "bids_quantity": 3,
+        "asks_usd": 10, "asks_quantity": 1,
+    }
+    for record in contract:
+        receipt = persist_minimal_pair_probe_response(
+            tmp_path, record, _diagnostic_response(record, [row])
+        )
+        assert receipt["authentication_recorded"] is False
+    result = compare_minimal_pair_probe(tmp_path, contract)
+    assert result["same_request_identity_except_interval"] is True
+    assert result["all_three_comparable"] is True
+    assert result["all_raw_and_imbalance_equal"] is True
+    assert result["field_equal_across_all_three"] == {
+        "bids_usd": True, "bids_quantity": True,
+        "asks_usd": True, "asks_quantity": True, "imbalance": True,
+    }
+    assert "fake-secret" not in "".join(
+        path.read_text(encoding="utf-8") for path in (tmp_path / "receipts").glob("*.json")
+    )
+
+
+def test_non_json_http_rejection_still_has_complete_receipt(tmp_path):
+    target = 1787788800000
+    record = build_minimal_pair_probe_contract(
+        target_label_ms=target,
+        start_time_ms=target - 86_400_000,
+        end_time_ms=target + 86_400_000,
+    )[0]
+    response = RawKeystoreDiagnosticResponse(
+        path=record["path"], request_params=record["params"],
+        request_ts="2026-08-29T00:00:00+00:00",
+        response_ts="2026-08-29T00:00:01+00:00",
+        http_status=502, business_code="", business_message="",
+        raw_payload=b"upstream unavailable",
+    )
+    receipt = persist_minimal_pair_probe_response(tmp_path, record, response)
+    assert receipt["http_status"] == 502
+    assert receipt["payload_json_parseable"] is False
+    assert receipt["exact_target_row_count"] == 0
+    object_path = (
+        tmp_path / "objects" / receipt["payload_sha256"][:2]
+        / f"{receipt['payload_sha256']}.bin"
+    )
+    assert object_path.read_bytes() == b"upstream unavailable"
+
+
+@pytest.mark.parametrize("mode", ["rejected", "missing_target"])
+def test_minimal_pair_probe_fails_closed_without_exact_comparison(tmp_path, mode):
+    target = 1787788800000
+    contract = build_minimal_pair_probe_contract(
+        target_label_ms=target,
+        start_time_ms=target - 86_400_000,
+        end_time_ms=target + 86_400_000,
+    )
+    row = {
+        "time": target, "bids_usd": 30, "bids_quantity": 3,
+        "asks_usd": 10, "asks_quantity": 1,
+    }
+    for record in contract:
+        rows = [row]
+        status, code = 200, "0"
+        if record["timeframe"] == "12h" and mode == "rejected":
+            status, code = 403, "40001"
+        if record["timeframe"] == "1d" and mode == "missing_target":
+            rows = [{**row, "time": target - 3_600_000}]
+        persist_minimal_pair_probe_response(
+            tmp_path, record,
+            _diagnostic_response(record, rows, status=status, code=code),
+        )
+    result = compare_minimal_pair_probe(tmp_path, contract)
+    assert result["all_three_comparable"] is False
+    assert result["all_raw_and_imbalance_equal"] is None

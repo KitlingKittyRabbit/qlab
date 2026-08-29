@@ -213,6 +213,26 @@ class RawKeystoreResponse:
             raise ValueError(f"KeyStore response is not valid JSON: {exc}") from exc
 
 
+@dataclass(frozen=True)
+class RawKeystoreDiagnosticResponse:
+    """One unretried HTTP response, including rejected business responses."""
+
+    path: str
+    request_params: dict[str, Any]
+    request_ts: str
+    response_ts: str
+    http_status: int
+    business_code: str
+    business_message: str
+    raw_payload: bytes
+
+    def json_payload(self) -> Any:
+        try:
+            return json.loads(self.raw_payload)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"KeyStore response is not valid JSON: {exc}") from exc
+
+
 class KeystoreCoinglassClient:
     def __init__(
         self,
@@ -239,6 +259,53 @@ class KeystoreCoinglassClient:
                 if remaining > 0:
                     time.sleep(remaining)
             self._last_request_start_monotonic = time.monotonic()
+
+    def request_once_diagnostic(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+    ) -> RawKeystoreDiagnosticResponse:
+        """Send exactly one request and preserve success or rejection bytes.
+
+        This entry never retries and never treats an HTTP/business rejection as
+        an exception.  Transport failures still raise because no response bytes
+        exist to preserve.  Authentication headers are deliberately absent from
+        the returned object.
+        """
+        clean_params = {
+            key: value for key, value in (params or {}).items()
+            if value not in (None, "")
+        }
+        url = f"{self.base_url}/{path.lstrip('/')}"
+        headers = {"accept": "application/json", "X-Api-Key": self.api_key}
+        self._wait_for_request_start_slot()
+        request_ts = datetime.now(UTC)
+        response = requests.get(
+            url, headers=headers, params=clean_params, timeout=self.timeout
+        )
+        response_ts = datetime.now(UTC)
+        raw_payload = bytes(response.content)
+        business_code = ""
+        business_message = ""
+        try:
+            payload: Any = json.loads(raw_payload)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            payload = None
+        if isinstance(payload, dict):
+            business_code = str(payload.get("code", payload.get("status", "")))
+            business_message = str(
+                payload.get("msg", payload.get("message", payload.get("error", "")))
+            )
+        return RawKeystoreDiagnosticResponse(
+            path=path,
+            request_params=dict(clean_params),
+            request_ts=request_ts.isoformat(),
+            response_ts=response_ts.isoformat(),
+            http_status=int(response.status_code),
+            business_code=business_code,
+            business_message=business_message,
+            raw_payload=raw_payload,
+        )
 
     def request_raw(
         self,

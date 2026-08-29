@@ -123,6 +123,33 @@ def test_keystore_client_preserves_successful_raw_response(monkeypatch):
     assert find_data_rows(observed.json_payload())[0]["close"] == "1.5"
 
 
+def test_diagnostic_request_is_single_attempt_and_preserves_rejection(monkeypatch):
+    class Response:
+        status_code = 403
+        content = b'{"code":"40001","msg":"subscription required"}'
+
+    calls = []
+
+    def fake_get(*args, **kwargs):
+        calls.append((args, kwargs))
+        return Response()
+
+    monkeypatch.setattr(
+        "qlab.data.crypto.keystore_coinglass_client.requests.get", fake_get
+    )
+    client = KeystoreCoinglassClient(api_key="fake-secret", rate_limit_sleep=0.0)
+    observed = client.request_once_diagnostic(
+        "/api/futures/orderbook/ask-bids-history",
+        {"exchange": "Binance", "symbol": "BTCUSDT", "interval": "12h"},
+    )
+    assert len(calls) == 1
+    assert observed.http_status == 403
+    assert observed.business_code == "40001"
+    assert observed.business_message == "subscription required"
+    assert observed.raw_payload == Response.content
+    assert "fake-secret" not in repr(observed)
+
+
 def test_keystore_client_retries_transient_business_500(monkeypatch):
     class Response:
         status_code = 200

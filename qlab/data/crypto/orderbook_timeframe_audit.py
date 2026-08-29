@@ -17,6 +17,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .keystore_coinglass_client import (
+    RawKeystoreDiagnosticResponse,
+    find_data_rows,
+)
 from .keystore_coinglass_panel import extract_feature_series
 from .panel_statistics import rank_standardize_grouped_series
 
@@ -33,6 +37,181 @@ ORDERBOOK_IMBALANCE_FIELDS = {
     "ob_agg": ("aggregated_bids_usd", "aggregated_asks_usd"),
 }
 AGGREGATION_METHODS = ("same_label", "first", "last", "mean", "median", "min", "max")
+MINIMAL_PAIR_PATH = "/api/futures/orderbook/ask-bids-history"
+MINIMAL_PAIR_TIMEFRAMES = ("1h", "12h", "1d")
+
+
+def build_minimal_pair_probe_contract(
+    *,
+    target_label_ms: int,
+    start_time_ms: int,
+    end_time_ms: int,
+) -> list[dict[str, object]]:
+    """Build exactly three BTCUSDT pair requests differing only by interval."""
+    if not int(start_time_ms) <= int(target_label_ms) < int(end_time_ms):
+        raise ValueError("target label must lie inside the fixed request window")
+    common = {
+        "exchange": "Binance",
+        "symbol": "BTCUSDT",
+        "range": "1",
+        "limit": 1000,
+        "start_time": int(start_time_ms),
+        "end_time": int(end_time_ms),
+    }
+    return [
+        {
+            "request_id": f"btc_pair_{timeframe}",
+            "endpoint": "ob_pair",
+            "timeframe": timeframe,
+            "target_label_ms": int(target_label_ms),
+            "path": MINIMAL_PAIR_PATH,
+            "params": {**common, "interval": timeframe},
+        }
+        for timeframe in MINIMAL_PAIR_TIMEFRAMES
+    ]
+
+
+def persist_minimal_pair_probe_response(
+    root: Path,
+    request_record: Mapping[str, object],
+    response: RawKeystoreDiagnosticResponse,
+) -> dict[str, object]:
+    """Immutably preserve one raw response and its credential-free receipt."""
+    expected_params = dict(request_record["params"])
+    if response.path != request_record["path"] or response.request_params != expected_params:
+        raise ValueError("response identity differs from the fixed minimal contract")
+    payload_sha = hashlib.sha256(response.raw_payload).hexdigest()
+    object_path = root / "objects" / payload_sha[:2] / f"{payload_sha}.bin"
+    object_path.parent.mkdir(parents=True, exist_ok=True)
+    if object_path.exists():
+        if object_path.read_bytes() != response.raw_payload:
+            raise ValueError("existing minimal pair object differs from response bytes")
+    else:
+        with object_path.open("xb") as handle:
+            handle.write(response.raw_payload)
+    try:
+        payload = response.json_payload()
+        payload_json_parseable = True
+    except ValueError:
+        payload = None
+        payload_json_parseable = False
+    rows = find_data_rows(payload)
+    target_label_ms = int(request_record["target_label_ms"])
+    exact_rows = [
+        row for row in rows
+        if isinstance(row, Mapping) and int(row.get("time", -1)) == target_label_ms
+    ]
+    receipt = {
+        "Lifecycle": "candidate diagnostic evidence",
+        "Authority": "unaltered KeyStore/CoinGlass proxy response bytes bound by SHA-256",
+        "Inputs": "fixed Issue #34 minimal BTCUSDT pair request identity; authentication excluded",
+        "May be used for": "Issue #34 stage-1 three-timeframe raw-response comparison",
+        "Must not be used for": "aggregated/other-symbol inference, rank, L0-L4, simulations, confirmation tests, deployment, or trading",
+        "Archive condition": "archive after reviewed Issue #34 stage-1 evidence is superseded",
+        "request_id": request_record["request_id"],
+        "endpoint": request_record["endpoint"],
+        "timeframe": request_record["timeframe"],
+        "target_label_ms": target_label_ms,
+        "path": response.path,
+        "request_params": response.request_params,
+        "request_ts": response.request_ts,
+        "response_ts": response.response_ts,
+        "http_status": response.http_status,
+        "business_code": response.business_code,
+        "business_message": response.business_message,
+        "payload_json_parseable": payload_json_parseable,
+        "payload_sha256": payload_sha,
+        "payload_bytes": len(response.raw_payload),
+        "row_count": len(rows),
+        "exact_target_row_count": len(exact_rows),
+        "authentication_recorded": False,
+    }
+    receipt_path = root / "receipts" / f"{request_record['request_id']}.json"
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    with receipt_path.open("xb") as handle:
+        handle.write(
+            (json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode()
+        )
+    return receipt
+
+
+def compare_minimal_pair_probe(
+    root: Path,
+    contract: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    """Compare only the exact target row across the three fixed intervals."""
+    if [str(row["timeframe"]) for row in contract] != list(MINIMAL_PAIR_TIMEFRAMES):
+        raise ValueError("minimal pair contract must contain exactly 1h, 12h, 1d")
+    per_interval: list[dict[str, object]] = []
+    comparable_frames: dict[str, pd.DataFrame] = {}
+    for record in contract:
+        timeframe = str(record["timeframe"])
+        receipt_path = root / "receipts" / f"{record['request_id']}.json"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        payload_sha = str(receipt["payload_sha256"])
+        payload_path = root / "objects" / payload_sha[:2] / f"{payload_sha}.bin"
+        if file_sha256(payload_path) != payload_sha:
+            raise ValueError("minimal pair payload SHA mismatch")
+        try:
+            payload = json.loads(payload_path.read_bytes())
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            payload = None
+        rows = find_data_rows(payload)
+        exact_rows = [
+            row for row in rows
+            if isinstance(row, Mapping)
+            and int(row.get("time", -1)) == int(record["target_label_ms"])
+        ]
+        business_ok = str(receipt["business_code"]) in {"", "0", "success"}
+        response_ok = int(receipt["http_status"]) == 200 and business_ok
+        result: dict[str, object] = {
+            "timeframe": timeframe,
+            "http_status": int(receipt["http_status"]),
+            "business_code": str(receipt["business_code"]),
+            "request_succeeded": response_ok,
+            "exact_target_row_count": len(exact_rows),
+            "exact_target_present": len(exact_rows) == 1,
+            "payload_sha256": payload_sha,
+        }
+        if response_ok and len(exact_rows) == 1:
+            frame = pd.DataFrame(exact_rows)
+            frame["ts"] = pd.to_datetime(frame.pop("time"), unit="ms", utc=True)
+            frame = _normalized(frame.set_index("ts"), ORDERBOOK_RAW_FIELDS["ob_pair"])
+            imbalance = orderbook_imbalance(frame, endpoint="ob_pair")
+            comparable_frames[timeframe] = frame
+            for field in ORDERBOOK_RAW_FIELDS["ob_pair"]:
+                result[field] = float(frame.iloc[0][field])
+            result["imbalance"] = float(imbalance.iloc[0])
+        per_interval.append(result)
+    comparable = len(comparable_frames) == 3
+    fields = (*ORDERBOOK_RAW_FIELDS["ob_pair"], "imbalance")
+    equality = {
+        field: (
+            len({float(row[field]) for row in per_interval}) == 1
+            if comparable else None
+        )
+        for field in fields
+    }
+    return {
+        "target_label_ms": int(contract[0]["target_label_ms"]),
+        "same_request_identity_except_interval": all(
+            {
+                key: value for key, value in dict(record["params"]).items()
+                if key != "interval"
+            }
+            == {
+                key: value for key, value in dict(contract[0]["params"]).items()
+                if key != "interval"
+            }
+            for record in contract
+        ),
+        "all_three_comparable": comparable,
+        "per_interval": per_interval,
+        "field_equal_across_all_three": equality,
+        "all_raw_and_imbalance_equal": (
+            all(bool(value) for value in equality.values()) if comparable else None
+        ),
+    }
 
 
 def _normalized(frame: pd.DataFrame, fields: Sequence[str]) -> pd.DataFrame:
@@ -398,6 +577,8 @@ __all__ = [
     "AGGREGATION_METHODS", "ORDERBOOK_RAW_FIELDS", "ORDERBOOK_IMBALANCE_FIELDS",
     "audit_orderbook_timeframe_relationship", "one_hour_hypotheses",
     "orderbook_imbalance", "compare_cache_to_raw_history", "file_sha256",
+    "build_minimal_pair_probe_contract", "compare_minimal_pair_probe",
+    "persist_minimal_pair_probe_response",
     "load_immutable_orderbook_frames", "load_orderbook_history_csv",
     "summarize_orderbook_ranks", "summarize_orderbook_values",
     "summarize_orderbook_values_by_symbol",
