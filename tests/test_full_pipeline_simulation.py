@@ -235,11 +235,19 @@ def _production_input(input_case: str) -> ObservedEffectScaleInput:
     return replace(provisional, input_identity=identity)
 
 
-def _run(*, minimum_support_rows: int = 2, decision_windows=None):
+def _run(
+    *,
+    minimum_support_rows: int = 2,
+    decision_windows=None,
+    candidate_specs=None,
+    payloads_b=None,
+    payloads_c=None,
+):
     windows = _windows() if decision_windows is None else decision_windows
+    specs = _specs() if candidate_specs is None else candidate_specs
     contract = ObservedEffectScaleContract(
         admitted_symbols=("AAA", "BBB"),
-        candidate_specs=_specs(),
+        candidate_specs=specs,
         decision_windows=windows,
         horizon_deltas=HORIZON_DELTAS,
         minimum_support_rows=minimum_support_rows,
@@ -248,6 +256,7 @@ def _run(*, minimum_support_rows: int = 2, decision_windows=None):
             candidate_set_identity="synthetic-unfiltered-grid-v1",
             **_fixture_contract_kwargs(
                 decision_windows=windows,
+                candidate_specs=specs,
                 minimum_support_rows=minimum_support_rows,
             ),
         )
@@ -255,8 +264,16 @@ def _run(*, minimum_support_rows: int = 2, decision_windows=None):
         registry_frame=_registry(),
         contract=contract,
         input_cases={
-            "B": ObservedEffectScaleInput(_cache_payloads(), _minute_klines(), "cache-B-v1"),
-            "C": ObservedEffectScaleInput(_cache_payloads(), _minute_klines(), "cache-C-v1"),
+            "B": ObservedEffectScaleInput(
+                _cache_payloads() if payloads_b is None else payloads_b,
+                _minute_klines(),
+                "cache-B-v1",
+            ),
+            "C": ObservedEffectScaleInput(
+                _cache_payloads() if payloads_c is None else payloads_c,
+                _minute_klines(),
+                "cache-C-v1",
+            ),
         },
     )
 
@@ -651,6 +668,7 @@ def test_input_identity_manifest_contains_content_digests_and_mutation_fails_clo
         "decision_windows_sha256",
         "horizon_contract_sha256",
         "execution_delay_minutes",
+        "decision_coverage_policy",
     ]
     assert set(identity_manifest["input_case"]) == {"B", "C"}
     assert identity_manifest["cache_sha256"].str.fullmatch(r"[0-9a-f]{64}").all()
@@ -935,33 +953,58 @@ def test_non_positive_minute_prices_fail_closed(invalid_open):
         )
 
 
-def test_all_nan_decision_is_not_silently_dropped_from_a_complete_cross_section():
+def test_missing_decision_is_jointly_removed_for_one_candidate_and_horizon():
+    missing = _cache_payloads()
+    # The fixture is a bar_start source: DECISION consumes the prior 1h row.
+    missing["ksv4_1h"]["AAA_fr"].loc[
+        DECISION - pd.Timedelta(hours=1), "positive"
+    ] = np.nan
+    specs = tuple(
+        replace(spec, canonical_orientation=1, declared_alias_of=None)
+        for spec in _specs()
+    )
+    artifacts = _run(
+        decision_windows={
+            "4h": DecisionWindow(start=DECISION, end=DECISION + pd.Timedelta(hours=4)),
+            "8h": DecisionWindow(start=DECISION, end=DECISION),
+            "12h": DecisionWindow(start=DECISION, end=DECISION),
+            "1d": DecisionWindow(start=DECISION, end=DECISION),
+        },
+        candidate_specs=specs,
+        payloads_b=missing,
+        payloads_c=deepcopy(missing),
+    )
+    estimates = artifacts.candidate_estimates.query("input_case == 'B'").set_index("candidate_id")
+    positive = estimates.loc["positive_4h"]
+    assert positive["status"] == "ok"
+    assert positive["support_decision_count"] == 1
+    assert positive["support_rows"] == 2
+    assert positive["beta_obs"] == pytest.approx(0.0)
+    assert estimates.loc["negative_sign_alias_4h", "status"] == "ok"
+    assert set(artifacts.input_case_comparison["status"]) == {"equal"}
+
+
+def test_all_nan_decisions_are_recorded_without_allowing_a_partial_cross_section():
     missing = _cache_payloads()
     for symbol in ("AAA", "BBB"):
-        # The fixture is a bar_start source: DECISION consumes the prior 1h row.
         missing["ksv4_1h"][f"{symbol}_fr"].loc[
             DECISION - pd.Timedelta(hours=1), "positive"
         ] = np.nan
 
-    with pytest.raises(ValueError, match="incomplete_formal_signal_cross_section"):
-        estimate_l0_l4_observed_effect_scale_v1(
-            registry_frame=_registry(),
-            contract=ObservedEffectScaleContract(
-                admitted_symbols=("AAA", "BBB"),
-                candidate_specs=_specs(),
-                decision_windows=_windows(),
-                horizon_deltas=HORIZON_DELTAS,
-                minimum_support_rows=2,
-                min_common_panel_rows=1,
-                registry_identity="synthetic-registry-v1",
-                candidate_set_identity="synthetic-unfiltered-grid-v1",
-                **_fixture_contract_kwargs(),
-            ),
-            input_cases={
-                "B": ObservedEffectScaleInput(missing, _minute_klines(), "cache-B-v1"),
-                "C": ObservedEffectScaleInput(_cache_payloads(), _minute_klines(), "cache-C-v1"),
-            },
-        )
+    specs = tuple(
+        replace(spec, canonical_orientation=1, declared_alias_of=None)
+        for spec in _specs()
+    )
+    artifacts = _run(
+        candidate_specs=specs,
+        payloads_b=missing,
+        payloads_c=deepcopy(missing),
+    )
+    estimates = artifacts.candidate_estimates.query("input_case == 'B'").set_index("candidate_id")
+    assert estimates.loc["positive_4h", "status"] == "insufficient_support"
+    assert estimates.loc["positive_4h", "failure_reason"] == "no_complete_cross_section_decisions"
+    assert estimates.loc["positive_4h", "support_decision_count"] == 0
+    assert estimates.loc["negative_sign_alias_4h", "status"] == "ok"
 
 
 def test_common_slope_uses_the_entire_twenty_asset_cross_section():
