@@ -357,6 +357,7 @@ def build_panel_from_payloads(
     cache_payloads: dict[str, dict[str, pd.DataFrame]],
     registry_frame: pd.DataFrame,
     min_common_rows: int = MIN_COMMON_PANEL_ROWS,
+    decision_index: pd.DatetimeIndex | None = None,
 ) -> PanelArtifacts:
     symbols = normalize_symbol_list(admitted_symbols)
     if not symbols:
@@ -372,8 +373,17 @@ def build_panel_from_payloads(
     if active_registry.empty:
         raise ValueError("no ksv4 base-panel factors available")
 
-    decision_index = route_common_decision_index(symbols, active_registry, cache_payloads)
-    if decision_index.empty:
+    if decision_index is None:
+        panel_decision_index = route_common_decision_index(
+            symbols, active_registry, cache_payloads
+        )
+    else:
+        panel_decision_index = pd.DatetimeIndex(
+            pd.to_datetime(decision_index, utc=True), name="decision_ts"
+        ).as_unit("ns")
+        if panel_decision_index.has_duplicates:
+            raise ValueError("explicit ksv4 decision grid contains duplicate timestamps")
+    if panel_decision_index.empty:
         raise ValueError("ksv4 1h decision grid is empty")
 
     feature_names = active_registry["feature_name"].tolist()
@@ -383,7 +393,9 @@ def build_panel_from_payloads(
         sorted({signal_timeframe_from_scope(scope) for scope in active_registry["source_scope"]})
     )
     for symbol in symbols:
-        aligned = build_symbol_frame_on_grid(symbol, active_registry, cache_payloads, decision_index)
+        aligned = build_symbol_frame_on_grid(
+            symbol, active_registry, cache_payloads, panel_decision_index
+        )
         aligned["label_ts"] = aligned.index
         aligned["signal_bar_end_ts"] = aligned.index
         aligned["symbol"] = symbol

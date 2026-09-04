@@ -28,10 +28,9 @@ import pandas as pd
 from . import factor_research
 from .data.crypto import keystore_coinglass_factors as factor_registry
 from .data.crypto.keystore_coinglass_panel import (
+    build_decision_grid_index,
     build_panel_from_payloads,
-    extract_symbol_feature_series,
     signal_timeframe_from_scope,
-    source_index_to_native_bar_end,
 )
 from .data.crypto.panel import panel_with_executable_return
 from .data.crypto.strategy_time_contract import (
@@ -169,6 +168,9 @@ def _decision_windows_content_sha256(
     return _json_content_sha256(payload)
 
 
+_DECISION_COVERAGE_POLICY = "per_candidate_horizon_complete_cross_section_v1"
+
+
 def _horizon_contract_content_sha256(
     horizon_deltas: Mapping[str, pd.Timedelta],
     *,
@@ -176,6 +178,7 @@ def _horizon_contract_content_sha256(
     require_complete_cross_sections: bool,
     minimum_support_rows: int,
     min_common_panel_rows: int,
+    decision_coverage_policy: str = _DECISION_COVERAGE_POLICY,
 ) -> str:
     payload = {
         "horizon_deltas": {
@@ -186,6 +189,7 @@ def _horizon_contract_content_sha256(
         "require_complete_cross_sections": bool(require_complete_cross_sections),
         "minimum_support_rows": int(minimum_support_rows),
         "min_common_panel_rows": int(min_common_panel_rows),
+        "decision_coverage_policy": str(decision_coverage_policy),
     }
     return _json_content_sha256(payload)
 
@@ -250,6 +254,7 @@ class ObservedEffectScaleContract:
     horizon_contract_sha256: str
     require_complete_cross_sections: bool = True
     execution_delay_minutes: int = 4
+    decision_coverage_policy: str = _DECISION_COVERAGE_POLICY
 
 
 @dataclass(frozen=True)
@@ -341,6 +346,7 @@ _INPUT_IDENTITY_COLUMNS = [
     "decision_windows_sha256",
     "horizon_contract_sha256",
     "execution_delay_minutes",
+    "decision_coverage_policy",
 ]
 
 
@@ -561,6 +567,10 @@ def _validate_contract(contract: ObservedEffectScaleContract, registry_frame: pd
         raise ValueError("unknown observed-effect scale coverage contract identity")
     if contract.require_complete_cross_sections is not True:
         raise ValueError("observed-effect scale inventory requires complete cross-sections")
+    if contract.decision_coverage_policy != _DECISION_COVERAGE_POLICY:
+        raise ValueError(
+            "observed-effect scale inventory requires the per-candidate complete-cross-section policy"
+        )
     if is_reality_scale:
         raw_registry = registry_frame.reset_index(drop=True)
         canonical_registry = factor_registry.base_panel_registry("1h").reset_index(drop=True)
@@ -598,6 +608,7 @@ def _validate_contract(contract: ObservedEffectScaleContract, registry_frame: pd
         require_complete_cross_sections=contract.require_complete_cross_sections,
         minimum_support_rows=contract.minimum_support_rows,
         min_common_panel_rows=contract.min_common_panel_rows,
+        decision_coverage_policy=contract.decision_coverage_policy,
     )
     declared_digests = {
         "registry_content_sha256": contract.registry_content_sha256,
@@ -789,54 +800,44 @@ def _validate_required_raw_values(
                     )
 
 
-def _validate_formal_signal_coverage(
+def _complete_cross_section_decisions(
+    route: pd.DataFrame,
+    feature_name: str,
     admitted_symbols: Sequence[str],
-    cache_payloads: Mapping[str, Mapping[str, pd.DataFrame]],
-    registry_frame: pd.DataFrame,
-    windows: Mapping[str, tuple[pd.Timestamp, pd.Timestamp]],
-    horizon_deltas: Mapping[str, pd.Timedelta],
-) -> None:
-    """Ensure formal panel normalization cannot hide a missing decision row.
+) -> pd.DatetimeIndex:
+    """Return only decisions with one finite row for every admitted symbol.
 
-    ``extract_feature_series`` intentionally drops missing values.  That is a
-    valid primitive-level behavior, but an observed-effect inventory with a
-    complete-cross-section contract must fail before panel construction when a
-    required decision disappears because its raw value is missing.
+    The formal panel builder owns source extraction, timestamp alignment and
+    cross-sectional standardisation.  This helper only applies the observed
+    effect inventory's coverage rule *after* those formal operations: a
+    missing/non-finite value for one symbol removes that decision for the
+    candidate and horizon as a whole.  It never re-ranks a partial cross
+    section and it does not alter the public L0--L4 panel semantics.
     """
-    for horizon, (start, end) in windows.items():
-        expected_decisions = pd.date_range(
-            start,
-            end,
-            freq=pd.Timedelta(horizon_deltas[horizon]),
-            tz="UTC",
-            name="decision_ts",
-        )
-        if expected_decisions.empty:
-            raise ValueError(f"no expected decision timestamps for {horizon}")
-        for registry_row in registry_frame.itertuples(index=False):
-            values = registry_row._asdict()
-            feature_name = str(values["feature_name"])
-            signal_timeframe = signal_timeframe_from_scope(str(values["source_scope"]))
-            signal_delta = pd.Timedelta(horizon_deltas[signal_timeframe])
-            horizon_delta = pd.Timedelta(horizon_deltas[horizon])
-            if signal_delta > horizon_delta or horizon_delta % signal_delta != pd.Timedelta(0):
-                continue
-            spec_row = pd.Series(values)
-            for symbol in admitted_symbols:
-                series = extract_symbol_feature_series(str(symbol), spec_row, cache_payloads)
-                native_bar_ends = source_index_to_native_bar_end(
-                    pd.DatetimeIndex(series.index),
-                    signal_timeframe=signal_timeframe,
-                    timestamp_kind=str(values["timestamp_kind"]),
-                )
-                available = set(native_bar_ends)
-                missing = [timestamp for timestamp in expected_decisions if timestamp not in available]
-                if missing:
-                    raise ValueError(
-                        "incomplete_formal_signal_cross_section: "
-                        f"feature={feature_name} symbol={symbol} horizon={horizon} "
-                        f"missing_decisions={len(missing)}"
-                    )
+    if not isinstance(route.index, pd.MultiIndex) or set(route.index.names) < {
+        "decision_ts",
+        "symbol",
+    }:
+        raise ValueError("candidate route must use a decision_ts/symbol MultiIndex")
+    if feature_name not in route.columns:
+        raise ValueError(f"candidate feature is absent from the formal route: {feature_name}")
+    expected_symbols = {str(symbol) for symbol in admitted_symbols}
+    if not expected_symbols:
+        raise ValueError("admitted_symbols must not be empty")
+    numeric = pd.to_numeric(route[feature_name], errors="coerce")
+    finite = np.isfinite(numeric.to_numpy(dtype=float, copy=False))
+    finite_rows = route.loc[finite]
+    if finite_rows.empty:
+        return pd.DatetimeIndex([], tz="UTC", name="decision_ts")
+
+    complete: list[pd.Timestamp] = []
+    for decision_ts, group in finite_rows.groupby(level="decision_ts", sort=False):
+        symbols = [str(value) for value in group.index.get_level_values("symbol")]
+        if len(symbols) == len(expected_symbols) and set(symbols) == expected_symbols and len(set(symbols)) == len(symbols):
+            complete.append(pd.Timestamp(decision_ts))
+    if not complete:
+        return pd.DatetimeIndex([], tz="UTC", name="decision_ts")
+    return pd.DatetimeIndex(pd.to_datetime(complete, utc=True), name="decision_ts").sort_values().as_unit("ns")
 
 
 def _validate_windows(
@@ -1119,18 +1120,14 @@ def _estimate_one_frozen_input(
     _validate_raw_input_identity(input_data.cache_payloads, registry_frame)
     _validate_required_raw_values(contract.admitted_symbols, input_data.cache_payloads, registry_frame)
     _validate_minute_price_inputs(contract.admitted_symbols, input_data.minute_klines_by_symbol)
-    _validate_formal_signal_coverage(
-        contract.admitted_symbols,
-        input_data.cache_payloads,
-        registry_frame,
-        windows,
-        contract.horizon_deltas,
-    )
+    panel_window_start = min(start for start, _ in windows.values())
+    panel_window_end = max(end for _, end in windows.values())
     panel_artifacts = build_panel_from_payloads(
         admitted_symbols=contract.admitted_symbols,
         cache_payloads={key: dict(value) for key, value in input_data.cache_payloads.items()},
         registry_frame=registry_frame,
         min_common_rows=int(contract.min_common_panel_rows),
+        decision_index=build_decision_grid_index(panel_window_start, panel_window_end),
     )
     panel = panel_artifacts.panel
     registry_by_feature = registry_frame.set_index("feature_name", drop=False)
@@ -1194,51 +1191,22 @@ def _estimate_one_frozen_input(
 
     for spec in specs:
         route = route_by_horizon[spec.return_horizon]
-        signal_by_candidate[spec.candidate_id] = route[spec.feature_name].sort_index()
-        return_by_candidate[spec.candidate_id] = return_by_horizon[spec.return_horizon]
+        complete_decisions = _complete_cross_section_decisions(
+            route,
+            spec.feature_name,
+            contract.admitted_symbols,
+        )
+        route_decisions = pd.DatetimeIndex(route.index.get_level_values("decision_ts"))
+        candidate_route = route.loc[route_decisions.isin(complete_decisions)].copy()
+        signal_by_candidate[spec.candidate_id] = candidate_route[spec.feature_name].sort_index()
+        return_decisions = pd.DatetimeIndex(
+            return_by_horizon[spec.return_horizon].index.get_level_values("decision_ts")
+        )
+        return_by_candidate[spec.candidate_id] = return_by_horizon[spec.return_horizon].loc[
+            return_decisions.isin(complete_decisions)
+        ]
         signal_values = signal_by_candidate[spec.candidate_id].to_numpy(dtype=float, copy=False)
-        if np.isinf(signal_values).any():
-            raise ValueError(f"non-finite formal signal for {spec.candidate_id}")
-        finite_signal = route.loc[np.isfinite(signal_values)].copy()
-        if contract.require_complete_cross_sections:
-            expected_symbols = set(contract.admitted_symbols)
-            expected_decisions = set(
-                pd.DatetimeIndex(route.index.get_level_values("decision_ts")).unique()
-            )
-            actual_decisions = set(
-                pd.DatetimeIndex(finite_signal.index.get_level_values("decision_ts")).unique()
-            )
-            actual_sets = finite_signal.groupby(level="decision_ts").apply(
-                lambda frame: set(frame.index.get_level_values("symbol"))
-            )
-            if actual_decisions != expected_decisions or not all(
-                value == expected_symbols for value in actual_sets
-            ):
-                estimate_rows.append(
-                    {
-                        "input_case": input_case,
-                        "candidate_id": spec.candidate_id,
-                        "feature_name": spec.feature_name,
-                        "return_horizon": spec.return_horizon,
-                        "declared_alias_of": spec.declared_alias_of,
-                        "canonical_orientation": int(spec.canonical_orientation),
-                        "status": "insufficient_support",
-                        "failure_reason": "incomplete_formal_signal_cross_section",
-                        "support_rows": 0,
-                        "support_asset_count": 0,
-                        "support_decision_count": 0,
-                        "support_start": pd.NaT,
-                        "support_end": pd.NaT,
-                        "signal_rows_on_window": int(len(route)),
-                        "finite_signal_rows": int(np.isfinite(signal_values).sum()),
-                        "finite_return_rows": int(len(return_by_horizon[spec.return_horizon])),
-                        "alpha_obs": float("nan"),
-                        "beta_obs": float("nan"),
-                        "sigma_y": float("nan"),
-                        "delta_obs": float("nan"),
-                    }
-                )
-                continue
+        finite_signal = candidate_route
         if finite_signal.empty:
             estimate_rows.append(
                 {
@@ -1249,15 +1217,15 @@ def _estimate_one_frozen_input(
                     "declared_alias_of": spec.declared_alias_of,
                     "canonical_orientation": int(spec.canonical_orientation),
                     "status": "insufficient_support",
-                    "failure_reason": "no_finite_formal_signal",
+                    "failure_reason": "no_complete_cross_section_decisions",
                     "support_rows": 0,
                     "support_asset_count": 0,
                     "support_decision_count": 0,
                     "support_start": pd.NaT,
                     "support_end": pd.NaT,
-                    "signal_rows_on_window": int(len(route)),
+                    "signal_rows_on_window": int(len(candidate_route)),
                     "finite_signal_rows": 0,
-                    "finite_return_rows": 0,
+                    "finite_return_rows": int(len(return_by_candidate[spec.candidate_id])),
                     "alpha_obs": float("nan"),
                     "beta_obs": float("nan"),
                     "sigma_y": float("nan"),
@@ -1449,6 +1417,7 @@ def estimate_l0_l4_observed_effect_scale_v1(
                     "decision_windows_sha256": contract.decision_windows_sha256,
                     "horizon_contract_sha256": contract.horizon_contract_sha256,
                     "execution_delay_minutes": contract.execution_delay_minutes,
+                    "decision_coverage_policy": contract.decision_coverage_policy,
                 }
                 for input_case in ("B", "C")
             ],
