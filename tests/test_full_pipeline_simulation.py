@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import inspect
+import subprocess
+import sys
 from copy import deepcopy
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -11,6 +14,10 @@ import pytest
 from qlab.data.crypto import keystore_coinglass_factors as factor_registry
 from qlab.full_pipeline_simulation import (
     DecisionWindow,
+    DETERMINISTIC_RANDOM_ADDRESS_VERSION_V1,
+    DETERMINISTIC_RANDOM_ALLOWED_PHASES_V1,
+    DETERMINISTIC_RANDOM_ALLOWED_STREAM_KINDS_V1,
+    DeterministicRandomAddressV1,
     KNOWN_TRUTH_ADMITTED_SYMBOLS_V1,
     KNOWN_TRUTH_ARCHIVE_CONDITION_V1,
     KNOWN_TRUTH_BETA_TOTAL_SCALES_V1,
@@ -55,6 +62,7 @@ from qlab.full_pipeline_simulation import (
     _validate_frozen_source_manifest_identity,
     estimate_l0_l4_observed_effect_scale_v1,
     validate_known_truth_simulation_contract_v1,
+    derive_deterministic_random_address_v1,
 )
 
 
@@ -1818,3 +1826,172 @@ def test_known_truth_contract_requires_exact_lifecycle_boundaries(field, message
 
     with pytest.raises(ValueError, match=message):
         validate_known_truth_simulation_contract_v1(changed)
+
+
+def test_deterministic_random_address_v1_fixed_vector_and_seed_shape():
+    assert DETERMINISTIC_RANDOM_ADDRESS_VERSION_V1 == (
+        "ksv4-deterministic-random-address/v1"
+    )
+    result = derive_deterministic_random_address_v1(
+        seed_namespace="example-v1",
+        phase="formal",
+        stream_kind="base",
+        registered_stream_or_group_id="group-alpha",
+        time_index=7,
+        asset_index=3,
+    )
+
+    assert isinstance(result, DeterministicRandomAddressV1)
+    assert result.address_hex == (
+        "acb463d7909826f829c752929ea186273da057a74ada436cabbdebdf2d222170"
+    )
+    assert result.seed_uint64 == 12444681447826532088
+    assert len(result.address_hex) == 64
+    assert 0 <= result.seed_uint64 < 2**64
+
+
+def test_deterministic_random_address_v1_is_invariant_to_reordering():
+    identities = [
+        ("base", "group-a", 0, 0),
+        ("measurement", "group-b", 1, 1),
+        ("null", "group-c", 2, 0),
+        ("price", "group-d", 3, 1),
+    ]
+
+    def derive(identity):
+        stream_kind, stream_id, time_index, asset_index = identity
+        result = derive_deterministic_random_address_v1(
+            seed_namespace="reordering-v1",
+            phase="formal",
+            stream_kind=stream_kind,
+            registered_stream_or_group_id=stream_id,
+            time_index=time_index,
+            asset_index=asset_index,
+        )
+        return result.address_hex, result.seed_uint64
+
+    expected = {identity: derive(identity) for identity in identities}
+    reordered = list(reversed(identities))
+    assert {identity: derive(identity) for identity in reordered} == expected
+
+
+def test_deterministic_random_address_v1_all_identity_fields_are_bound():
+    base = {
+        "seed_namespace": "identity-binding-v1",
+        "phase": "development",
+        "stream_kind": "base",
+        "registered_stream_or_group_id": "group-alpha",
+        "time_index": 11,
+        "asset_index": 4,
+    }
+    variants = []
+    for field, value in (
+        ("seed_namespace", "identity-binding-other-v1"),
+        ("phase", "formal"),
+        ("stream_kind", "measurement"),
+        ("registered_stream_or_group_id", "group-beta"),
+        ("time_index", 12),
+        ("asset_index", 5),
+    ):
+        changed = dict(base)
+        changed[field] = value
+        variants.append(changed)
+
+    addresses = {
+        derive_deterministic_random_address_v1(**values).address_hex
+        for values in [base, *variants]
+    }
+    assert len(addresses) == 1 + len(variants)
+
+    stream_addresses = {
+        derive_deterministic_random_address_v1(
+            seed_namespace="stream-kind-v1",
+            phase="formal",
+            stream_kind=stream_kind,
+            registered_stream_or_group_id="same-id",
+            time_index=0,
+            asset_index=0,
+        ).address_hex
+        for stream_kind in DETERMINISTIC_RANDOM_ALLOWED_STREAM_KINDS_V1
+    }
+    phase_addresses = {
+        derive_deterministic_random_address_v1(
+            seed_namespace="phase-v1",
+            phase=phase,
+            stream_kind="base",
+            registered_stream_or_group_id="same-id",
+            time_index=0,
+            asset_index=0,
+        ).address_hex
+        for phase in DETERMINISTIC_RANDOM_ALLOWED_PHASES_V1
+    }
+    assert len(stream_addresses) == len(DETERMINISTIC_RANDOM_ALLOWED_STREAM_KINDS_V1)
+    assert len(phase_addresses) == len(DETERMINISTIC_RANDOM_ALLOWED_PHASES_V1)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("seed_namespace", ""),
+        ("seed_namespace", "has space"),
+        ("seed_namespace", "非ascii"),
+        ("seed_namespace", "x" * 129),
+        ("seed_namespace", None),
+        ("phase", "test"),
+        ("stream_kind", "innovation"),
+        ("registered_stream_or_group_id", ""),
+        ("registered_stream_or_group_id", "x\n"),
+        ("registered_stream_or_group_id", None),
+        ("time_index", -1),
+        ("time_index", 2**63),
+        ("time_index", True),
+        ("time_index", 1.0),
+        ("asset_index", -1),
+        ("asset_index", 2**32),
+        ("asset_index", False),
+        ("asset_index", 1.0),
+    ),
+)
+def test_deterministic_random_address_v1_rejects_invalid_identity_fields(field, value):
+    values = {
+        "seed_namespace": "valid-v1",
+        "phase": "formal",
+        "stream_kind": "base",
+        "registered_stream_or_group_id": "group-alpha",
+        "time_index": 0,
+        "asset_index": 0,
+    }
+    values[field] = value
+
+    with pytest.raises((TypeError, ValueError)):
+        derive_deterministic_random_address_v1(**values)
+
+
+def test_deterministic_random_address_v1_is_stable_across_python_processes():
+    snippet = """
+from qlab.full_pipeline_simulation import derive_deterministic_random_address_v1
+result = derive_deterministic_random_address_v1(
+    seed_namespace='subprocess-v1',
+    phase='formal',
+    stream_kind='null',
+    registered_stream_or_group_id='group-alpha',
+    time_index=123,
+    asset_index=19,
+)
+print(result.address_hex)
+print(result.seed_uint64)
+"""
+    environment = dict(__import__("os").environ)
+    environment["PYTHONHASHSEED"] = "random"
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    repository_root = Path(__file__).resolve().parents[1]
+    outputs = [
+        subprocess.check_output(
+            [sys.executable, "-c", snippet],
+            cwd=repository_root,
+            env=environment,
+            text=True,
+        ).strip()
+        for _ in range(2)
+    ]
+    assert outputs[0] == outputs[1]
