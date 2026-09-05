@@ -23,7 +23,7 @@ import json
 import math
 import re
 import struct
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from decimal import Decimal, InvalidOperation
 from numbers import Integral
 from typing import Mapping, Sequence
@@ -32,6 +32,7 @@ import numpy as np
 import pandas as pd
 
 from . import factor_research
+from .signal import rank_standardize_cross_section
 from .data.crypto import keystore_coinglass_factors as factor_registry
 from .data.crypto.binance_um_klines import KLINE_COLUMNS, normalize_klines
 from .data.crypto.keystore_coinglass_panel import (
@@ -3321,6 +3322,11 @@ class KnownTruthSignalAssignmentV1:
     noise_scale: float | None = None
     return_inclusion: bool | None = None
     marginal_predictive_truth: int | None = None
+    # Candidate-level affine standardization is explicit for the scalar
+    # vertical slice.  Rank-only candidates leave these unset and use the
+    # formal cross-sectional rank projection after their role expression.
+    role_standardization_center: float | None = None
+    role_standardization_scale: float | None = None
 
 
 @dataclass(frozen=True)
@@ -3989,6 +3995,1235 @@ def validate_known_truth_simulation_contract_v1(
     return contract
 
 
+KNOWN_TRUTH_DGP_VERTICAL_SCHEMA_V1 = "ksv4-known-truth-dgp-vertical-slice/v1"
+KNOWN_TRUTH_DGP_VERTICAL_LIFECYCLE_V1 = "candidate_known_truth_dgp_vertical_slice_v1"
+KNOWN_TRUTH_DGP_VERTICAL_AUTHORITY_V1 = (
+    "issue_34_known_truth_blueprint_sections_4_2_5_2_v1"
+)
+KNOWN_TRUTH_DGP_VERTICAL_MAY_BE_USED_FOR_V1 = (
+    "generate_isolated_known_truth_raw_market_and_signal_fixture_v1"
+)
+KNOWN_TRUTH_DGP_VERTICAL_MUST_NOT_BE_USED_FOR_V1 = (
+    "no_l0_l4_no_research_no_evaluator_no_formal_simulation_no_trade_v1"
+)
+KNOWN_TRUTH_DGP_VERTICAL_ARCHIVE_CONDITION_V1 = (
+    "superseded_by_approved_known_truth_dgp_vertical_slice_v1"
+)
+KNOWN_TRUTH_DGP_SIGNAL_SOURCE_V1 = "synthetic_known_truth_signal_raw_v1"
+KNOWN_TRUTH_DGP_MARKET_SOURCE_V1 = "synthetic_known_truth_market_raw_v1"
+KNOWN_TRUTH_DGP_VALUE_STATUS_V1 = "ok"
+KNOWN_TRUTH_DGP_STANDARDIZATION_V1 = "pre_frozen_population_affine_v1"
+KNOWN_TRUTH_DGP_RANK_STANDARDIZATION_V1 = "formal_cross_section_rank_to_minus1_1_v1"
+KNOWN_TRUTH_DGP_VARIANT_OPERATOR_IDENTITY_V1 = "identity_window_0_weight_1_v1"
+KNOWN_TRUTH_DGP_VARIANT_TIMEFRAME_V1 = "1m"
+KNOWN_TRUTH_DGP_VARIANT_LABEL_ALIGNMENT_V1 = "same_utc_minute_decision_label_v1"
+KNOWN_TRUTH_DGP_VARIANT_AVAILABILITY_RULE_V1 = "available_at_decision_plus_4m_v1"
+KNOWN_TRUTH_DGP_SIGNAL_RECORD_COLUMNS_V1 = (
+    "candidate_id",
+    "symbol",
+    "decision_time",
+    "assumed_execution_gate",
+    "actual_observed_availability",
+    "signal_value",
+    "source",
+    "generation_batch",
+    "value_status",
+    "content_identity",
+)
+KNOWN_TRUTH_DGP_TRUTH_ASSIGNMENT_COLUMNS_V1 = (
+    "scenario_id",
+    "candidate_id",
+    "information_group",
+    "base_signal_family",
+    "role",
+    "base_random_stream_id",
+    "alias_of_candidate_id",
+    "observation_variant_id",
+    "measurement_noise_stream_id",
+    "null_noise_stream_id",
+    "standardization_id",
+    "role_standardization_center",
+    "role_standardization_scale",
+    "expression_type",
+    "direction",
+    "effect_scale_label",
+    "effect_curve_id",
+    "w_effect_id",
+    "mirror_sign",
+    "beta_id",
+    "beta_total",
+    "beta_rank",
+    "w_rank",
+    "analytic_truth_proof",
+    "rho",
+    "noise_scale",
+    "return_inclusion",
+    "marginal_predictive_truth",
+)
+KNOWN_TRUTH_DGP_EFFECT_TRACE_COLUMNS_V1 = (
+    "candidate_id",
+    "symbol",
+    "decision_time",
+    "price_time",
+    "lag_minutes",
+    "signal_value",
+    "effect_curve_id",
+    "beta_total",
+    "beta_rank",
+    "effect_coefficient",
+    "mirror_sign",
+    "log_return_contribution",
+)
+KNOWN_TRUTH_DGP_ALLOWED_FAULT_KINDS_V1 = (
+    "drop_signal_row",
+    "nan_signal_value",
+    "shift_signal_time",
+    "drop_market_row",
+    "nonpositive_volume",
+)
+KNOWN_TRUTH_DGP_ALLOWED_VARIANT_INPUT_TYPES_V1 = (
+    "base_signal",
+    "direct_candidate",
+)
+KNOWN_TRUTH_DGP_ALLOWED_SIGNAL_STANDARDIZATIONS_V1 = (
+    KNOWN_TRUTH_DGP_STANDARDIZATION_V1,
+    KNOWN_TRUTH_DGP_RANK_STANDARDIZATION_V1,
+)
+
+
+@dataclass(frozen=True)
+class KnownTruthDgpSignalStreamV1:
+    """Executable numerical parameters for one registered signal/noise stream.
+
+    The stream registry remains authoritative for the stream kind, random
+    address group and R/T identities.  This record supplies only the
+    pre-frozen numerical values used by the vertical slice.  Its state is
+    standardized by the supplied affine parameters before a role formula is
+    applied; it never contains truth, return or discovery output.
+    """
+
+    stream_id: str
+    process_family: str
+    process_family_id: str
+    parameter_identity: str
+    initialization_identity: str
+    process_parameters: tuple[float, ...]
+    initial_state: tuple[float, ...]
+    standardization_id: str
+    standardization_center: tuple[float, ...]
+    standardization_scale: tuple[float, ...]
+    correlation_matrix: tuple[tuple[float, ...], ...]
+    correlation_decomposition: tuple[tuple[float, ...], ...]
+
+
+@dataclass(frozen=True)
+class KnownTruthDgpObservationVariantV1:
+    """A fully registered, deterministic observation transformation.
+
+    The first vertical slice executes the identity operator only.  Keeping
+    its input type, input key, window, weights and availability identity
+    explicit prevents a later caller from silently inventing a resampling
+    rule from a timeframe name.
+    """
+
+    variant_id: str
+    role: str
+    input_type: str
+    input_key: str
+    output_timeframe: str
+    operator_id: str
+    input_window: tuple[int, ...]
+    weights: tuple[float, ...]
+    label_alignment: str
+    availability_rule: str
+
+
+@dataclass(frozen=True)
+class KnownTruthDgpFaultInjectionV1:
+    """A pre-registered, deterministic fixture fault.
+
+    Faults are applied only after the normal in-memory records are built and
+    are validated before an artifact can be returned.  A fault therefore
+    exercises fail-closed validation and never returns a bad L0 input.
+    """
+
+    fault_id: str
+    fault_kind: str
+    period_index: int
+    target_symbol: str
+    target_candidate_id: str | None = None
+
+
+@dataclass(frozen=True)
+class KnownTruthDgpEffectCurveV1:
+    """One of the three blueprint-fixed continuous cumulative curves."""
+
+    curve_id: str
+    family_id: str
+    parameters: tuple[float, ...]
+    normalization_identity: str
+
+
+@dataclass(frozen=True)
+class KnownTruthDgpVerticalSpecificationV1:
+    """Complete input for the raw market/signal vertical slice.
+
+    This is a generation contract, not the full 1,100-replicate simulation
+    manifest.  It requires a full 159-candidate scenario and preserves the
+    frozen twenty-asset registry while allowing the approved two-asset
+    fixture projection.  It contains no evaluator or L0--L4 call.
+    """
+
+    schema_version: str
+    generation_batch: str
+    market: MarketInputSpineSpecificationV1
+    scenario: KnownTruthScenarioV1
+    signal_streams: tuple[KnownTruthDgpSignalStreamV1, ...]
+    observation_variants: tuple[KnownTruthDgpObservationVariantV1, ...]
+    effect_curves: tuple[KnownTruthDgpEffectCurveV1, ...]
+    execution_delay_minutes: int
+    faults: tuple[KnownTruthDgpFaultInjectionV1, ...]
+    lifecycle: str
+    authority: str
+    may_be_used_for: str
+    must_not_be_used_for: str
+    archive_condition: str
+
+
+@dataclass(frozen=True)
+class KnownTruthDgpTruthSidecarV1:
+    """Truth-only assignment and effect traces kept outside raw records."""
+
+    assignment_records: pd.DataFrame
+    effect_trace: pd.DataFrame
+
+
+@dataclass(frozen=True)
+class KnownTruthDgpVerticalArtifactsV1:
+    """Raw market and signal records plus a separately held truth sidecar."""
+
+    market_records: pd.DataFrame
+    signal_records: pd.DataFrame
+    truth_sidecar: KnownTruthDgpTruthSidecarV1
+    schema_version: str
+    generation_batch: str
+    asset_symbols: tuple[str, ...]
+    start_time: pd.Timestamp
+    periods: int
+
+
+def _known_truth_dgp_curve_cdf_v1(curve_id: str, elapsed_hours: float) -> float:
+    if elapsed_hours < 0.0 or not math.isfinite(elapsed_hours):
+        raise ValueError("effect curve elapsed time must be finite and non-negative")
+    if curve_id == "fast":
+        tau_hours = -4.0 / math.log(0.20)
+        return 1.0 - math.exp(-elapsed_hours / tau_hours)
+    if curve_id == "delayed":
+        x = elapsed_hours / 4.0
+        return 1.0 - math.exp(-x) * (1.0 + x + 0.5 * x * x)
+    if curve_id == "persistent":
+        return 1.0 - 2.0 ** (-elapsed_hours / 12.0)
+    raise ValueError(f"unknown known-truth effect curve: {curve_id}")
+
+
+def _known_truth_dgp_effect_weight_v1(curve_id: str, lag_minutes: int) -> float:
+    if isinstance(lag_minutes, bool) or not isinstance(lag_minutes, Integral):
+        raise TypeError("effect lag must be an integer")
+    if lag_minutes < 1:
+        raise ValueError("effect lag must start at one minute after the gate")
+    weight = _known_truth_dgp_curve_cdf_v1(curve_id, float(lag_minutes) / 60.0) - _known_truth_dgp_curve_cdf_v1(
+        curve_id, float(lag_minutes - 1) / 60.0
+    )
+    if not math.isfinite(weight) or weight < -1e-15:
+        raise ValueError("effect curve produced an invalid minute weight")
+    return max(0.0, float(weight))
+
+
+def _known_truth_dgp_expected_curve_v1(curve_id: str) -> tuple[str, tuple[float, ...]]:
+    if curve_id == "fast":
+        return "exponential_cdf_v1", (-4.0 / math.log(0.20),)
+    if curve_id == "delayed":
+        return "gamma_shape_3_cdf_v1", (4.0,)
+    if curve_id == "persistent":
+        return "exponential_cdf_v1", (12.0 / math.log(2.0),)
+    raise ValueError(f"unknown known-truth effect curve: {curve_id}")
+
+
+def _validate_known_truth_dgp_scenario_v1(
+    scenario: object,
+    *,
+    candidate_ids: tuple[str, ...],
+) -> KnownTruthScenarioV1:
+    if not isinstance(scenario, KnownTruthScenarioV1):
+        raise TypeError("vertical scenario must be KnownTruthScenarioV1")
+    _known_truth_text(scenario.scenario_id, label="vertical scenario_id")
+    if scenario.truth_role not in {
+        *KNOWN_TRUTH_CORE_SCENARIO_ROLES_V1,
+        *KNOWN_TRUTH_OPTIONAL_SCENARIO_ROLES_V1,
+    }:
+        raise ValueError("vertical scenario truth_role is not registered")
+    expected_expression = (
+        KNOWN_TRUTH_NULL_EXPRESSION_V1
+        if scenario.truth_role == "all_null"
+        else KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1
+        if scenario.truth_role == "rank_only"
+        else KNOWN_TRUTH_SCALAR_EXPRESSION_V1
+    )
+    if scenario.expression_id != expected_expression:
+        raise ValueError("vertical scenario expression does not match its truth role")
+    groups = _known_truth_tuple(scenario.information_groups, label="vertical information_groups")
+    if not groups or len(set(groups)) != len(groups) or any(
+        not isinstance(group, str) or not group.strip() for group in groups
+    ):
+        raise ValueError("vertical information groups must be unique non-empty strings")
+    assignments = _known_truth_tuple(
+        scenario.truth_assignments,
+        label="vertical truth_assignments",
+    )
+    if len(assignments) != len(candidate_ids):
+        raise ValueError("vertical scenario must cover all 159 registry candidates")
+    candidate_set = set(candidate_ids)
+    assignment_ids: list[str] = []
+    for assignment in assignments:
+        _validate_known_truth_assignment_v1(
+            assignment,
+            candidate_ids=candidate_set,
+            information_groups=set(groups),
+            scenario_role=scenario.truth_role,
+            scenario_expression_id=expected_expression,
+        )
+        assignment_ids.append(assignment.candidate_id)
+    if set(assignment_ids) != candidate_set or len(assignment_ids) != len(candidate_set):
+        raise ValueError("vertical assignments must contain every formal candidate exactly once")
+    role_set = {assignment.role for assignment in assignments}
+    if scenario.truth_role == "direct_sparse" and "direct" not in role_set:
+        raise ValueError("direct_sparse vertical scenario requires a direct candidate")
+    if scenario.truth_role == "proxy_and_alias" and not {"proxy", "alias"}.issubset(role_set):
+        raise ValueError("proxy_and_alias vertical scenario requires proxy and alias")
+    if scenario.truth_role == "rank_only" and "direct" not in role_set:
+        raise ValueError("rank_only vertical scenario requires a direct candidate")
+
+    assignment_by_id = {assignment.candidate_id: assignment for assignment in assignments}
+    direct_by_group: dict[str, list[KnownTruthSignalAssignmentV1]] = {}
+    for assignment in assignments:
+        if assignment.role == "direct":
+            direct_by_group.setdefault(assignment.information_group, []).append(assignment)
+    occupied_signal_streams = {
+        stream_id
+        for assignment in assignments
+        for stream_id in (
+            assignment.base_random_stream_id,
+            assignment.measurement_noise_stream_id,
+        )
+        if stream_id is not None
+    }
+    for assignment in assignments:
+        if assignment.role == "alias":
+            target = assignment_by_id.get(assignment.alias_of_candidate_id)
+            if target is None or target.role != "direct":
+                raise ValueError("vertical alias must point directly to a direct candidate")
+            if (
+                target.information_group != assignment.information_group
+                or target.base_signal_family != assignment.base_signal_family
+                or target.base_random_stream_id != assignment.base_random_stream_id
+            ):
+                raise ValueError("vertical alias must preserve its direct group's identity")
+        if assignment.role in {"proxy", "near_alias"}:
+            direct = direct_by_group.get(assignment.information_group, [])
+            if not direct or any(
+                item.base_signal_family != assignment.base_signal_family
+                or item.base_random_stream_id != assignment.base_random_stream_id
+                for item in direct
+            ):
+                raise ValueError("vertical proxy/near_alias must share a direct base identity")
+        if assignment.role == "null" and assignment.null_noise_stream_id in occupied_signal_streams:
+            raise ValueError("vertical null noise stream must be independent")
+    if scenario.truth_role == "all_null" and role_set != {"null"}:
+        raise ValueError("all_null vertical scenario may contain only null assignments")
+    return scenario
+
+
+def _validate_known_truth_dgp_signal_stream_v1(
+    stream: object,
+    *,
+    registry: RandomStreamSpecificationRegistryV1,
+    size: int,
+    label: str,
+) -> tuple[RandomStreamSpecificationV1, np.ndarray]:
+    if not isinstance(stream, KnownTruthDgpSignalStreamV1):
+        raise TypeError(f"{label} must be KnownTruthDgpSignalStreamV1")
+    _validate_random_stream_text_v1(stream.stream_id, label=f"{label}.stream_id")
+    registered = next((row for row in registry.streams if row.stream_id == stream.stream_id), None)
+    if registered is None or registered.stream_kind not in {"base", "measurement", "null"}:
+        raise ValueError(f"{label}.stream_id must be a registered signal/noise stream")
+    if registered.innovation_distribution_id != MARKET_INPUT_SPINE_INNOVATION_DISTRIBUTION_V1:
+        raise ValueError(f"{label} has an unsupported innovation distribution")
+    if registered.asset_symbols != registry.asset_symbols:
+        raise ValueError(f"{label} asset order does not match the frozen registry")
+    if stream.process_family not in MARKET_INPUT_SPINE_ALLOWED_TIME_PROCESSES_V1:
+        raise ValueError(f"{label}.process_family is not an allowed v1 process")
+    process = registered.time_process
+    for field_name in (
+        "process_family_id",
+        "parameter_identity",
+        "initialization_identity",
+    ):
+        if getattr(stream, field_name) != getattr(process, {
+            "process_family_id": "family_id",
+            "parameter_identity": "parameter_identity",
+            "initialization_identity": "initialization_identity",
+        }[field_name]):
+            raise ValueError(f"{label}.{field_name} does not match the registry")
+    if process.native_frequency != MARKET_INPUT_SPINE_NATIVE_FREQUENCY_V1:
+        raise ValueError(f"{label} native frequency must be 1min")
+    if process.time_order_identity != MARKET_INPUT_SPINE_TIME_ORDER_V1:
+        raise ValueError(f"{label} time order must be UTC minute order")
+    if type(stream.process_parameters) is not tuple:
+        raise ValueError(f"{label}.process_parameters must be immutable")
+    parameters = np.asarray(stream.process_parameters, dtype=np.float64)
+    if not np.isfinite(parameters).all():
+        raise ValueError(f"{label}.process_parameters must be finite")
+    if stream.process_family == "iid" and len(parameters) != 0:
+        raise ValueError(f"{label} IID process cannot have parameters")
+    if stream.process_family == "ar1" and (
+        len(parameters) != 1 or not -1.0 < float(parameters[0]) < 1.0
+    ):
+        raise ValueError(f"{label} AR1 requires phi in (-1, 1)")
+    if stream.process_family == "ma" and (
+        len(parameters) < 1
+        or not np.isclose(np.sum(parameters**2), 1.0, rtol=0.0, atol=1e-12)
+    ):
+        raise ValueError(f"{label} MA coefficients must have unit squared norm")
+    if type(stream.initial_state) is not tuple or len(stream.initial_state) != size:
+        raise ValueError(f"{label}.initial_state must match the asset count")
+    initial_state = np.asarray(stream.initial_state, dtype=np.float64)
+    if not np.isfinite(initial_state).all():
+        raise ValueError(f"{label}.initial_state must be finite")
+    if stream.process_family in {"iid", "ma"} and not np.allclose(
+        initial_state, 0.0, rtol=0.0, atol=0.0
+    ):
+        raise ValueError(f"{label} IID/MA initial state must be zero")
+    if stream.standardization_id != KNOWN_TRUTH_DGP_STANDARDIZATION_V1:
+        raise ValueError(f"{label}.standardization_id is not the frozen affine rule")
+    if type(stream.standardization_center) is not tuple or len(stream.standardization_center) != size:
+        raise ValueError(f"{label}.standardization_center must match the asset count")
+    if type(stream.standardization_scale) is not tuple or len(stream.standardization_scale) != size:
+        raise ValueError(f"{label}.standardization_scale must match the asset count")
+    center = np.asarray(stream.standardization_center, dtype=np.float64)
+    scale = np.asarray(stream.standardization_scale, dtype=np.float64)
+    if not np.isfinite(center).all() or not np.isfinite(scale).all() or (scale <= 0.0).any():
+        raise ValueError(f"{label} standardization parameters must be finite with positive scales")
+    _, decomposition = _validate_market_spine_r_and_decomposition_v1(
+        stream,
+        size=size,
+        label=label,
+    )
+    return registered, decomposition
+
+
+def _validate_known_truth_dgp_variant_v1(
+    variant: object,
+    *,
+    label: str,
+) -> KnownTruthDgpObservationVariantV1:
+    if not isinstance(variant, KnownTruthDgpObservationVariantV1):
+        raise TypeError(f"{label} must be KnownTruthDgpObservationVariantV1")
+    _validate_random_stream_text_v1(variant.variant_id, label=f"{label}.variant_id")
+    if variant.role not in ("direct", "proxy", "alias", "near_alias"):
+        raise ValueError(f"{label}.role is not a registered non-null role")
+    if variant.input_type not in KNOWN_TRUTH_DGP_ALLOWED_VARIANT_INPUT_TYPES_V1:
+        raise ValueError(f"{label}.input_type is not registered")
+    _validate_random_stream_text_v1(variant.input_key, label=f"{label}.input_key")
+    if variant.output_timeframe != KNOWN_TRUTH_DGP_VARIANT_TIMEFRAME_V1:
+        raise ValueError(f"{label}.output_timeframe must be 1m in this vertical slice")
+    if variant.operator_id != KNOWN_TRUTH_DGP_VARIANT_OPERATOR_IDENTITY_V1:
+        raise ValueError(f"{label}.operator_id is not the frozen identity operator")
+    if variant.input_window != (0,) or variant.weights != (1.0,):
+        raise ValueError(f"{label} identity variant must use window (0,) and weight (1.0,)")
+    if variant.label_alignment != KNOWN_TRUTH_DGP_VARIANT_LABEL_ALIGNMENT_V1:
+        raise ValueError(f"{label}.label_alignment is not frozen")
+    if variant.availability_rule != KNOWN_TRUTH_DGP_VARIANT_AVAILABILITY_RULE_V1:
+        raise ValueError(f"{label}.availability_rule is not frozen")
+    return variant
+
+
+def _validate_known_truth_dgp_effect_curves_v1(
+    curves: object,
+) -> dict[str, KnownTruthDgpEffectCurveV1]:
+    curve_rows = _known_truth_tuple(curves, label="effect_curves")
+    if len(curve_rows) != len(KNOWN_TRUTH_EFFECT_CURVES_V1):
+        raise ValueError("vertical effect curves must cover fast, delayed, and persistent exactly")
+    by_id: dict[str, KnownTruthDgpEffectCurveV1] = {}
+    for index, curve in enumerate(curve_rows):
+        if not isinstance(curve, KnownTruthDgpEffectCurveV1):
+            raise TypeError(f"effect_curves[{index}] must be KnownTruthDgpEffectCurveV1")
+        if curve.curve_id in by_id or curve.curve_id not in KNOWN_TRUTH_EFFECT_CURVES_V1:
+            raise ValueError("vertical effect curve identities are duplicated or unknown")
+        expected_family, expected_parameters = _known_truth_dgp_expected_curve_v1(curve.curve_id)
+        if curve.family_id != expected_family or len(curve.parameters) != 1:
+            raise ValueError("vertical effect curve family/parameter identity is not frozen")
+        if not np.isfinite(np.asarray(curve.parameters, dtype=np.float64)).all() or not np.isclose(
+            float(curve.parameters[0]), float(expected_parameters[0]), rtol=0.0, atol=1e-15
+        ):
+            raise ValueError("vertical effect curve parameters do not match the blueprint formula")
+        if curve.normalization_identity != "adjacent_cdf_difference_infinite_mass_v1":
+            raise ValueError("vertical effect curve normalization is not frozen")
+        by_id[curve.curve_id] = curve
+    if set(by_id) != set(KNOWN_TRUTH_EFFECT_CURVES_V1):
+        raise ValueError("vertical effect curves are incomplete")
+    return by_id
+
+
+def validate_known_truth_dgp_vertical_specification_v1(
+    specification: KnownTruthDgpVerticalSpecificationV1,
+    registry: RandomStreamSpecificationRegistryV1,
+) -> KnownTruthDgpVerticalSpecificationV1:
+    """Validate the complete raw market/signal vertical-slice contract."""
+    if not isinstance(specification, KnownTruthDgpVerticalSpecificationV1):
+        raise TypeError("specification must be KnownTruthDgpVerticalSpecificationV1")
+    if specification.schema_version != KNOWN_TRUTH_DGP_VERTICAL_SCHEMA_V1:
+        raise ValueError("vertical schema_version is not the frozen v1 version")
+    for field_name, expected in (
+        ("lifecycle", KNOWN_TRUTH_DGP_VERTICAL_LIFECYCLE_V1),
+        ("authority", KNOWN_TRUTH_DGP_VERTICAL_AUTHORITY_V1),
+        ("may_be_used_for", KNOWN_TRUTH_DGP_VERTICAL_MAY_BE_USED_FOR_V1),
+        ("must_not_be_used_for", KNOWN_TRUTH_DGP_VERTICAL_MUST_NOT_BE_USED_FOR_V1),
+        ("archive_condition", KNOWN_TRUTH_DGP_VERTICAL_ARCHIVE_CONDITION_V1),
+    ):
+        if getattr(specification, field_name) != expected:
+            raise ValueError(f"vertical {field_name} is outside the frozen lifecycle boundary")
+    _validate_random_stream_text_v1(specification.generation_batch, label="vertical generation_batch")
+    validate_random_stream_specification_v1(registry)
+    validate_market_input_spine_specification_v1(specification.market, registry)
+    market = specification.market
+    if len(market.asset_symbols) < 2:
+        raise ValueError("vertical slice requires at least two assets")
+    if market.generation_batch != specification.generation_batch:
+        raise ValueError("market and vertical generation_batch identities must match")
+    scenario = _validate_known_truth_dgp_scenario_v1(
+        specification.scenario,
+        candidate_ids=KNOWN_TRUTH_REGISTRY_CANDIDATE_IDS_V1,
+    )
+    assignments = scenario.truth_assignments
+    assignment_by_id = {assignment.candidate_id: assignment for assignment in assignments}
+    required_stream_ids = {
+        stream_id
+        for assignment in assignments
+        for stream_id in (
+            assignment.base_random_stream_id,
+            assignment.measurement_noise_stream_id,
+            assignment.null_noise_stream_id,
+        )
+        if stream_id is not None
+    }
+    stream_rows = _known_truth_tuple(specification.signal_streams, label="signal_streams")
+    required_stream_kinds: dict[str, str] = {}
+    for assignment in assignments:
+        for stream_id, expected_kind in (
+            (assignment.base_random_stream_id, "base"),
+            (assignment.measurement_noise_stream_id, "measurement"),
+            (assignment.null_noise_stream_id, "null"),
+        ):
+            if stream_id is None:
+                continue
+            previous_kind = required_stream_kinds.setdefault(stream_id, expected_kind)
+            if previous_kind != expected_kind:
+                raise ValueError(
+                    "vertical stream identity is used for incompatible signal kinds: "
+                    + stream_id
+                )
+    required_stream_groups: dict[str, str] = {}
+    for assignment in assignments:
+        if assignment.role == "null":
+            continue
+        information_group = assignment.information_group
+        if not isinstance(information_group, str) or not information_group.strip():
+            raise ValueError("vertical non-null assignment must bind an information group")
+        for stream_id in (
+            assignment.base_random_stream_id,
+            assignment.measurement_noise_stream_id,
+        ):
+            if stream_id is None:
+                continue
+            previous_group = required_stream_groups.setdefault(stream_id, information_group)
+            if previous_group != information_group:
+                raise ValueError(
+                    "vertical signal stream is bound to multiple information groups: "
+                    + stream_id
+                )
+    if {getattr(stream, "stream_id", None) for stream in stream_rows} != required_stream_ids:
+        raise ValueError("vertical signal_streams must exactly cover the scenario's required streams")
+    if len(stream_rows) != len(required_stream_ids):
+        raise ValueError("vertical signal_streams contain duplicate identities")
+    for index, stream in enumerate(stream_rows):
+        registered, _ = _validate_known_truth_dgp_signal_stream_v1(
+            stream,
+            registry=registry,
+            size=len(market.asset_symbols),
+            label=f"signal_streams[{index}]",
+        )
+        if registered.stream_id not in required_stream_ids:
+            raise ValueError("vertical signal stream is not referenced by the scenario")
+        if registered.stream_kind != required_stream_kinds[registered.stream_id]:
+            raise ValueError(
+                "vertical signal stream kind does not match its scenario binding: "
+                + registered.stream_id
+            )
+        expected_group = required_stream_groups.get(registered.stream_id)
+        if expected_group is not None and registered.information_group_id != expected_group:
+            raise ValueError(
+                "vertical signal stream has the wrong information group: "
+                + registered.stream_id
+            )
+    variants = _known_truth_tuple(specification.observation_variants, label="observation_variants")
+    variant_by_id: dict[str, KnownTruthDgpObservationVariantV1] = {}
+    for index, variant in enumerate(variants):
+        checked = _validate_known_truth_dgp_variant_v1(variant, label=f"observation_variants[{index}]")
+        if checked.variant_id in variant_by_id:
+            raise ValueError("vertical observation variant identity is duplicated")
+        variant_by_id[checked.variant_id] = checked
+    required_variant_ids = {
+        assignment.observation_variant_id
+        for assignment in assignments
+        if assignment.observation_variant_id is not None
+    }
+    if set(variant_by_id) != required_variant_ids:
+        raise ValueError("vertical observation_variants must exactly cover non-null assignments")
+    stream_ids = set(required_stream_ids)
+    for assignment in assignments:
+        if assignment.standardization_id not in KNOWN_TRUTH_DGP_ALLOWED_SIGNAL_STANDARDIZATIONS_V1:
+            raise ValueError("vertical assignment standardization is not registered")
+        if assignment.standardization_id == KNOWN_TRUTH_DGP_STANDARDIZATION_V1:
+            if (
+                assignment.role_standardization_center is None
+                or assignment.role_standardization_scale is None
+            ):
+                raise ValueError(
+                    "scalar vertical assignment requires explicit role standardization parameters"
+                )
+            _known_truth_decimal(
+                assignment.role_standardization_center,
+                label="role_standardization_center",
+            )
+            role_scale = _known_truth_decimal(
+                assignment.role_standardization_scale,
+                label="role_standardization_scale",
+            )
+            if role_scale <= 0:
+                raise ValueError("role standardization scale must be positive")
+        elif (
+            assignment.role_standardization_center is not None
+            or assignment.role_standardization_scale is not None
+        ):
+            raise ValueError("rank-only vertical assignments cannot bind affine role parameters")
+        if assignment.role == "null":
+            # Null observations are standardized noise before an optional
+            # rank-only projection; they do not need the scalar/rank role
+            # identity used by predictive observations.
+            if assignment.null_noise_stream_id not in stream_ids:
+                raise ValueError("vertical null assignment references an unregistered stream")
+        elif scenario.expression_id == KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1:
+            if assignment.standardization_id != KNOWN_TRUTH_DGP_RANK_STANDARDIZATION_V1:
+                raise ValueError("rank-only vertical assignment must use rank standardization")
+        elif assignment.standardization_id != KNOWN_TRUTH_DGP_STANDARDIZATION_V1:
+            raise ValueError("scalar vertical assignment must use affine standardization")
+        if assignment.role == "null":
+            continue
+        variant = variant_by_id[assignment.observation_variant_id]
+        if variant.role != assignment.role:
+            raise ValueError("vertical observation variant role does not match assignment role")
+        if assignment.role in {"direct", "proxy", "near_alias"}:
+            if variant.input_type != "base_signal" or variant.input_key != assignment.information_group:
+                raise ValueError("vertical base observation variant does not bind its information group")
+        else:
+            if variant.input_type != "direct_candidate" or variant.input_key != assignment.alias_of_candidate_id:
+                raise ValueError("vertical alias observation variant does not bind alias target")
+        # The same explicit standardization identity is required for all
+        # roles, including null, but null has no observation variant.
+    curve_by_id = _validate_known_truth_dgp_effect_curves_v1(specification.effect_curves)
+    if isinstance(specification.execution_delay_minutes, bool) or specification.execution_delay_minutes != 4:
+        raise ValueError("vertical execution delay must be the frozen four minutes")
+    faults = _known_truth_tuple(specification.faults, label="faults")
+    fault_ids: set[str] = set()
+    for index, fault in enumerate(faults):
+        if not isinstance(fault, KnownTruthDgpFaultInjectionV1):
+            raise TypeError(f"faults[{index}] must be KnownTruthDgpFaultInjectionV1")
+        _validate_random_stream_text_v1(fault.fault_id, label=f"faults[{index}].fault_id")
+        if fault.fault_id in fault_ids:
+            raise ValueError("vertical fault identity is duplicated")
+        fault_ids.add(fault.fault_id)
+        if fault.fault_kind not in KNOWN_TRUTH_DGP_ALLOWED_FAULT_KINDS_V1:
+            raise ValueError("vertical fault kind is not registered")
+        if isinstance(fault.period_index, bool) or not isinstance(fault.period_index, Integral):
+            raise ValueError("vertical fault period_index must be an integer")
+        if not 0 <= int(fault.period_index) < market.periods:
+            raise ValueError("vertical fault period_index is outside the generated period range")
+        if fault.target_symbol not in market.asset_symbols:
+            raise ValueError("vertical fault symbol is outside the generated asset projection")
+        signal_fault = fault.fault_kind in {
+            "drop_signal_row",
+            "nan_signal_value",
+            "shift_signal_time",
+        }
+        if signal_fault:
+            if fault.target_candidate_id not in assignment_by_id:
+                raise ValueError("vertical signal fault must name a registered candidate")
+        elif fault.target_candidate_id is not None:
+            raise ValueError("vertical market fault cannot name a signal candidate")
+    if set(curve_by_id) != set(KNOWN_TRUTH_EFFECT_CURVES_V1):
+        raise ValueError("vertical effect curve coverage is incomplete")
+    return specification
+
+
+def _known_truth_dgp_standard_innovations_v1(
+    *,
+    stream: object,
+    registered: RandomStreamSpecificationV1,
+    registry: RandomStreamSpecificationRegistryV1,
+    specification: KnownTruthDgpVerticalSpecificationV1,
+    injected_standard_innovations: Mapping[str, object] | None,
+) -> np.ndarray:
+    total_steps = registered.time_process.burn_in_steps + specification.market.periods
+    size = len(specification.market.asset_symbols)
+    if injected_standard_innovations is not None:
+        expected_ids = {
+            specification.market.price.stream_id,
+            specification.market.volume.stream_id,
+            *(item.stream_id for item in specification.signal_streams),
+        }
+        if set(injected_standard_innovations) != expected_ids:
+            raise ValueError("injected innovations must cover exactly every vertical stream id")
+        try:
+            values = np.asarray(injected_standard_innovations[registered.stream_id], dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"injected {registered.stream_id} innovations are not numeric") from exc
+        if values.shape != (total_steps, size) or not np.isfinite(values).all():
+            raise ValueError(f"injected {registered.stream_id} innovations have wrong shape or values")
+        return values.copy()
+    output = np.empty((total_steps, size), dtype=np.float64)
+    global_positions = [registry.asset_symbols.index(symbol) for symbol in specification.market.asset_symbols]
+    for time_index in range(total_steps):
+        for local_index in specification.market.asset_processing_order:
+            output[time_index, local_index] = _market_input_spine_standard_normal_from_address_v1(
+                derive_deterministic_random_address_v1(
+                    specification.market.seed_namespace,
+                    specification.market.phase,
+                    registered.stream_kind,
+                    registered.random_address_group_id,
+                    time_index,
+                    global_positions[local_index],
+                )
+            )
+    return output
+
+
+def _known_truth_dgp_apply_identity_variant_v1(
+    values: np.ndarray,
+    variant: KnownTruthDgpObservationVariantV1,
+) -> np.ndarray:
+    if variant.operator_id != KNOWN_TRUTH_DGP_VARIANT_OPERATOR_IDENTITY_V1:
+        raise ValueError("only the frozen identity observation operator is executable in v1")
+    return values.copy()
+
+
+def _known_truth_dgp_apply_role_standardization_v1(
+    values: np.ndarray,
+    assignment: KnownTruthSignalAssignmentV1,
+) -> np.ndarray:
+    """Apply the candidate-map standardization after its role expression.
+
+    Stream-level standardization creates the registered base/noise states;
+    this second, explicit step is the candidate observation standardization
+    required by the blueprint.  Rank-only candidates intentionally defer to
+    the formal cross-sectional rank projection below.
+    """
+    if assignment.standardization_id == KNOWN_TRUTH_DGP_STANDARDIZATION_V1:
+        center = float(assignment.role_standardization_center)
+        scale = float(assignment.role_standardization_scale)
+        return (values - center) / scale
+    if assignment.standardization_id == KNOWN_TRUTH_DGP_RANK_STANDARDIZATION_V1:
+        return values.copy()
+    raise ValueError("vertical role standardization identity is not registered")
+
+
+def _known_truth_dgp_apply_faults_v1(
+    market_records: pd.DataFrame,
+    signal_records: pd.DataFrame,
+    faults: tuple[KnownTruthDgpFaultInjectionV1, ...],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    market = market_records.copy(deep=True)
+    signals = signal_records.copy(deep=True)
+    for fault in faults:
+        if fault.fault_kind == "drop_market_row":
+            # The generated frame carries the integer period only through the
+            # ordered minute timestamp; select it without adding a hidden field.
+            timestamps = sorted(market.loc[market["symbol"] == fault.target_symbol, "open_time"].tolist())
+            if fault.period_index >= len(timestamps):
+                raise ValueError("fault target market period cannot be resolved")
+            signals_time = timestamps[int(fault.period_index)]
+            market = market.loc[~(
+                (market["symbol"] == fault.target_symbol) & (market["open_time"] == signals_time)
+            )].copy()
+        elif fault.fault_kind == "nonpositive_volume":
+            timestamps = sorted(
+                market.loc[market["symbol"] == fault.target_symbol, "open_time"].tolist()
+            )
+            if fault.period_index >= len(timestamps):
+                raise ValueError("fault target volume period cannot be resolved")
+            target_time = timestamps[int(fault.period_index)]
+            volume_mask = (
+                (market["symbol"] == fault.target_symbol)
+                & (market["open_time"] == target_time)
+            )
+            market.loc[volume_mask, "volume"] = 0.0
+        else:
+            timestamps = sorted(
+                signals.loc[
+                    (signals["symbol"] == fault.target_symbol)
+                    & (signals["candidate_id"] == fault.target_candidate_id),
+                    "decision_time",
+                ].tolist()
+            )
+            if fault.period_index >= len(timestamps):
+                raise ValueError("fault target signal period cannot be resolved")
+            target_time = timestamps[int(fault.period_index)]
+            mask = (
+                (signals["symbol"] == fault.target_symbol)
+                & (signals["candidate_id"] == fault.target_candidate_id)
+                & (signals["decision_time"] == target_time)
+            )
+            if fault.fault_kind == "drop_signal_row":
+                signals = signals.loc[~mask].copy()
+            elif fault.fault_kind == "nan_signal_value":
+                signals.loc[mask, "signal_value"] = np.nan
+            elif fault.fault_kind == "shift_signal_time":
+                signals.loc[mask, "decision_time"] = pd.Timestamp(target_time) + pd.Timedelta(minutes=1)
+    return market, signals
+
+
+def _validate_known_truth_dgp_outputs_v1(
+    *,
+    specification: KnownTruthDgpVerticalSpecificationV1,
+    market_records: pd.DataFrame,
+    signal_records: pd.DataFrame,
+) -> None:
+    market = market_records
+    signals = signal_records
+    expected_market_columns = MARKET_INPUT_SPINE_RECORD_COLUMNS_V1
+    if tuple(market.columns) != expected_market_columns:
+        raise ValueError("vertical market records do not match the formal KLINE schema")
+    expected_market_rows = specification.market.periods * len(specification.market.asset_symbols)
+    if len(market) != expected_market_rows:
+        raise ValueError("vertical market records have an incomplete asset/time grid")
+    if market[["symbol", "open_time"]].duplicated().any():
+        raise ValueError("vertical market records contain duplicate native identities")
+    if not np.isfinite(market[["open", "high", "low", "close", "volume"]].to_numpy(dtype=float)).all():
+        raise ValueError("vertical market records contain non-finite values")
+    if (market["volume"].to_numpy(dtype=float) <= 0.0).any():
+        raise ValueError("vertical market records contain non-positive volume")
+    if set(market["symbol"]) != set(specification.market.asset_symbols):
+        raise ValueError("vertical market records have the wrong symbols")
+    expected_open_times = {
+        specification.market.start_time + pd.Timedelta(minutes=period_index)
+        for period_index in range(specification.market.periods)
+    }
+    for symbol in specification.market.asset_symbols:
+        symbol_rows = market.loc[market["symbol"] == symbol, list(KLINE_COLUMNS)]
+        normalized = normalize_klines(symbol_rows, "1m")
+        if len(normalized) != specification.market.periods:
+            raise ValueError(f"vertical market records have an incomplete sequence for {symbol}")
+        identity_rows = market.loc[
+            market["symbol"] == symbol,
+            list(MARKET_INPUT_SPINE_RECORD_COLUMNS_V1),
+        ]
+        for record in identity_rows.itertuples(index=False):
+            open_time = pd.Timestamp(record.open_time)
+            expected_close = open_time + pd.Timedelta(minutes=1) - pd.Timedelta(milliseconds=1)
+            expected_payload = {
+                "schema_version": KNOWN_TRUTH_DGP_VERTICAL_SCHEMA_V1,
+                "symbol": symbol,
+                "open_time": open_time.isoformat(),
+                "open": format(float(record.open), ".17g"),
+                "high": format(float(record.high), ".17g"),
+                "low": format(float(record.low), ".17g"),
+                "close": format(float(record.close), ".17g"),
+                "volume": format(float(record.volume), ".17g"),
+                "close_time": pd.Timestamp(record.close_time).isoformat(),
+                "source": record.source,
+                "generation_batch": record.generation_batch,
+                "value_status": record.value_status,
+            }
+            if open_time not in expected_open_times or pd.Timestamp(record.close_time) != expected_close:
+                raise ValueError("vertical market records have unexpected minute timestamps")
+            if record.source != KNOWN_TRUTH_DGP_MARKET_SOURCE_V1:
+                raise ValueError("vertical market records have an unexpected source")
+            if record.generation_batch != specification.generation_batch:
+                raise ValueError("vertical market records have an unexpected generation batch")
+            if record.value_status != MARKET_INPUT_SPINE_VALUE_STATUS_V1:
+                raise ValueError("vertical market records have an unexpected value status")
+            if record.content_identity != _json_content_sha256(expected_payload):
+                raise ValueError("vertical market content identity does not match its record")
+    if tuple(signals.columns) != KNOWN_TRUTH_DGP_SIGNAL_RECORD_COLUMNS_V1:
+        raise ValueError("vertical signal records contain an unexpected or missing field")
+    expected_signal_rows = specification.market.periods * len(specification.market.asset_symbols) * len(
+        KNOWN_TRUTH_REGISTRY_CANDIDATE_IDS_V1
+    )
+    if len(signals) != expected_signal_rows:
+        raise ValueError("vertical signal records do not cover the full 159-candidate grid")
+    if signals[["candidate_id", "symbol", "decision_time"]].duplicated().any():
+        raise ValueError("vertical signal records contain duplicate identities")
+    if set(signals["candidate_id"]) != set(KNOWN_TRUTH_REGISTRY_CANDIDATE_IDS_V1):
+        raise ValueError("vertical signal records do not contain the formal candidate registry")
+    if not np.isfinite(signals["signal_value"].to_numpy(dtype=float)).all():
+        raise ValueError("vertical signal records contain non-finite values")
+    expected_decision_times = {
+        specification.market.start_time + pd.Timedelta(minutes=period_index)
+        for period_index in range(specification.market.periods)
+    }
+    for record in signals.itertuples(index=False):
+        decision = pd.Timestamp(record.decision_time)
+        expected_gate = decision + pd.Timedelta(minutes=4)
+        if decision not in expected_decision_times:
+            raise ValueError("vertical signal records have an unexpected decision time")
+        if record.assumed_execution_gate != expected_gate or record.actual_observed_availability != expected_gate:
+            raise ValueError("vertical signal availability fields do not preserve the four-minute contract")
+        if record.source != KNOWN_TRUTH_DGP_SIGNAL_SOURCE_V1:
+            raise ValueError("vertical signal records have an unexpected source")
+        if record.generation_batch != specification.generation_batch:
+            raise ValueError("vertical signal records have an unexpected generation batch")
+        if record.value_status != KNOWN_TRUTH_DGP_VALUE_STATUS_V1:
+            raise ValueError("vertical signal records have an unexpected value status")
+        payload = {
+            "schema_version": KNOWN_TRUTH_DGP_VERTICAL_SCHEMA_V1,
+            "candidate_id": record.candidate_id,
+            "symbol": record.symbol,
+            "decision_time": decision.isoformat(),
+            "assumed_execution_gate": pd.Timestamp(record.assumed_execution_gate).isoformat(),
+            "actual_observed_availability": pd.Timestamp(record.actual_observed_availability).isoformat(),
+            "signal_value": format(float(record.signal_value), ".17g"),
+            "source": record.source,
+            "generation_batch": record.generation_batch,
+            "value_status": record.value_status,
+        }
+        if record.content_identity != _json_content_sha256(payload):
+            raise ValueError("vertical signal content identity does not match its record")
+
+
+def generate_known_truth_dgp_vertical_slice_v1(
+    specification: KnownTruthDgpVerticalSpecificationV1,
+    registry: RandomStreamSpecificationRegistryV1,
+    *,
+    injected_standard_innovations: Mapping[str, object] | None = None,
+) -> KnownTruthDgpVerticalArtifactsV1:
+    """Generate the isolated market/signal raw vertical slice.
+
+    The function executes only the approved raw-data DGP: deterministic
+    address -> standard-normal innovations -> registered R/T -> role-specific
+    observations -> direct-only minute price recursion -> KLINE and signal
+    records.  Truth and direct-effect traces are returned only as a separate
+    sidecar.  No evaluator, L0--L4 runner, or research result is called.
+    """
+    validate_known_truth_dgp_vertical_specification_v1(specification, registry)
+    market_spec = specification.market
+    size = len(market_spec.asset_symbols)
+    registry_by_id = {stream.stream_id: stream for stream in registry.streams}
+    process_states: dict[str, np.ndarray] = {}
+    for stream in (market_spec.price, market_spec.volume):
+        registered = registry_by_id[stream.stream_id]
+        _, _, decomposition = _validate_market_spine_stream_v1(
+            stream,
+            registry=registry,
+            expected_kind=registered.stream_kind,
+            size=size,
+            label=f"market.{registered.stream_kind}",
+        )
+        standard = _known_truth_dgp_standard_innovations_v1(
+            stream=stream,
+            registered=registered,
+            registry=registry,
+            specification=specification,
+            injected_standard_innovations=injected_standard_innovations,
+        )
+        states = _market_input_spine_apply_time_process_v1(
+            standard @ decomposition.T,
+            stream,
+        )[registered.time_process.burn_in_steps :]
+        process_states[registered.stream_id] = states
+    for stream in specification.signal_streams:
+        registered = registry_by_id[stream.stream_id]
+        _, decomposition = _validate_known_truth_dgp_signal_stream_v1(
+            stream,
+            registry=registry,
+            size=size,
+            label=f"signal.{stream.stream_id}",
+        )
+        standard = _known_truth_dgp_standard_innovations_v1(
+            stream=stream,
+            registered=registered,
+            registry=registry,
+            specification=specification,
+            injected_standard_innovations=injected_standard_innovations,
+        )
+        states = _market_input_spine_apply_time_process_v1(
+            standard @ decomposition.T,
+            stream,  # type: ignore[arg-type]
+        )[registered.time_process.burn_in_steps :]
+        center = np.asarray(stream.standardization_center, dtype=np.float64)
+        scale = np.asarray(stream.standardization_scale, dtype=np.float64)
+        process_states[registered.stream_id] = (states - center) / scale
+
+    assignments = specification.scenario.truth_assignments
+    assignment_by_id = {assignment.candidate_id: assignment for assignment in assignments}
+    variants = {variant.variant_id: variant for variant in specification.observation_variants}
+    candidate_values: dict[str, np.ndarray] = {}
+    ordered_assignments = sorted(
+        (assignment for assignment in assignments if assignment.role != "alias"),
+        key=lambda row: row.candidate_id,
+    )
+    for assignment in ordered_assignments:
+        if assignment.role == "null":
+            null_observation = (
+                float(assignment.noise_scale)
+                * process_states[assignment.null_noise_stream_id]
+            )
+            candidate_values[assignment.candidate_id] = _known_truth_dgp_apply_role_standardization_v1(
+                null_observation,
+                assignment,
+            )
+            continue
+        base = _known_truth_dgp_apply_identity_variant_v1(
+            process_states[assignment.base_random_stream_id],
+            variants[assignment.observation_variant_id],
+        )
+        if assignment.role == "direct":
+            candidate_values[assignment.candidate_id] = _known_truth_dgp_apply_role_standardization_v1(
+                base,
+                assignment,
+            )
+        else:
+            noise = process_states[assignment.measurement_noise_stream_id]
+            observed = (
+                float(assignment.rho) * base
+                + math.sqrt(1.0 - float(assignment.rho) ** 2)
+                * float(assignment.noise_scale)
+                * noise
+            )
+            candidate_values[assignment.candidate_id] = _known_truth_dgp_apply_role_standardization_v1(
+                observed,
+                assignment,
+            )
+    for assignment in sorted(
+        (assignment for assignment in assignments if assignment.role == "alias"),
+        key=lambda row: row.candidate_id,
+    ):
+        target = assignment_by_id[assignment.alias_of_candidate_id]
+        if target.candidate_id not in candidate_values:
+            raise ValueError("vertical alias target was not generated before its alias")
+        alias_source = _known_truth_dgp_apply_identity_variant_v1(
+            candidate_values[target.candidate_id],
+            variants[assignment.observation_variant_id],
+        )
+        alias_observation = float(assignment.direction) * alias_source
+        candidate_values[assignment.candidate_id] = _known_truth_dgp_apply_role_standardization_v1(
+            alias_observation,
+            assignment,
+        )
+    if specification.scenario.expression_id == KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1:
+        for candidate_id, values in list(candidate_values.items()):
+            ranked = np.empty_like(values)
+            for period_index in range(market_spec.periods):
+                ranked[period_index] = rank_standardize_cross_section(
+                    pd.Series(values[period_index], index=market_spec.asset_symbols, dtype=float)
+                ).to_numpy(dtype=np.float64)
+            candidate_values[candidate_id] = ranked
+
+    current_prices = np.asarray(market_spec.price.level_values, dtype=np.float64).copy()
+    base_volumes = np.asarray(market_spec.volume.level_values, dtype=np.float64)
+    direct_assignments = sorted(
+        (assignment for assignment in assignments if assignment.return_inclusion is True),
+        key=lambda row: row.candidate_id,
+    )
+    curve_by_id = {curve.curve_id: curve for curve in specification.effect_curves}
+    market_rows: list[dict[str, object]] = []
+    effect_trace_rows: list[dict[str, object]] = []
+    for period_index in range(market_spec.periods):
+        open_time = market_spec.start_time + pd.Timedelta(minutes=period_index)
+        close_time = open_time + pd.Timedelta(minutes=1) - pd.Timedelta(milliseconds=1)
+        base_log_returns = (
+            process_states[market_spec.price.stream_id][period_index]
+            * float(market_spec.price.state_scale)
+        )
+        log_returns = base_log_returns.copy()
+        for assignment in direct_assignments:
+            curve = curve_by_id[assignment.effect_curve_id]
+            effect_coefficient = (
+                assignment.beta_rank
+                if specification.scenario.expression_id == KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1
+                else assignment.beta_total
+            )
+            if effect_coefficient is None:
+                raise ValueError("vertical direct assignment has no effect coefficient")
+            for decision_index in range(period_index - specification.execution_delay_minutes + 1):
+                if decision_index < 0:
+                    continue
+                lag_minutes = period_index - decision_index - specification.execution_delay_minutes + 1
+                weight = _known_truth_dgp_effect_weight_v1(curve.curve_id, lag_minutes)
+                if weight == 0.0:
+                    continue
+                signal_values = candidate_values[assignment.candidate_id][decision_index]
+                contribution = (
+                    float(effect_coefficient)
+                    * int(assignment.mirror_sign)
+                    * signal_values
+                    * weight
+                )
+                log_returns += contribution
+                for asset_index, symbol in enumerate(market_spec.asset_symbols):
+                    effect_trace_rows.append(
+                        {
+                            "candidate_id": assignment.candidate_id,
+                            "symbol": symbol,
+                            "decision_time": market_spec.start_time + pd.Timedelta(minutes=decision_index),
+                            "price_time": open_time,
+                            "lag_minutes": lag_minutes,
+                            "signal_value": float(signal_values[asset_index]),
+                            "effect_curve_id": curve.curve_id,
+                            "beta_total": (
+                                float(assignment.beta_total)
+                                if assignment.beta_total is not None
+                                else None
+                            ),
+                            "beta_rank": (
+                                float(assignment.beta_rank)
+                                if assignment.beta_rank is not None
+                                else None
+                            ),
+                            "effect_coefficient": float(effect_coefficient),
+                            "mirror_sign": int(assignment.mirror_sign),
+                            "log_return_contribution": float(contribution[asset_index]),
+                        }
+                    )
+        for asset_index, symbol in enumerate(market_spec.asset_symbols):
+            open_price = float(current_prices[asset_index])
+            close_price = open_price * math.exp(float(log_returns[asset_index]))
+            volume = float(
+                base_volumes[asset_index]
+                * math.exp(
+                    float(process_states[market_spec.volume.stream_id][period_index, asset_index])
+                    * float(market_spec.volume.state_scale)
+                )
+            )
+            if not math.isfinite(volume) or volume <= 0.0:
+                raise ValueError("generated vertical volume must be strictly positive and finite")
+            content_payload = {
+                "schema_version": KNOWN_TRUTH_DGP_VERTICAL_SCHEMA_V1,
+                "symbol": symbol,
+                "open_time": open_time.isoformat(),
+                "open": format(open_price, ".17g"),
+                "high": format(max(open_price, close_price), ".17g"),
+                "low": format(min(open_price, close_price), ".17g"),
+                "close": format(close_price, ".17g"),
+                "volume": format(volume, ".17g"),
+                "close_time": close_time.isoformat(),
+                "source": KNOWN_TRUTH_DGP_MARKET_SOURCE_V1,
+                "generation_batch": specification.generation_batch,
+                "value_status": KNOWN_TRUTH_DGP_VALUE_STATUS_V1,
+            }
+            market_rows.append(
+                {
+                    **content_payload,
+                    "open_time": open_time,
+                    "close_time": close_time,
+                    "open": open_price,
+                    "high": max(open_price, close_price),
+                    "low": min(open_price, close_price),
+                    "close": close_price,
+                    "volume": volume,
+                    "content_identity": _json_content_sha256(content_payload),
+                }
+            )
+            current_prices[asset_index] = close_price
+    market_records = pd.DataFrame(market_rows, columns=MARKET_INPUT_SPINE_RECORD_COLUMNS_V1)
+    signal_rows: list[dict[str, object]] = []
+    for candidate_id in KNOWN_TRUTH_REGISTRY_CANDIDATE_IDS_V1:
+        values = candidate_values[candidate_id]
+        for period_index in range(market_spec.periods):
+            decision_time = market_spec.start_time + pd.Timedelta(minutes=period_index)
+            gate = decision_time + pd.Timedelta(minutes=specification.execution_delay_minutes)
+            for asset_index, symbol in enumerate(market_spec.asset_symbols):
+                value = float(values[period_index, asset_index])
+                content_payload = {
+                    "schema_version": KNOWN_TRUTH_DGP_VERTICAL_SCHEMA_V1,
+                    "candidate_id": candidate_id,
+                    "symbol": symbol,
+                    "decision_time": decision_time.isoformat(),
+                    "assumed_execution_gate": gate.isoformat(),
+                    "actual_observed_availability": gate.isoformat(),
+                    "signal_value": format(value, ".17g"),
+                    "source": KNOWN_TRUTH_DGP_SIGNAL_SOURCE_V1,
+                    "generation_batch": specification.generation_batch,
+                    "value_status": KNOWN_TRUTH_DGP_VALUE_STATUS_V1,
+                }
+                signal_rows.append(
+                    {
+                        **content_payload,
+                        "decision_time": decision_time,
+                        "assumed_execution_gate": gate,
+                        "actual_observed_availability": gate,
+                        "signal_value": value,
+                        "content_identity": _json_content_sha256(content_payload),
+                    }
+                )
+    signal_records = pd.DataFrame(signal_rows, columns=KNOWN_TRUTH_DGP_SIGNAL_RECORD_COLUMNS_V1)
+    market_records, signal_records = _known_truth_dgp_apply_faults_v1(
+        market_records,
+        signal_records,
+        specification.faults,
+    )
+    _validate_known_truth_dgp_outputs_v1(
+        specification=specification,
+        market_records=market_records,
+        signal_records=signal_records,
+    )
+    assignment_rows = []
+    for assignment in assignments:
+        assignment_rows.append({"scenario_id": specification.scenario.scenario_id, **asdict(assignment)})
+    assignment_records = pd.DataFrame(
+        assignment_rows,
+        columns=KNOWN_TRUTH_DGP_TRUTH_ASSIGNMENT_COLUMNS_V1,
+    )
+    effect_trace = pd.DataFrame(
+        effect_trace_rows,
+        columns=KNOWN_TRUTH_DGP_EFFECT_TRACE_COLUMNS_V1,
+    )
+    if tuple(effect_trace.columns) != KNOWN_TRUTH_DGP_EFFECT_TRACE_COLUMNS_V1:
+        raise ValueError("vertical truth effect trace has an unexpected schema")
+    if not effect_trace.empty:
+        if not np.isfinite(
+            effect_trace[["signal_value", "effect_coefficient", "log_return_contribution"]]
+            .to_numpy(dtype=float)
+        ).all():
+            raise ValueError("vertical truth effect trace contains non-finite values")
+        if specification.scenario.expression_id == KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1:
+            if effect_trace["beta_total"].notna().any() or effect_trace["beta_rank"].isna().any():
+                raise ValueError("rank-only effect trace mixes scalar and rank coefficients")
+        elif effect_trace["beta_rank"].notna().any() or effect_trace["beta_total"].isna().any():
+            raise ValueError("scalar effect trace mixes rank and scalar coefficients")
+    return KnownTruthDgpVerticalArtifactsV1(
+        market_records=market_records,
+        signal_records=signal_records,
+        truth_sidecar=KnownTruthDgpTruthSidecarV1(
+            assignment_records=assignment_records,
+            effect_trace=effect_trace,
+        ),
+        schema_version=specification.schema_version,
+        generation_batch=specification.generation_batch,
+        asset_symbols=market_spec.asset_symbols,
+        start_time=market_spec.start_time,
+        periods=market_spec.periods,
+    )
+
+
 __all__ = [
     "DecisionWindow",
     "DETERMINISTIC_RANDOM_ADDRESS_VERSION_V1",
@@ -4022,6 +5257,27 @@ __all__ = [
     "KNOWN_TRUTH_CANDIDATE_IDENTITY_SOURCE_SHA256_V1",
     "KNOWN_TRUTH_CANDIDATE_IDENTITY_SOURCE_V1",
     "KNOWN_TRUTH_CORE_SCENARIO_ROLES_V1",
+    "KNOWN_TRUTH_DGP_ALLOWED_FAULT_KINDS_V1",
+    "KNOWN_TRUTH_DGP_ALLOWED_SIGNAL_STANDARDIZATIONS_V1",
+    "KNOWN_TRUTH_DGP_ALLOWED_VARIANT_INPUT_TYPES_V1",
+    "KNOWN_TRUTH_DGP_EFFECT_TRACE_COLUMNS_V1",
+    "KNOWN_TRUTH_DGP_MARKET_SOURCE_V1",
+    "KNOWN_TRUTH_DGP_RANK_STANDARDIZATION_V1",
+    "KNOWN_TRUTH_DGP_SIGNAL_RECORD_COLUMNS_V1",
+    "KNOWN_TRUTH_DGP_SIGNAL_SOURCE_V1",
+    "KNOWN_TRUTH_DGP_STANDARDIZATION_V1",
+    "KNOWN_TRUTH_DGP_TRUTH_ASSIGNMENT_COLUMNS_V1",
+    "KNOWN_TRUTH_DGP_VALUE_STATUS_V1",
+    "KNOWN_TRUTH_DGP_VARIANT_AVAILABILITY_RULE_V1",
+    "KNOWN_TRUTH_DGP_VARIANT_LABEL_ALIGNMENT_V1",
+    "KNOWN_TRUTH_DGP_VARIANT_OPERATOR_IDENTITY_V1",
+    "KNOWN_TRUTH_DGP_VARIANT_TIMEFRAME_V1",
+    "KNOWN_TRUTH_DGP_VERTICAL_ARCHIVE_CONDITION_V1",
+    "KNOWN_TRUTH_DGP_VERTICAL_AUTHORITY_V1",
+    "KNOWN_TRUTH_DGP_VERTICAL_LIFECYCLE_V1",
+    "KNOWN_TRUTH_DGP_VERTICAL_MAY_BE_USED_FOR_V1",
+    "KNOWN_TRUTH_DGP_VERTICAL_MUST_NOT_BE_USED_FOR_V1",
+    "KNOWN_TRUTH_DGP_VERTICAL_SCHEMA_V1",
     "KNOWN_TRUTH_EFFECT_CURVES_V1",
     "KNOWN_TRUTH_EFFECT_CASE_COVERAGE_V1",
     "KNOWN_TRUTH_FORMAL_AUTHORITY_V1",
@@ -4045,6 +5301,13 @@ __all__ = [
     "KNOWN_TRUTH_UNIVERSE_IDENTITY_V1",
     "KNOWN_TRUTH_UNIVERSE_SOURCE_SHA256_V1",
     "KNOWN_TRUTH_UNIVERSE_SOURCE_V1",
+    "KnownTruthDgpEffectCurveV1",
+    "KnownTruthDgpFaultInjectionV1",
+    "KnownTruthDgpObservationVariantV1",
+    "KnownTruthDgpSignalStreamV1",
+    "KnownTruthDgpTruthSidecarV1",
+    "KnownTruthDgpVerticalArtifactsV1",
+    "KnownTruthDgpVerticalSpecificationV1",
     "KnownTruthScenarioV1",
     "KnownTruthSignalAssignmentV1",
     "KnownTruthSimulationContractV1",
@@ -4065,7 +5328,9 @@ __all__ = [
     "estimate_l0_l4_observed_effect_scale_v1",
     "map_observed_effect_scale_to_beta_total_v1",
     "generate_market_input_spine_v1",
+    "generate_known_truth_dgp_vertical_slice_v1",
     "validate_market_input_spine_specification_v1",
     "validate_random_stream_specification_v1",
     "validate_known_truth_simulation_contract_v1",
+    "validate_known_truth_dgp_vertical_specification_v1",
 ]
