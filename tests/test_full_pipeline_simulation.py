@@ -1318,11 +1318,11 @@ def _known_truth_contract_fixture() -> KnownTruthSimulationContractV1:
                     "marginal_predictive_truth": 1,
                     "direction": -1,
                     "effect_scale_label": "strong",
-                    "effect_curve_id": "persistent",
+                    "effect_curve_id": None,
                     "mirror_sign": -1,
                     "beta_id": "beta-rank-strong-persistent-negative",
                     "beta_rank": dict(KNOWN_TRUTH_BETA_TOTAL_SCALES_V1)["strong"],
-                    "w_rank": "persistent",
+                    "w_rank": "rank-exp-fixture-v1",
                 }
             assignments.append(
                 KnownTruthSignalAssignmentV1(
@@ -1396,6 +1396,7 @@ def _known_truth_contract_fixture() -> KnownTruthSimulationContractV1:
         horizons=KNOWN_TRUTH_HORIZONS_V1,
         beta_total_scales=KNOWN_TRUTH_BETA_TOTAL_SCALES_V1,
         effect_curve_ids=KNOWN_TRUTH_EFFECT_CURVES_V1,
+        rank_effect_curve_ids=("rank-exp-fixture-v1",),
         mirror_signs=KNOWN_TRUTH_MIRROR_SIGNS_V1,
         effect_case_coverage=KNOWN_TRUTH_EFFECT_CASE_COVERAGE_V1,
         formal_replicates=KNOWN_TRUTH_FORMAL_REPLICATES_V1,
@@ -1784,6 +1785,14 @@ def test_known_truth_contract_requires_independent_rank_only_effect_fields():
     )
     with pytest.raises(ValueError, match="rank-only direct candidates require"):
         validate_known_truth_simulation_contract_v1(rank_field)
+
+
+def test_known_truth_contract_requires_independent_rank_curve_identity():
+    contract = _known_truth_contract_fixture()
+    with pytest.raises(ValueError, match="rank effect curve IDs"):
+        validate_known_truth_simulation_contract_v1(
+            replace(contract, rank_effect_curve_ids=())
+        )
 
 
 def test_known_truth_contract_requires_closed_formal_replicate_set_and_unique_seeds():

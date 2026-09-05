@@ -11,6 +11,10 @@ from qlab.full_pipeline_simulation import (
     KNOWN_TRUTH_BETA_TOTAL_SCALES_V1,
     KNOWN_TRUTH_DGP_MARKET_SOURCE_V1,
     KNOWN_TRUTH_DGP_RANK_STANDARDIZATION_V1,
+    KNOWN_TRUTH_DGP_RANK_CURVE_DISCRETIZATION_V1,
+    KNOWN_TRUTH_DGP_RANK_CURVE_FAMILY_V1,
+    KNOWN_TRUTH_DGP_RANK_CURVE_NORMALIZATION_V1,
+    KNOWN_TRUTH_DGP_RANK_CURVE_TAIL_RULE_V1,
     KNOWN_TRUTH_DGP_SIGNAL_RECORD_COLUMNS_V1,
     KNOWN_TRUTH_DGP_STANDARDIZATION_V1,
     KNOWN_TRUTH_DGP_VALUE_STATUS_V1,
@@ -48,6 +52,7 @@ from qlab.full_pipeline_simulation import (
     KnownTruthDgpEffectCurveV1,
     KnownTruthDgpFaultInjectionV1,
     KnownTruthDgpObservationVariantV1,
+    KnownTruthDgpRankEffectCurveV1,
     KnownTruthDgpSignalStreamV1,
     KnownTruthDgpVerticalSpecificationV1,
     KnownTruthScenarioV1,
@@ -60,6 +65,7 @@ from qlab.full_pipeline_simulation import (
     RandomTimeProcessSpecificationV1,
     _known_truth_dgp_curve_cdf_v1,
     _known_truth_dgp_effect_weight_v1,
+    _known_truth_dgp_rank_effect_weight_v1,
     generate_known_truth_dgp_vertical_slice_v1,
     validate_known_truth_dgp_vertical_specification_v1,
 )
@@ -251,7 +257,8 @@ def _assignment_direct(
     if expression_type == KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1:
         values.update(
             beta_rank=dict(KNOWN_TRUTH_BETA_TOTAL_SCALES_V1)["weak"],
-            w_rank="fast",
+            effect_curve_id=None,
+            w_rank=RANK_CURVE.curve_id,
         )
     else:
         values.update(
@@ -398,6 +405,17 @@ def _variant(variant_id: str, role: str, input_type: str, input_key: str) -> Kno
     )
 
 
+RANK_CURVE = KnownTruthDgpRankEffectCurveV1(
+    curve_id="rank-exp-fixture-v1",
+    family_id=KNOWN_TRUTH_DGP_RANK_CURVE_FAMILY_V1,
+    lambda_rank_minutes=2.0,
+    epsilon_rank=1e-12,
+    discretization_identity=KNOWN_TRUTH_DGP_RANK_CURVE_DISCRETIZATION_V1,
+    normalization_identity=KNOWN_TRUTH_DGP_RANK_CURVE_NORMALIZATION_V1,
+    tail_rule_identity=KNOWN_TRUTH_DGP_RANK_CURVE_TAIL_RULE_V1,
+)
+
+
 def _market_spec(
     assets: tuple[str, ...],
     *,
@@ -486,6 +504,9 @@ def _spec(
             "adjacent_cdf_difference_infinite_mass_v1",
         ),
     )
+    rank_curves = (
+        RANK_CURVE,
+    ) if scenario_value.expression_id == KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1 else ()
     return KnownTruthDgpVerticalSpecificationV1(
         schema_version="ksv4-known-truth-dgp-vertical-slice/v1",
         generation_batch=market.generation_batch,
@@ -494,6 +515,7 @@ def _spec(
         signal_streams=tuple(signal_streams),
         observation_variants=tuple(variants),
         effect_curves=curves,
+        rank_effect_curves=rank_curves,
         execution_delay_minutes=4,
         faults=faults,
         lifecycle=KNOWN_TRUTH_DGP_VERTICAL_LIFECYCLE_V1,
@@ -671,7 +693,86 @@ def test_vertical_slice_rank_only_is_separate_and_uses_formal_rank():
     trace = artifacts.truth_sidecar.effect_trace
     assert trace["beta_total"].isna().all()
     assert trace["beta_rank"].notna().all()
+    assert trace["effect_curve_id"].isna().all()
+    assert set(trace["rank_curve_id"]) == {RANK_CURVE.curve_id}
     assert (trace["effect_coefficient"] == dict(KNOWN_TRUTH_BETA_TOTAL_SCALES_V1)["weak"]).all()
+    rank_weight = _known_truth_dgp_rank_effect_weight_v1(RANK_CURVE, 1)
+    np.testing.assert_allclose(
+        trace["log_return_contribution"].to_numpy(dtype=float),
+        dict(KNOWN_TRUTH_BETA_TOTAL_SCALES_V1)["weak"]
+        * trace["signal_value"].to_numpy(dtype=float)
+        * trace["mirror_sign"].to_numpy(dtype=float)
+        * rank_weight,
+        rtol=0.0,
+        atol=1e-18,
+    )
+
+
+def test_vertical_slice_rank_curve_formula_is_independent_from_scalar_fast():
+    ratio = math.exp(-1.0 / RANK_CURVE.lambda_rank_minutes)
+    assert _known_truth_dgp_rank_effect_weight_v1(RANK_CURVE, 1) == pytest.approx(
+        1.0 - ratio,
+        abs=1e-15,
+    )
+    assert _known_truth_dgp_rank_effect_weight_v1(RANK_CURVE, 2) == pytest.approx(
+        (1.0 - ratio) * ratio,
+        abs=1e-15,
+    )
+    assert _known_truth_dgp_rank_effect_weight_v1(RANK_CURVE, 1) != pytest.approx(
+        _known_truth_dgp_effect_weight_v1("fast", 1),
+        abs=1e-12,
+    )
+    cutoff = next(
+        lag for lag in range(1, 1000) if ratio**lag <= RANK_CURVE.epsilon_rank
+    )
+    assert 1.0 - sum(
+        _known_truth_dgp_rank_effect_weight_v1(RANK_CURVE, lag)
+        for lag in range(1, cutoff + 1)
+    ) == pytest.approx(ratio**cutoff, abs=1e-15)
+    assert _known_truth_dgp_rank_effect_weight_v1(RANK_CURVE, cutoff + 1) > 0.0
+
+
+def test_vertical_slice_rank_curve_contract_rejects_scalar_mixing_or_missing_curve():
+    rank_spec = _spec(scenario=_scenario_rank_only())
+    assignments = list(rank_spec.scenario.truth_assignments)
+    with pytest.raises(ValueError, match="rank-only direct candidates cannot bind scalar"):
+        validate_known_truth_dgp_vertical_specification_v1(
+            replace(
+                rank_spec,
+                scenario=replace(
+                    rank_spec.scenario,
+                    truth_assignments=(
+                        replace(assignments[0], effect_curve_id="fast"),
+                        *assignments[1:],
+                    ),
+                ),
+            ),
+            _registry(),
+        )
+    with pytest.raises(ValueError, match="rank-only direct candidates require"):
+        validate_known_truth_dgp_vertical_specification_v1(
+            replace(
+                rank_spec,
+                scenario=replace(
+                    rank_spec.scenario,
+                    truth_assignments=(
+                        replace(assignments[0], w_rank=None),
+                        *assignments[1:],
+                    ),
+                ),
+            ),
+            _registry(),
+        )
+    with pytest.raises(ValueError, match="rank_effect_curves"):
+        validate_known_truth_dgp_vertical_specification_v1(
+            replace(rank_spec, rank_effect_curves=()),
+            _registry(),
+        )
+    with pytest.raises(ValueError, match="rank_effect_curves are not allowed"):
+        validate_known_truth_dgp_vertical_specification_v1(
+            replace(_spec(), rank_effect_curves=(RANK_CURVE,)),
+            _registry(),
+        )
 
 
 def test_vertical_slice_default_path_is_deterministic_and_order_invariant():

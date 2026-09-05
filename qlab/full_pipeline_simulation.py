@@ -2112,6 +2112,10 @@ KNOWN_TRUTH_BETA_TOTAL_SCALES_V1 = (
     ("very_strong", 0.0022987278401394),
 )
 KNOWN_TRUTH_EFFECT_CURVES_V1 = ("fast", "delayed", "persistent")
+KNOWN_TRUTH_DGP_RANK_CURVE_FAMILY_V1 = "exponential_rank_decay_v1"
+KNOWN_TRUTH_DGP_RANK_CURVE_DISCRETIZATION_V1 = "one_based_minute_lag_v1"
+KNOWN_TRUTH_DGP_RANK_CURVE_NORMALIZATION_V1 = "infinite_geometric_mass_l1_v1"
+KNOWN_TRUTH_DGP_RANK_CURVE_TAIL_RULE_V1 = "remaining_mass_epsilon_v1"
 KNOWN_TRUTH_MIRROR_SIGNS_V1 = (-1, 1)
 KNOWN_TRUTH_HORIZONS_V1 = ("4h", "8h", "12h", "1d")
 KNOWN_TRUTH_ADMITTED_SYMBOLS_V1 = (
@@ -3380,6 +3384,7 @@ class KnownTruthSimulationContractV1:
     horizons: tuple[str, ...]
     beta_total_scales: tuple[tuple[str, float], ...]
     effect_curve_ids: tuple[str, ...]
+    rank_effect_curve_ids: tuple[str, ...]
     mirror_signs: tuple[int, ...]
     effect_case_coverage: tuple[tuple[str, str, int], ...]
     formal_replicates: int
@@ -3573,7 +3578,6 @@ def _validate_known_truth_assignment_v1(
     )
     rank_effect_fields = (
         assignment.effect_scale_label,
-        assignment.effect_curve_id,
         assignment.mirror_sign,
         assignment.beta_id,
         assignment.beta_rank,
@@ -3583,10 +3587,19 @@ def _validate_known_truth_assignment_v1(
         if scenario_expression_id == KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1:
             if any(value is None for value in rank_effect_fields):
                 raise ValueError(
-                    "rank-only direct candidates require scale, curve, w_rank, sign, beta, and beta_rank"
+                    "rank-only direct candidates require scale, rank curve, sign, beta, and beta_rank"
                 )
-            if assignment.w_effect_id is not None or assignment.beta_total is not None:
-                raise ValueError("rank-only direct candidates cannot bind scalar beta_total or w_effect")
+            if any(
+                value is not None
+                for value in (
+                    assignment.effect_curve_id,
+                    assignment.w_effect_id,
+                    assignment.beta_total,
+                )
+            ):
+                raise ValueError(
+                    "rank-only direct candidates cannot bind scalar effect curve, beta_total, or w_effect"
+                )
         else:
             if any(value is None for value in effect_fields):
                 raise ValueError(
@@ -3598,13 +3611,13 @@ def _validate_known_truth_assignment_v1(
             label for label, _ in KNOWN_TRUTH_BETA_TOTAL_SCALES_V1
         }:
             raise ValueError("known-truth effect scale label is not frozen")
-        if assignment.effect_curve_id not in KNOWN_TRUTH_EFFECT_CURVES_V1:
-            raise ValueError("known-truth effect curve is not frozen")
         if scenario_expression_id == KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1:
-            if assignment.w_rank != assignment.effect_curve_id:
-                raise ValueError("known-truth w_rank must bind the declared rank-only effect curve")
-        elif assignment.w_effect_id != assignment.effect_curve_id:
-            raise ValueError("known-truth w_effect must bind the declared effect curve")
+            _known_truth_text(assignment.w_rank, label="w_rank")
+        else:
+            if assignment.effect_curve_id not in KNOWN_TRUTH_EFFECT_CURVES_V1:
+                raise ValueError("known-truth effect curve is not frozen")
+            if assignment.w_effect_id != assignment.effect_curve_id:
+                raise ValueError("known-truth w_effect must bind the declared effect curve")
         if assignment.mirror_sign not in KNOWN_TRUTH_MIRROR_SIGNS_V1:
             raise ValueError("known-truth mirror sign is not frozen")
         if assignment.direction != assignment.mirror_sign:
@@ -3692,7 +3705,7 @@ def _validate_known_truth_scenarios_v1(
             raise ValueError("rank_only scenario must contain a predictive candidate")
 
         for assignment in assignments:
-            if assignment.role == "direct":
+            if assignment.role == "direct" and expression_id != KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1:
                 actual_effect_cases.add(
                     (
                         assignment.effect_scale_label,
@@ -3911,6 +3924,22 @@ def validate_known_truth_simulation_contract_v1(
         or effect_curve_ids != KNOWN_TRUTH_EFFECT_CURVES_V1
     ):
         raise ValueError("known-truth contract must contain fast, delayed, persistent curves")
+    rank_effect_curve_ids = _known_truth_tuple(
+        contract.rank_effect_curve_ids,
+        label="rank_effect_curve_ids",
+    )
+    if (
+        not rank_effect_curve_ids
+        or any(
+            not isinstance(curve_id, str) or not curve_id.strip()
+            for curve_id in rank_effect_curve_ids
+        )
+        or len(set(rank_effect_curve_ids)) != len(rank_effect_curve_ids)
+        or set(rank_effect_curve_ids).intersection(effect_curve_ids)
+    ):
+        raise ValueError(
+            "known-truth rank effect curve IDs must be non-empty, unique, and separate from scalar curves"
+        )
     mirror_signs = _known_truth_tuple(contract.mirror_signs, label="mirror_signs")
     if (
         len(mirror_signs) != len(KNOWN_TRUTH_MIRROR_SIGNS_V1)
@@ -3968,6 +3997,17 @@ def validate_known_truth_simulation_contract_v1(
         contract.scenarios,
         candidate_ids=tuple(str(candidate_id) for candidate_id in candidate_ids),
     )
+    used_rank_effect_curve_ids = {
+        assignment.w_rank
+        for scenario in contract.scenarios
+        if scenario.expression_id == KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1
+        for assignment in scenario.truth_assignments
+        if assignment.role == "direct"
+    }
+    if used_rank_effect_curve_ids != set(rank_effect_curve_ids):
+        raise ValueError(
+            "known-truth rank effect curve IDs must exactly cover rank-only direct assignments"
+        )
     if actual_effect_cases != set(KNOWN_TRUTH_EFFECT_CASE_COVERAGE_V1):
         raise ValueError(
             "known-truth effect coverage must be realized by direct truth assignments"
@@ -4068,6 +4108,7 @@ KNOWN_TRUTH_DGP_EFFECT_TRACE_COLUMNS_V1 = (
     "lag_minutes",
     "signal_value",
     "effect_curve_id",
+    "rank_curve_id",
     "beta_total",
     "beta_rank",
     "effect_coefficient",
@@ -4156,12 +4197,25 @@ class KnownTruthDgpFaultInjectionV1:
 
 @dataclass(frozen=True)
 class KnownTruthDgpEffectCurveV1:
-    """One of the three blueprint-fixed continuous cumulative curves."""
+    """One of the three blueprint-fixed scalar cumulative curves."""
 
     curve_id: str
     family_id: str
     parameters: tuple[float, ...]
     normalization_identity: str
+
+
+@dataclass(frozen=True)
+class KnownTruthDgpRankEffectCurveV1:
+    """An explicitly separate minute-discrete rank-only effect curve."""
+
+    curve_id: str
+    family_id: str
+    lambda_rank_minutes: float
+    epsilon_rank: float
+    discretization_identity: str
+    normalization_identity: str
+    tail_rule_identity: str
 
 
 @dataclass(frozen=True)
@@ -4171,7 +4225,8 @@ class KnownTruthDgpVerticalSpecificationV1:
     This is a generation contract, not the full 1,100-replicate simulation
     manifest.  It requires a full 159-candidate scenario and preserves the
     frozen twenty-asset registry while allowing the approved two-asset
-    fixture projection.  It contains no evaluator or L0--L4 call.
+    fixture projection.  Scalar and rank-only direct effects use separate
+    curve registries.  It contains no evaluator or L0--L4 call.
     """
 
     schema_version: str
@@ -4181,6 +4236,7 @@ class KnownTruthDgpVerticalSpecificationV1:
     signal_streams: tuple[KnownTruthDgpSignalStreamV1, ...]
     observation_variants: tuple[KnownTruthDgpObservationVariantV1, ...]
     effect_curves: tuple[KnownTruthDgpEffectCurveV1, ...]
+    rank_effect_curves: tuple[KnownTruthDgpRankEffectCurveV1, ...]
     execution_delay_minutes: int
     faults: tuple[KnownTruthDgpFaultInjectionV1, ...]
     lifecycle: str
@@ -4237,6 +4293,39 @@ def _known_truth_dgp_effect_weight_v1(curve_id: str, lag_minutes: int) -> float:
     if not math.isfinite(weight) or weight < -1e-15:
         raise ValueError("effect curve produced an invalid minute weight")
     return max(0.0, float(weight))
+
+
+def _known_truth_dgp_rank_effect_weight_v1(
+    curve: KnownTruthDgpRankEffectCurveV1,
+    lag_minutes: int,
+) -> float:
+    """Return one minute of the independent rank-only geometric tail.
+
+    ``lambda_rank_minutes`` is a pre-frozen engineering input on the rank
+    curve record.  The scalar ``effect_curves`` registry is deliberately not
+    consulted here, so rank-only generation cannot silently reuse ``w_effect``.
+    """
+    if not isinstance(curve, KnownTruthDgpRankEffectCurveV1):
+        raise TypeError("rank effect curve must be KnownTruthDgpRankEffectCurveV1")
+    if isinstance(lag_minutes, bool) or not isinstance(lag_minutes, Integral):
+        raise TypeError("rank effect lag must be an integer")
+    if lag_minutes < 1:
+        raise ValueError("rank effect lag must start at one minute after the gate")
+    lambda_rank = _known_truth_decimal(
+        curve.lambda_rank_minutes,
+        label="rank_effect_curve.lambda_rank_minutes",
+    )
+    epsilon_rank = _known_truth_decimal(
+        curve.epsilon_rank,
+        label="rank_effect_curve.epsilon_rank",
+    )
+    if lambda_rank <= 0 or not (Decimal("0") < epsilon_rank < Decimal("1")):
+        raise ValueError("rank effect curve lambda must be positive and epsilon must lie in (0, 1)")
+    ratio = math.exp(-1.0 / float(lambda_rank))
+    weight = (1.0 - ratio) * ratio ** (int(lag_minutes) - 1)
+    if not math.isfinite(weight) or weight <= 0.0:
+        raise ValueError("rank effect curve produced an invalid positive minute weight")
+    return float(weight)
 
 
 def _known_truth_dgp_expected_curve_v1(curve_id: str) -> tuple[str, tuple[float, ...]]:
@@ -4474,6 +4563,51 @@ def _validate_known_truth_dgp_effect_curves_v1(
     return by_id
 
 
+def _validate_known_truth_dgp_rank_effect_curves_v1(
+    curves: object,
+    *,
+    required_ids: set[str],
+) -> dict[str, KnownTruthDgpRankEffectCurveV1]:
+    curve_rows = _known_truth_tuple(curves, label="rank_effect_curves")
+    if not required_ids:
+        if curve_rows:
+            raise ValueError("rank_effect_curves are not allowed without a rank-only direct assignment")
+        return {}
+    if not curve_rows:
+        raise ValueError("rank_effect_curves must cover every rank-only direct curve identity")
+    by_id: dict[str, KnownTruthDgpRankEffectCurveV1] = {}
+    for index, curve in enumerate(curve_rows):
+        if not isinstance(curve, KnownTruthDgpRankEffectCurveV1):
+            raise TypeError(
+                f"rank_effect_curves[{index}] must be KnownTruthDgpRankEffectCurveV1"
+            )
+        curve_id = _known_truth_text(curve.curve_id, label=f"rank_effect_curves[{index}].curve_id")
+        if curve_id in by_id or curve_id in KNOWN_TRUTH_EFFECT_CURVES_V1:
+            raise ValueError("rank effect curve identities are duplicated or overlap scalar curves")
+        if curve.family_id != KNOWN_TRUTH_DGP_RANK_CURVE_FAMILY_V1:
+            raise ValueError("rank effect curve family identity is not frozen")
+        lambda_rank = _known_truth_decimal(
+            curve.lambda_rank_minutes,
+            label=f"rank_effect_curves[{index}].lambda_rank_minutes",
+        )
+        epsilon_rank = _known_truth_decimal(
+            curve.epsilon_rank,
+            label=f"rank_effect_curves[{index}].epsilon_rank",
+        )
+        if lambda_rank <= 0 or not (Decimal("0") < epsilon_rank < Decimal("1")):
+            raise ValueError("rank effect curve lambda must be positive and epsilon must lie in (0, 1)")
+        if curve.discretization_identity != KNOWN_TRUTH_DGP_RANK_CURVE_DISCRETIZATION_V1:
+            raise ValueError("rank effect curve minute discretization is not frozen")
+        if curve.normalization_identity != KNOWN_TRUTH_DGP_RANK_CURVE_NORMALIZATION_V1:
+            raise ValueError("rank effect curve normalization is not frozen")
+        if curve.tail_rule_identity != KNOWN_TRUTH_DGP_RANK_CURVE_TAIL_RULE_V1:
+            raise ValueError("rank effect curve tail rule is not frozen")
+        by_id[curve_id] = curve
+    if set(by_id) != required_ids:
+        raise ValueError("rank effect curves must exactly cover rank-only direct curve identities")
+    return by_id
+
+
 def validate_known_truth_dgp_vertical_specification_v1(
     specification: KnownTruthDgpVerticalSpecificationV1,
     registry: RandomStreamSpecificationRegistryV1,
@@ -4641,6 +4775,16 @@ def validate_known_truth_dgp_vertical_specification_v1(
         # The same explicit standardization identity is required for all
         # roles, including null, but null has no observation variant.
     curve_by_id = _validate_known_truth_dgp_effect_curves_v1(specification.effect_curves)
+    required_rank_curve_ids = {
+        assignment.w_rank
+        for assignment in assignments
+        if assignment.role == "direct"
+        and scenario.expression_id == KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1
+    }
+    _validate_known_truth_dgp_rank_effect_curves_v1(
+        specification.rank_effect_curves,
+        required_ids=required_rank_curve_ids,
+    )
     if isinstance(specification.execution_delay_minutes, bool) or specification.execution_delay_minutes != 4:
         raise ValueError("vertical execution delay must be the frozen four minutes")
     faults = _known_truth_tuple(specification.faults, label="faults")
@@ -5043,7 +5187,8 @@ def generate_known_truth_dgp_vertical_slice_v1(
         (assignment for assignment in assignments if assignment.return_inclusion is True),
         key=lambda row: row.candidate_id,
     )
-    curve_by_id = {curve.curve_id: curve for curve in specification.effect_curves}
+    scalar_curve_by_id = {curve.curve_id: curve for curve in specification.effect_curves}
+    rank_curve_by_id = {curve.curve_id: curve for curve in specification.rank_effect_curves}
     market_rows: list[dict[str, object]] = []
     effect_trace_rows: list[dict[str, object]] = []
     for period_index in range(market_spec.periods):
@@ -5055,7 +5200,6 @@ def generate_known_truth_dgp_vertical_slice_v1(
         )
         log_returns = base_log_returns.copy()
         for assignment in direct_assignments:
-            curve = curve_by_id[assignment.effect_curve_id]
             effect_coefficient = (
                 assignment.beta_rank
                 if specification.scenario.expression_id == KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1
@@ -5063,11 +5207,23 @@ def generate_known_truth_dgp_vertical_slice_v1(
             )
             if effect_coefficient is None:
                 raise ValueError("vertical direct assignment has no effect coefficient")
+            if specification.scenario.expression_id == KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1:
+                rank_curve = rank_curve_by_id[assignment.w_rank]
+                weight_for_lag = lambda lag: _known_truth_dgp_rank_effect_weight_v1(
+                    rank_curve,
+                    lag,
+                )
+            else:
+                scalar_curve = scalar_curve_by_id[assignment.effect_curve_id]
+                weight_for_lag = lambda lag: _known_truth_dgp_effect_weight_v1(
+                    scalar_curve.curve_id,
+                    lag,
+                )
             for decision_index in range(period_index - specification.execution_delay_minutes + 1):
                 if decision_index < 0:
                     continue
                 lag_minutes = period_index - decision_index - specification.execution_delay_minutes + 1
-                weight = _known_truth_dgp_effect_weight_v1(curve.curve_id, lag_minutes)
+                weight = weight_for_lag(lag_minutes)
                 if weight == 0.0:
                     continue
                 signal_values = candidate_values[assignment.candidate_id][decision_index]
@@ -5087,7 +5243,16 @@ def generate_known_truth_dgp_vertical_slice_v1(
                             "price_time": open_time,
                             "lag_minutes": lag_minutes,
                             "signal_value": float(signal_values[asset_index]),
-                            "effect_curve_id": curve.curve_id,
+                            "effect_curve_id": (
+                                scalar_curve.curve_id
+                                if specification.scenario.expression_id != KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1
+                                else None
+                            ),
+                            "rank_curve_id": (
+                                rank_curve.curve_id
+                                if specification.scenario.expression_id == KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1
+                                else None
+                            ),
                             "beta_total": (
                                 float(assignment.beta_total)
                                 if assignment.beta_total is not None
@@ -5205,9 +5370,19 @@ def generate_known_truth_dgp_vertical_slice_v1(
         ).all():
             raise ValueError("vertical truth effect trace contains non-finite values")
         if specification.scenario.expression_id == KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1:
-            if effect_trace["beta_total"].notna().any() or effect_trace["beta_rank"].isna().any():
+            if (
+                effect_trace["effect_curve_id"].notna().any()
+                or effect_trace["rank_curve_id"].isna().any()
+                or effect_trace["beta_total"].notna().any()
+                or effect_trace["beta_rank"].isna().any()
+            ):
                 raise ValueError("rank-only effect trace mixes scalar and rank coefficients")
-        elif effect_trace["beta_rank"].notna().any() or effect_trace["beta_total"].isna().any():
+        elif (
+            effect_trace["rank_curve_id"].notna().any()
+            or effect_trace["beta_rank"].notna().any()
+            or effect_trace["effect_curve_id"].isna().any()
+            or effect_trace["beta_total"].isna().any()
+        ):
             raise ValueError("scalar effect trace mixes rank and scalar coefficients")
     return KnownTruthDgpVerticalArtifactsV1(
         market_records=market_records,
@@ -5262,6 +5437,10 @@ __all__ = [
     "KNOWN_TRUTH_DGP_ALLOWED_VARIANT_INPUT_TYPES_V1",
     "KNOWN_TRUTH_DGP_EFFECT_TRACE_COLUMNS_V1",
     "KNOWN_TRUTH_DGP_MARKET_SOURCE_V1",
+    "KNOWN_TRUTH_DGP_RANK_CURVE_DISCRETIZATION_V1",
+    "KNOWN_TRUTH_DGP_RANK_CURVE_FAMILY_V1",
+    "KNOWN_TRUTH_DGP_RANK_CURVE_NORMALIZATION_V1",
+    "KNOWN_TRUTH_DGP_RANK_CURVE_TAIL_RULE_V1",
     "KNOWN_TRUTH_DGP_RANK_STANDARDIZATION_V1",
     "KNOWN_TRUTH_DGP_SIGNAL_RECORD_COLUMNS_V1",
     "KNOWN_TRUTH_DGP_SIGNAL_SOURCE_V1",
@@ -5304,6 +5483,7 @@ __all__ = [
     "KnownTruthDgpEffectCurveV1",
     "KnownTruthDgpFaultInjectionV1",
     "KnownTruthDgpObservationVariantV1",
+    "KnownTruthDgpRankEffectCurveV1",
     "KnownTruthDgpSignalStreamV1",
     "KnownTruthDgpTruthSidecarV1",
     "KnownTruthDgpVerticalArtifactsV1",
@@ -5312,6 +5492,7 @@ __all__ = [
     "KnownTruthSignalAssignmentV1",
     "KnownTruthSimulationContractV1",
     "KnownTruthTaskV1",
+    "_known_truth_dgp_rank_effect_weight_v1",
     "RandomInformationGroupStreamBindingV1",
     "RandomStreamSpecificationRegistryV1",
     "RandomStreamSpecificationV1",
