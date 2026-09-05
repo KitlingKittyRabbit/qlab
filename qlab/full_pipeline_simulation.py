@@ -8,8 +8,8 @@ windows, and candidate contract.  May be used for: retaining every unfiltered
 candidate estimate and producing the frozen core G_beta_total_v1 weak/center/
 strong mapping from duplicate-aware observed beta-total scale evidence.  Must
 not be used for: candidate selection, significance testing, L2/L3/L4 discovery,
-unapproved outer very-weak/very-strong multipliers, Monte Carlo N or append
-rules, simulation generation, or a research conclusion.  Archive condition:
+changing the frozen five-scale mapping, Monte Carlo N or append rules,
+simulation generation, or a research conclusion.  Archive condition:
 this v1 contract is superseded by an approved, versioned successor.
 
 The module deliberately reuses the formal qlab panel/rank and executable
@@ -22,6 +22,8 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
+from numbers import Integral
 from typing import Mapping, Sequence
 
 import numpy as np
@@ -2093,8 +2095,890 @@ def map_observed_effect_scale_to_beta_total_v1(
     )
 
 
+# These are contract identities, not simulation outputs.  They deliberately
+# live beside the existing observed-scale entry so that a future simulator can
+# validate its frozen scenario before doing any data generation.  This section
+# must remain pure: it must not construct prices, signals, returns, or call an
+# L0--L4 entry point.
+KNOWN_TRUTH_BETA_TOTAL_SCALES_V1 = (
+    ("very_weak", 0.00011899372586593),
+    ("weak", 0.00023798745173186),
+    ("center", 0.0005372604401853),
+    ("strong", 0.0011493639200697),
+    ("very_strong", 0.0022987278401394),
+)
+KNOWN_TRUTH_EFFECT_CURVES_V1 = ("fast", "delayed", "persistent")
+KNOWN_TRUTH_MIRROR_SIGNS_V1 = (-1, 1)
+KNOWN_TRUTH_HORIZONS_V1 = ("4h", "8h", "12h", "1d")
+KNOWN_TRUTH_ADMITTED_SYMBOLS_V1 = (
+    "ADA",
+    "APT",
+    "AVAX",
+    "BCH",
+    "BNB",
+    "BTC",
+    "DOGE",
+    "DOT",
+    "ETC",
+    "ETH",
+    "FET",
+    "FIL",
+    "LINK",
+    "LTC",
+    "NEAR",
+    "SOL",
+    "SUI",
+    "TRX",
+    "UNI",
+    "XRP",
+)
+KNOWN_TRUTH_REGISTRY_SOURCE_V1 = (
+    "qlab_research_private/research/crypto/results/candidate/"
+    "ksv4_endpoint_semantics_rebuild_l2_20260802_factor_registry.csv"
+)
+KNOWN_TRUTH_REGISTRY_SOURCE_SHA256_V1 = (
+    "deb95f04dacb8f25a2abc3fecd0c21bac5f6fea6f674cf475dbe86084d0caa52"
+)
+KNOWN_TRUTH_CANDIDATE_IDENTITY_SOURCE_V1 = (
+    "qlab_research_private/research/crypto/results/candidate/"
+    "ksv4_endpoint_semantics_rebuild_l2_20260802_summary.csv"
+)
+KNOWN_TRUTH_CANDIDATE_IDENTITY_SOURCE_SHA256_V1 = (
+    "2e721db0ebf39f2adc0084ab6c01e430c8f8bf233ba74c0f2c07951539f08bb6"
+)
+KNOWN_TRUTH_UNIVERSE_SOURCE_V1 = (
+    "qlab_research_private/research/crypto/results/"
+    "coinglass_universe_admission_audit.csv"
+)
+KNOWN_TRUTH_UNIVERSE_SOURCE_SHA256_V1 = (
+    "fd86fefa275e51fcb79dcae08ff5538b691be5b947bd09f6670c490e4e268b0e"
+)
+KNOWN_TRUTH_REGISTRY_FEATURE_COUNT_V1 = 68
+KNOWN_TRUTH_CANDIDATE_HORIZON_COUNTS_V1 = (
+    ("4h", 23),
+    ("8h", 23),
+    ("12h", 45),
+    ("1d", 68),
+)
+KNOWN_TRUTH_REGISTRY_IDENTITY_V1 = "ksv4_formal_registry_68_features_v1"
+KNOWN_TRUTH_UNIVERSE_IDENTITY_V1 = "coinglass_admitted_universe_20_ordered_v1"
+KNOWN_TRUTH_CORE_SCENARIO_ROLES_V1 = (
+    "all_null",
+    "direct_sparse",
+    "proxy_and_alias",
+    "rank_only",
+)
+KNOWN_TRUTH_OPTIONAL_SCENARIO_ROLES_V1 = ("mixed_null",)
+KNOWN_TRUTH_CANDIDATE_ROLES_V1 = (
+    "direct",
+    "proxy",
+    "alias",
+    "near_alias",
+    "null",
+)
+KNOWN_TRUTH_FORMAL_REPLICATES_V1 = 1100
+KNOWN_TRUTH_APPEND_POLICY_V1 = "stop_and_report_uncertain_no_append_v1"
+KNOWN_TRUTH_REALITY_SCOPE_V1 = "independent_per_signal_horizon_v1"
+KNOWN_TRUTH_SIMULATION_EFFECT_SCOPE_V1 = "shared_beta_total_released_by_curve_v1"
+KNOWN_TRUTH_SCALAR_EXPRESSION_V1 = "standardized_scalar_signal_v1"
+KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1 = "cross_section_rank_only_v1"
+KNOWN_TRUTH_NULL_EXPRESSION_V1 = "independent_null_v1"
+KNOWN_TRUTH_FORMAL_AUTHORITY_V1 = "issue_34_issue_36_active_known_truth_blueprint_v1"
+KNOWN_TRUTH_LIFECYCLE_V1 = "candidate_contract_validation_only_v1"
+KNOWN_TRUTH_MAY_BE_USED_FOR_V1 = "pre_generation_contract_validation_only_v1"
+KNOWN_TRUTH_MUST_NOT_BE_USED_FOR_V1 = (
+    "no_generation_no_l0_l4_no_research_conclusion_v1"
+)
+KNOWN_TRUTH_ARCHIVE_CONDITION_V1 = (
+    "superseded_by_approved_versioned_simulation_contract_v1"
+)
+KNOWN_TRUTH_INPUTS_V1 = (
+    "frozen_registry_source",
+    "frozen_candidate_identity_source",
+    "frozen_ordered_universe_source",
+    "four_formal_horizons",
+    "five_beta_total_scales",
+    "three_effect_curves_and_mirrors",
+    "truth_manifest",
+    "task_manifest",
+)
+KNOWN_TRUTH_SEED_PHASES_V1 = ("development", "formal")
+
+
+def _known_truth_formal_candidate_ids_v1() -> tuple[str, ...]:
+    """Derive the frozen candidate identities from qlab's formal registry."""
+    timeframe_hours = {"1h": 1, "4h": 4, "8h": 8, "12h": 12, "1d": 24}
+    formal_registry = factor_registry.base_panel_registry("1h")
+    candidate_ids: list[str] = []
+    for row in formal_registry.itertuples(index=False):
+        signal_hours = timeframe_hours[str(row.signal_timeframe)]
+        for horizon in KNOWN_TRUTH_HORIZONS_V1:
+            horizon_hours = timeframe_hours[horizon]
+            if signal_hours <= horizon_hours and horizon_hours % signal_hours == 0:
+                candidate_ids.append(f"{row.feature_name}::{horizon}")
+    return tuple(candidate_ids)
+
+
+KNOWN_TRUTH_REGISTRY_CANDIDATE_IDS_V1 = _known_truth_formal_candidate_ids_v1()
+KNOWN_TRUTH_REGISTRY_CANDIDATE_IDS_SHA256_V1 = (
+    "0cc692c6ea79348592f5f667077902b79b20b521a57bda092931d81e3b1e255c"
+)
+if (
+    len(KNOWN_TRUTH_REGISTRY_CANDIDATE_IDS_V1) != 159
+    or _json_content_sha256(list(KNOWN_TRUTH_REGISTRY_CANDIDATE_IDS_V1))
+    != KNOWN_TRUTH_REGISTRY_CANDIDATE_IDS_SHA256_V1
+):
+    raise RuntimeError("qlab formal registry no longer matches the frozen 159-candidate identity")
+KNOWN_TRUTH_EFFECT_CASE_COVERAGE_V1 = tuple(
+    (scale_label, curve_id, mirror_sign)
+    for scale_label, _ in KNOWN_TRUTH_BETA_TOTAL_SCALES_V1
+    for curve_id in KNOWN_TRUTH_EFFECT_CURVES_V1
+    for mirror_sign in KNOWN_TRUTH_MIRROR_SIGNS_V1
+)
+
+
+@dataclass(frozen=True)
+class KnownTruthSignalAssignmentV1:
+    """One candidate's pre-registered truth identity in a scenario.
+
+    The blueprint fixes the role vocabulary and the information-group
+    relationship, but does not prescribe a particular candidate-to-group
+    allocation for every future scenario.  This record therefore requires the
+    allocation to be supplied and validates its identity without inventing an
+    allocation.  Effect fields are required only when the candidate is a
+    direct return-generating signal; the rank-only scenario changes the signal
+    shape, not this role vocabulary.
+    """
+
+    candidate_id: str
+    information_group: str | None
+    base_signal_family: str | None
+    role: str
+    base_random_stream_id: str | None = None
+    alias_of_candidate_id: str | None = None
+    observation_variant_id: str | None = None
+    measurement_noise_stream_id: str | None = None
+    null_noise_stream_id: str | None = None
+    standardization_id: str | None = None
+    expression_type: str | None = None
+    direction: int | None = None
+    effect_scale_label: str | None = None
+    effect_curve_id: str | None = None
+    w_effect_id: str | None = None
+    mirror_sign: int | None = None
+    beta_id: str | None = None
+    beta_total: float | None = None
+    beta_rank: float | None = None
+    w_rank: str | None = None
+    analytic_truth_proof: str | None = None
+    rho: float | None = None
+    noise_scale: float | None = None
+    return_inclusion: bool | None = None
+    marginal_predictive_truth: int | None = None
+
+
+@dataclass(frozen=True)
+class KnownTruthScenarioV1:
+    """A truth role plus a complete 159-candidate truth manifest slice."""
+
+    scenario_id: str
+    truth_role: str
+    information_groups: tuple[str, ...]
+    expression_id: str
+    truth_assignments: tuple[KnownTruthSignalAssignmentV1, ...]
+
+
+@dataclass(frozen=True)
+class KnownTruthTaskV1:
+    """Stable identity for one development or formal simulation task."""
+
+    task_id: str
+    scenario_id: str
+    phase: str
+    replicate_id: int
+    seed_namespace: str
+    seed: int
+
+
+@dataclass(frozen=True)
+class KnownTruthSimulationContractV1:
+    """Pure, pre-generation contract for the Issue #34 simulation.
+
+    This object freezes identities and validation rules only.  It is not a
+    generator and has no permission to call the formal L0--L4 path.  The
+    scenario-specific information-group allocation, signal-family allocation,
+    noise streams, and direct members must be provided by a later approved
+    scenario manifest; this validator checks that such a manifest is complete
+    and internally coherent without selecting those scientific values.
+    """
+
+    contract_id: str
+    registry_candidate_ids: tuple[str, ...]
+    admitted_symbols: tuple[str, ...]
+    registry_identity: str
+    registry_source: str
+    registry_source_sha256: str
+    registry_feature_count: int
+    candidate_identity_source: str
+    candidate_identity_source_sha256: str
+    candidate_horizon_counts: tuple[tuple[str, int], ...]
+    universe_identity: str
+    universe_source: str
+    universe_source_sha256: str
+    horizons: tuple[str, ...]
+    beta_total_scales: tuple[tuple[str, float], ...]
+    effect_curve_ids: tuple[str, ...]
+    mirror_signs: tuple[int, ...]
+    effect_case_coverage: tuple[tuple[str, str, int], ...]
+    formal_replicates: int
+    development_seed_namespace: str
+    formal_seed_namespace: str
+    allow_adaptive_append: bool
+    append_policy: str
+    reality_analysis_scope: str
+    simulation_effect_scope: str
+    scenarios: tuple[KnownTruthScenarioV1, ...]
+    tasks: tuple[KnownTruthTaskV1, ...]
+    lifecycle: str
+    authority: str
+    inputs: tuple[str, ...]
+    may_be_used_for: str
+    must_not_be_used_for: str
+    archive_condition: str
+
+
+def _known_truth_text(value: object, *, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"known-truth contract {label} must be a non-empty string")
+    return value
+
+
+def _known_truth_tuple(value: object, *, label: str) -> tuple[object, ...]:
+    if not isinstance(value, tuple):
+        raise ValueError(f"known-truth contract {label} must be an immutable tuple")
+    return value
+
+
+def _known_truth_decimal(value: object, *, label: str) -> Decimal:
+    if isinstance(value, bool):
+        raise ValueError(f"known-truth contract {label} must be finite")
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        raise ValueError(f"known-truth contract {label} must be finite") from None
+    if not result.is_finite():
+        raise ValueError(f"known-truth contract {label} must be finite")
+    return result
+
+
+def _validate_known_truth_scales_v1(
+    actual_scales: object,
+) -> None:
+    scales = _known_truth_tuple(actual_scales, label="beta_total_scales")
+    if len(scales) != len(KNOWN_TRUTH_BETA_TOTAL_SCALES_V1):
+        raise ValueError("known-truth contract must contain exactly five beta_total scales")
+    seen_labels: set[str] = set()
+    for index, (actual, expected) in enumerate(
+        zip(scales, KNOWN_TRUTH_BETA_TOTAL_SCALES_V1, strict=True)
+    ):
+        if not isinstance(actual, tuple) or len(actual) != 2:
+            raise ValueError(f"known-truth beta_total scale {index} must be (label, value)")
+        label, value = actual
+        if label != expected[0] or label in seen_labels:
+            raise ValueError("known-truth beta_total scale labels/order are not frozen")
+        if _known_truth_decimal(value, label=f"beta_total_scales[{index}].value") != _known_truth_decimal(
+            expected[1], label=f"expected beta_total_scales[{index}].value"
+        ):
+            raise ValueError("known-truth beta_total scale value changed")
+        seen_labels.add(label)
+
+
+def _validate_known_truth_assignment_v1(
+    assignment: KnownTruthSignalAssignmentV1,
+    *,
+    candidate_ids: set[str],
+    information_groups: set[str],
+    scenario_role: str,
+    scenario_expression_id: str,
+) -> None:
+    if not isinstance(assignment, KnownTruthSignalAssignmentV1):
+        raise TypeError("known-truth scenario assignments must use the v1 data structure")
+    candidate_id = _known_truth_text(assignment.candidate_id, label="candidate_id")
+    if candidate_id not in candidate_ids:
+        raise ValueError("known-truth assignment references an unknown candidate")
+    if assignment.role not in KNOWN_TRUTH_CANDIDATE_ROLES_V1:
+        raise ValueError(f"unknown known-truth candidate role: {assignment.role!r}")
+
+    if assignment.role == "null":
+        if any(
+            value is not None
+            for value in (
+                assignment.information_group,
+                assignment.base_signal_family,
+                assignment.base_random_stream_id,
+            )
+        ):
+            raise ValueError("known-truth null candidates cannot bind a base signal")
+    else:
+        information_group = _known_truth_text(
+            assignment.information_group,
+            label="information_group",
+        )
+        if information_group not in information_groups:
+            raise ValueError("known-truth assignment references an unregistered information group")
+        _known_truth_text(assignment.base_signal_family, label="base_signal_family")
+        _known_truth_text(assignment.base_random_stream_id, label="base_random_stream_id")
+
+    _known_truth_text(assignment.standardization_id, label="standardization_id")
+    expression_type = _known_truth_text(assignment.expression_type, label="expression_type")
+    _known_truth_text(assignment.analytic_truth_proof, label="analytic_truth_proof")
+    if assignment.role == "null":
+        if expression_type != KNOWN_TRUTH_NULL_EXPRESSION_V1:
+            raise ValueError("known-truth null expression type is not the frozen null expression")
+    elif scenario_expression_id == KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1:
+        if expression_type != KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1:
+            raise ValueError("rank_only candidates require the independent rank-only expression")
+    elif expression_type != KNOWN_TRUTH_SCALAR_EXPRESSION_V1:
+        raise ValueError("non-rank known-truth candidates require the scalar expression")
+
+    if assignment.return_inclusion not in {True, False}:
+        raise ValueError("known-truth return_inclusion must be an explicit boolean")
+    if (
+        not isinstance(assignment.marginal_predictive_truth, Integral)
+        or isinstance(assignment.marginal_predictive_truth, bool)
+        or assignment.marginal_predictive_truth not in {0, 1}
+    ):
+        raise ValueError("known-truth marginal_predictive_truth must be 0 or 1")
+
+    if assignment.role == "null":
+        if assignment.observation_variant_id is not None:
+            raise ValueError("known-truth null candidates cannot use an observation variant")
+        _known_truth_text(assignment.null_noise_stream_id, label="null_noise_stream_id")
+        if assignment.measurement_noise_stream_id is not None:
+            raise ValueError("known-truth null candidates cannot use measurement noise")
+    else:
+        _known_truth_text(assignment.observation_variant_id, label="observation_variant_id")
+        if assignment.null_noise_stream_id is not None:
+            raise ValueError("known-truth non-null candidates cannot use null noise")
+
+    if assignment.role == "alias":
+        alias_of = _known_truth_text(assignment.alias_of_candidate_id, label="alias_of_candidate_id")
+        if alias_of not in candidate_ids or alias_of == candidate_id:
+            raise ValueError("known-truth alias must reference a different registered candidate")
+    elif assignment.alias_of_candidate_id is not None:
+        raise ValueError("only alias candidates may set alias_of_candidate_id")
+
+    if assignment.role in {"proxy", "near_alias"}:
+        _known_truth_text(
+            assignment.measurement_noise_stream_id,
+            label="measurement_noise_stream_id",
+        )
+        if assignment.null_noise_stream_id is not None:
+            raise ValueError("proxy and near_alias candidates cannot use null noise")
+    elif assignment.measurement_noise_stream_id is not None:
+        raise ValueError("only proxy and near_alias candidates may use measurement noise")
+
+    if assignment.role in {"proxy", "near_alias", "null"}:
+        noise_scale = _known_truth_decimal(assignment.noise_scale, label="noise_scale")
+        if noise_scale <= 0:
+            raise ValueError("known-truth noise_scale must be positive")
+    elif assignment.noise_scale is not None:
+        raise ValueError("direct and alias candidates cannot set noise_scale")
+
+    if assignment.role in {"proxy", "near_alias"}:
+        rho = _known_truth_decimal(assignment.rho, label="rho")
+        if rho == 0 or abs(rho) >= 1:
+            raise ValueError("known-truth proxy rho must satisfy 0 < abs(rho) < 1")
+        if assignment.direction != (1 if rho > 0 else -1):
+            raise ValueError("proxy direction must match the sign of rho")
+    elif assignment.rho is not None:
+        raise ValueError("only proxy and near_alias candidates may set rho")
+
+    if assignment.role == "null":
+        if assignment.direction is not None:
+            raise ValueError("null candidates cannot declare a direction")
+        if assignment.return_inclusion is not False or assignment.marginal_predictive_truth != 0:
+            raise ValueError("null candidates must be excluded from returns and have M=0")
+    else:
+        if (
+            not isinstance(assignment.direction, Integral)
+            or isinstance(assignment.direction, bool)
+            or assignment.direction not in KNOWN_TRUTH_MIRROR_SIGNS_V1
+        ):
+            raise ValueError("predictive known-truth candidates require a direction of -1 or 1")
+        if assignment.return_inclusion is not (assignment.role == "direct"):
+            raise ValueError("only direct candidates may enter the return path")
+        if assignment.marginal_predictive_truth != 1:
+            raise ValueError("predictive known-truth candidates must have M=1")
+
+    effect_fields = (
+        assignment.effect_scale_label,
+        assignment.effect_curve_id,
+        assignment.w_effect_id,
+        assignment.mirror_sign,
+        assignment.beta_id,
+        assignment.beta_total,
+    )
+    rank_effect_fields = (
+        assignment.effect_scale_label,
+        assignment.effect_curve_id,
+        assignment.mirror_sign,
+        assignment.beta_id,
+        assignment.beta_rank,
+        assignment.w_rank,
+    )
+    if assignment.role == "direct":
+        if scenario_expression_id == KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1:
+            if any(value is None for value in rank_effect_fields):
+                raise ValueError(
+                    "rank-only direct candidates require scale, curve, w_rank, sign, beta, and beta_rank"
+                )
+            if assignment.w_effect_id is not None or assignment.beta_total is not None:
+                raise ValueError("rank-only direct candidates cannot bind scalar beta_total or w_effect")
+        else:
+            if any(value is None for value in effect_fields):
+                raise ValueError(
+                    "direct known-truth candidates require scale, curve, w_effect, sign, beta, and beta_total"
+                )
+            if assignment.beta_rank is not None or assignment.w_rank is not None:
+                raise ValueError("scalar direct candidates cannot bind rank-only effect fields")
+        if assignment.effect_scale_label not in {
+            label for label, _ in KNOWN_TRUTH_BETA_TOTAL_SCALES_V1
+        }:
+            raise ValueError("known-truth effect scale label is not frozen")
+        if assignment.effect_curve_id not in KNOWN_TRUTH_EFFECT_CURVES_V1:
+            raise ValueError("known-truth effect curve is not frozen")
+        if scenario_expression_id == KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1:
+            if assignment.w_rank != assignment.effect_curve_id:
+                raise ValueError("known-truth w_rank must bind the declared rank-only effect curve")
+        elif assignment.w_effect_id != assignment.effect_curve_id:
+            raise ValueError("known-truth w_effect must bind the declared effect curve")
+        if assignment.mirror_sign not in KNOWN_TRUTH_MIRROR_SIGNS_V1:
+            raise ValueError("known-truth mirror sign is not frozen")
+        if assignment.direction != assignment.mirror_sign:
+            raise ValueError("direct direction must equal its effect mirror sign")
+        expected_beta = dict(KNOWN_TRUTH_BETA_TOTAL_SCALES_V1)[assignment.effect_scale_label]
+        if scenario_expression_id == KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1:
+            if _known_truth_decimal(assignment.beta_rank, label="beta_rank") != _known_truth_decimal(
+                expected_beta,
+                label="expected beta_rank",
+            ):
+                raise ValueError("rank-only beta_rank does not match its frozen scale label")
+        elif _known_truth_decimal(assignment.beta_total, label="beta_total") != _known_truth_decimal(
+            expected_beta,
+            label="expected beta_total",
+        ):
+            raise ValueError("direct beta_total does not match its frozen scale label")
+        _known_truth_text(assignment.beta_id, label="beta_id")
+    elif any(value is not None for value in effect_fields + rank_effect_fields):
+        raise ValueError("only direct candidates may bind effect fields")
+
+    if scenario_role == "all_null" and assignment.role != "null":
+        raise ValueError("all_null scenario must mark every candidate null")
+
+
+def _validate_known_truth_scenarios_v1(
+    scenarios: object,
+    *,
+    candidate_ids: tuple[str, ...],
+) -> tuple[set[str], set[tuple[str, str, int]]]:
+    scenario_rows = _known_truth_tuple(scenarios, label="scenarios")
+    if len(scenario_rows) < len(KNOWN_TRUTH_CORE_SCENARIO_ROLES_V1):
+        raise ValueError("known-truth contract is missing a core scenario")
+    expected_roles = set(KNOWN_TRUTH_CORE_SCENARIO_ROLES_V1)
+    allowed_roles = expected_roles | set(KNOWN_TRUTH_OPTIONAL_SCENARIO_ROLES_V1)
+    seen_ids: set[str] = set()
+    seen_roles: set[str] = set()
+    actual_effect_cases: set[tuple[str, str, int]] = set()
+    candidate_id_set = set(candidate_ids)
+    for scenario in scenario_rows:
+        if not isinstance(scenario, KnownTruthScenarioV1):
+            raise TypeError("known-truth scenarios must use the v1 data structure")
+        scenario_id = _known_truth_text(scenario.scenario_id, label="scenario_id")
+        if scenario_id in seen_ids:
+            raise ValueError("known-truth scenario identity is duplicated")
+        if scenario.truth_role not in allowed_roles or scenario.truth_role in seen_roles:
+            raise ValueError("known-truth scenario role is missing, duplicated, or unknown")
+        seen_ids.add(scenario_id)
+        seen_roles.add(scenario.truth_role)
+        expression_id = _known_truth_text(scenario.expression_id, label="expression_id")
+        expected_expression_id = (
+            KNOWN_TRUTH_NULL_EXPRESSION_V1
+            if scenario.truth_role == "all_null"
+            else KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1
+            if scenario.truth_role == "rank_only"
+            else KNOWN_TRUTH_SCALAR_EXPRESSION_V1
+        )
+        if expression_id != expected_expression_id:
+            raise ValueError("known-truth scenario expression does not match its truth role")
+        groups = _known_truth_tuple(scenario.information_groups, label="information_groups")
+        if not groups or any(
+            not isinstance(group, str) or not group.strip() for group in groups
+        ) or len(set(groups)) != len(groups):
+            raise ValueError("known-truth information groups must be non-empty and unique")
+        assignments = _known_truth_tuple(scenario.truth_assignments, label="truth_assignments")
+        if len(assignments) != len(candidate_ids):
+            raise ValueError("known-truth scenario must cover all 159 registry candidates")
+        assignment_ids: list[str] = []
+        for assignment in assignments:
+            _validate_known_truth_assignment_v1(
+                assignment,
+                candidate_ids=candidate_id_set,
+                information_groups=set(groups),
+                scenario_role=scenario.truth_role,
+                scenario_expression_id=expression_id,
+            )
+            assignment_ids.append(assignment.candidate_id)
+        if set(assignment_ids) != candidate_id_set or len(set(assignment_ids)) != len(assignment_ids):
+            raise ValueError("known-truth assignments must contain each registry candidate exactly once")
+        role_set = {assignment.role for assignment in assignments}
+        if scenario.truth_role == "direct_sparse" and "direct" not in role_set:
+            raise ValueError("direct_sparse scenario must contain a direct candidate")
+        if scenario.truth_role == "proxy_and_alias" and not {"proxy", "alias"}.issubset(role_set):
+            raise ValueError("proxy_and_alias scenario must contain proxy and alias candidates")
+        if scenario.truth_role == "rank_only" and "direct" not in role_set:
+            raise ValueError("rank_only scenario must contain a predictive candidate")
+
+        for assignment in assignments:
+            if assignment.role == "direct":
+                actual_effect_cases.add(
+                    (
+                        assignment.effect_scale_label,
+                        assignment.effect_curve_id,
+                        int(assignment.mirror_sign),
+                    )
+                )
+
+        assignment_by_id = {assignment.candidate_id: assignment for assignment in assignments}
+        direct_by_group: dict[str, list[KnownTruthSignalAssignmentV1]] = {}
+        for assignment in assignments:
+            if assignment.role == "direct":
+                direct_by_group.setdefault(assignment.information_group, []).append(assignment)
+        for assignment in assignments:
+            if assignment.role == "alias":
+                target = assignment_by_id.get(assignment.alias_of_candidate_id)
+                if target is None or target.role != "direct":
+                    raise ValueError("known-truth alias must point directly to a direct candidate")
+                if target.information_group != assignment.information_group:
+                    raise ValueError("known-truth alias and direct target must share information_group")
+                if target.alias_of_candidate_id is not None:
+                    raise ValueError("known-truth alias chain/cycle is not permitted")
+                if target.base_signal_family != assignment.base_signal_family:
+                    raise ValueError("known-truth alias must preserve the direct signal family")
+                if target.base_random_stream_id != assignment.base_random_stream_id:
+                    raise ValueError("known-truth alias must preserve the direct random stream")
+            if assignment.role in {"proxy", "near_alias"}:
+                direct_candidates = direct_by_group.get(assignment.information_group, [])
+                if not direct_candidates:
+                    raise ValueError("proxy and near_alias candidates require a direct candidate in their group")
+                if any(
+                    direct.base_signal_family != assignment.base_signal_family
+                    or direct.base_random_stream_id != assignment.base_random_stream_id
+                    for direct in direct_candidates
+                ):
+                    raise ValueError(
+                        "proxy and near_alias candidates must share base family and random stream with their direct group"
+                    )
+            if assignment.role == "null":
+                occupied_signal_streams = {
+                    other_stream
+                    for other in assignments
+                    for other_stream in (
+                        other.base_random_stream_id,
+                        other.measurement_noise_stream_id,
+                    )
+                    if other_stream is not None
+                }
+                if assignment.null_noise_stream_id in occupied_signal_streams:
+                    raise ValueError(
+                        "null noise stream must be independent of base and measurement streams"
+                    )
+    if not expected_roles.issubset(seen_roles):
+        raise ValueError("known-truth contract must include all four core scenario roles")
+    return seen_ids, actual_effect_cases
+
+
+def _validate_known_truth_tasks_v1(
+    tasks: object,
+    *,
+    scenario_ids: set[str],
+    development_namespace: str,
+    formal_namespace: str,
+) -> None:
+    task_rows = _known_truth_tuple(tasks, label="tasks")
+    if not task_rows:
+        raise ValueError("known-truth contract must contain formal tasks")
+    seen_task_ids: set[str] = set()
+    seen_identities: set[tuple[object, ...]] = set()
+    seen_seed_keys: set[tuple[str, str, int]] = set()
+    formal_counts: dict[str, int] = {scenario_id: 0 for scenario_id in scenario_ids}
+    formal_replicates: dict[str, set[int]] = {scenario_id: set() for scenario_id in scenario_ids}
+    for task in task_rows:
+        if not isinstance(task, KnownTruthTaskV1):
+            raise TypeError("known-truth tasks must use the v1 data structure")
+        task_id = _known_truth_text(task.task_id, label="task_id")
+        if task_id in seen_task_ids:
+            raise ValueError("known-truth task identity is duplicated")
+        if task.scenario_id not in scenario_ids:
+            raise ValueError("known-truth task references an unknown scenario")
+        if task.phase not in KNOWN_TRUTH_SEED_PHASES_V1:
+            raise ValueError("known-truth task phase must be development or formal")
+        expected_namespace = (
+            formal_namespace if task.phase == "formal" else development_namespace
+        )
+        if task.seed_namespace != expected_namespace:
+            raise ValueError("known-truth task uses the wrong seed namespace")
+        if not isinstance(task.replicate_id, Integral) or isinstance(task.replicate_id, bool):
+            raise ValueError("known-truth replicate_id must be an integer")
+        if not isinstance(task.seed, Integral) or isinstance(task.seed, bool):
+            raise ValueError("known-truth seed must be an integer")
+        seed_key = (task.phase, task.seed_namespace, int(task.seed))
+        if seed_key in seen_seed_keys:
+            raise ValueError("known-truth seed must be unique within its phase and namespace")
+        identity = (
+            task.scenario_id,
+            task.phase,
+            int(task.replicate_id),
+            task.seed_namespace,
+            int(task.seed),
+        )
+        if identity in seen_identities:
+            raise ValueError("known-truth task identity tuple is duplicated")
+        seen_task_ids.add(task_id)
+        seen_identities.add(identity)
+        seen_seed_keys.add(seed_key)
+        if task.phase == "formal":
+            if not 0 <= int(task.replicate_id) < KNOWN_TRUTH_FORMAL_REPLICATES_V1:
+                raise ValueError("known-truth formal replicate_id is outside the closed range")
+            formal_counts[task.scenario_id] += 1
+            formal_replicates[task.scenario_id].add(int(task.replicate_id))
+    for scenario_id, count in formal_counts.items():
+        if count != KNOWN_TRUTH_FORMAL_REPLICATES_V1:
+            raise ValueError(
+                f"known-truth formal task count for {scenario_id} must be "
+                f"{KNOWN_TRUTH_FORMAL_REPLICATES_V1}, got {count}"
+            )
+        if formal_replicates[scenario_id] != set(range(KNOWN_TRUTH_FORMAL_REPLICATES_V1)):
+            raise ValueError("known-truth formal replicate set is not the closed 0..1099 set")
+
+
+def validate_known_truth_simulation_contract_v1(
+    contract: KnownTruthSimulationContractV1,
+) -> KnownTruthSimulationContractV1:
+    """Validate a frozen simulation contract without executing any pipeline.
+
+    The validator is the sole public contract gate for this phase.  It checks
+    only identities and frozen design invariants: the formal qlab registry and
+    its 20-asset universe, four horizons, five shared absolute ``beta_total``
+    scales, all curve/sign cases, explicit truth-role fields, per-scenario
+    ``N=1100``, separated seed namespaces, no result-driven append, complete
+    core truth roles, and exact lifecycle metadata.
+    It deliberately does not generate data, estimate an effect, call L0--L4,
+    or inspect any discovery result.
+    """
+    if not isinstance(contract, KnownTruthSimulationContractV1):
+        raise TypeError("contract must be KnownTruthSimulationContractV1")
+    _known_truth_text(contract.contract_id, label="contract_id")
+
+    candidate_ids = _known_truth_tuple(
+        contract.registry_candidate_ids,
+        label="registry_candidate_ids",
+    )
+    if candidate_ids != KNOWN_TRUTH_REGISTRY_CANDIDATE_IDS_V1:
+        raise ValueError(
+            "known-truth registry candidate identities must match the formal qlab registry"
+        )
+    if _json_content_sha256(list(candidate_ids)) != KNOWN_TRUTH_REGISTRY_CANDIDATE_IDS_SHA256_V1:
+        raise ValueError("known-truth formal qlab registry identity digest is not frozen")
+
+    symbols = _known_truth_tuple(contract.admitted_symbols, label="admitted_symbols")
+    if symbols != KNOWN_TRUTH_ADMITTED_SYMBOLS_V1:
+        raise ValueError("known-truth universe symbols/order do not match the frozen universe")
+    for label, actual, expected in (
+        ("registry_identity", contract.registry_identity, KNOWN_TRUTH_REGISTRY_IDENTITY_V1),
+        ("registry_source", contract.registry_source, KNOWN_TRUTH_REGISTRY_SOURCE_V1),
+        (
+            "registry_source_sha256",
+            contract.registry_source_sha256,
+            KNOWN_TRUTH_REGISTRY_SOURCE_SHA256_V1,
+        ),
+        (
+            "candidate_identity_source",
+            contract.candidate_identity_source,
+            KNOWN_TRUTH_CANDIDATE_IDENTITY_SOURCE_V1,
+        ),
+        (
+            "candidate_identity_source_sha256",
+            contract.candidate_identity_source_sha256,
+            KNOWN_TRUTH_CANDIDATE_IDENTITY_SOURCE_SHA256_V1,
+        ),
+        ("universe_identity", contract.universe_identity, KNOWN_TRUTH_UNIVERSE_IDENTITY_V1),
+        ("universe_source", contract.universe_source, KNOWN_TRUTH_UNIVERSE_SOURCE_V1),
+        (
+            "universe_source_sha256",
+            contract.universe_source_sha256,
+            KNOWN_TRUTH_UNIVERSE_SOURCE_SHA256_V1,
+        ),
+    ):
+        if _known_truth_text(actual, label=label) != expected:
+            raise ValueError(f"known-truth {label} is not the frozen source identity")
+    if (
+        not isinstance(contract.registry_feature_count, Integral)
+        or isinstance(contract.registry_feature_count, bool)
+        or contract.registry_feature_count != KNOWN_TRUTH_REGISTRY_FEATURE_COUNT_V1
+    ):
+        raise ValueError("known-truth registry feature count is not the frozen 68")
+    candidate_horizon_counts = _known_truth_tuple(
+        contract.candidate_horizon_counts,
+        label="candidate_horizon_counts",
+    )
+    if (
+        len(candidate_horizon_counts) != len(KNOWN_TRUTH_CANDIDATE_HORIZON_COUNTS_V1)
+        or any(
+            not isinstance(row, tuple)
+            or len(row) != 2
+            or not isinstance(row[0], str)
+            or not isinstance(row[1], Integral)
+            or isinstance(row[1], bool)
+            for row in candidate_horizon_counts
+        )
+        or candidate_horizon_counts != KNOWN_TRUTH_CANDIDATE_HORIZON_COUNTS_V1
+    ):
+        raise ValueError("known-truth candidate horizon counts must be 23/23/45/68")
+    horizons = _known_truth_tuple(contract.horizons, label="horizons")
+    if horizons != KNOWN_TRUTH_HORIZONS_V1:
+        raise ValueError("known-truth contract horizons must be 4h, 8h, 12h, 1d")
+    _validate_known_truth_scales_v1(contract.beta_total_scales)
+    effect_curve_ids = _known_truth_tuple(
+        contract.effect_curve_ids,
+        label="effect_curve_ids",
+    )
+    if (
+        len(effect_curve_ids) != len(KNOWN_TRUTH_EFFECT_CURVES_V1)
+        or any(not isinstance(curve_id, str) for curve_id in effect_curve_ids)
+        or effect_curve_ids != KNOWN_TRUTH_EFFECT_CURVES_V1
+    ):
+        raise ValueError("known-truth contract must contain fast, delayed, persistent curves")
+    mirror_signs = _known_truth_tuple(contract.mirror_signs, label="mirror_signs")
+    if (
+        len(mirror_signs) != len(KNOWN_TRUTH_MIRROR_SIGNS_V1)
+        or any(
+            not isinstance(sign, Integral) or isinstance(sign, bool)
+            for sign in mirror_signs
+        )
+        or mirror_signs != KNOWN_TRUTH_MIRROR_SIGNS_V1
+    ):
+        raise ValueError("known-truth contract must contain both negative and positive mirrors")
+    effect_case_coverage = _known_truth_tuple(
+        contract.effect_case_coverage,
+        label="effect_case_coverage",
+    )
+    if (
+        len(effect_case_coverage) != len(KNOWN_TRUTH_EFFECT_CASE_COVERAGE_V1)
+        or any(
+            not isinstance(row, tuple)
+            or len(row) != 3
+            or not isinstance(row[0], str)
+            or not isinstance(row[1], str)
+            or not isinstance(row[2], Integral)
+            or isinstance(row[2], bool)
+            for row in effect_case_coverage
+        )
+        or effect_case_coverage != KNOWN_TRUTH_EFFECT_CASE_COVERAGE_V1
+    ):
+        raise ValueError("known-truth effect coverage must contain all five-by-three-by-two cases")
+    if (
+        not isinstance(contract.formal_replicates, Integral)
+        or isinstance(contract.formal_replicates, bool)
+        or contract.formal_replicates != KNOWN_TRUTH_FORMAL_REPLICATES_V1
+    ):
+        raise ValueError("known-truth formal replicate count must be exactly 1100")
+    development_namespace = _known_truth_text(
+        contract.development_seed_namespace,
+        label="development_seed_namespace",
+    )
+    formal_namespace = _known_truth_text(
+        contract.formal_seed_namespace,
+        label="formal_seed_namespace",
+    )
+    if development_namespace == formal_namespace:
+        raise ValueError("known-truth development and formal seed namespaces must differ")
+    if contract.allow_adaptive_append is not False:
+        raise ValueError("known-truth contract must forbid result-driven append")
+    if contract.append_policy != KNOWN_TRUTH_APPEND_POLICY_V1:
+        raise ValueError("known-truth append policy is not the frozen stop-and-report rule")
+    if contract.reality_analysis_scope != KNOWN_TRUTH_REALITY_SCOPE_V1:
+        raise ValueError("reality analysis must remain independent per signal and horizon")
+    if contract.simulation_effect_scope != KNOWN_TRUTH_SIMULATION_EFFECT_SCOPE_V1:
+        raise ValueError("simulation effect scope is not the frozen shared-beta rule")
+
+    scenario_ids, actual_effect_cases = _validate_known_truth_scenarios_v1(
+        contract.scenarios,
+        candidate_ids=tuple(str(candidate_id) for candidate_id in candidate_ids),
+    )
+    if actual_effect_cases != set(KNOWN_TRUTH_EFFECT_CASE_COVERAGE_V1):
+        raise ValueError(
+            "known-truth effect coverage must be realized by direct truth assignments"
+        )
+    _validate_known_truth_tasks_v1(
+        contract.tasks,
+        scenario_ids=scenario_ids,
+        development_namespace=development_namespace,
+        formal_namespace=formal_namespace,
+    )
+
+    if _known_truth_text(contract.lifecycle, label="lifecycle") != KNOWN_TRUTH_LIFECYCLE_V1:
+        raise ValueError("known-truth lifecycle is not the frozen candidate-contract lifecycle")
+    if _known_truth_text(contract.authority, label="authority") != KNOWN_TRUTH_FORMAL_AUTHORITY_V1:
+        raise ValueError("known-truth authority is not the frozen Issue #34/#36 authority")
+    inputs = _known_truth_tuple(contract.inputs, label="inputs")
+    if inputs != KNOWN_TRUTH_INPUTS_V1:
+        raise ValueError("known-truth contract inputs are incomplete or reordered")
+    if _known_truth_text(contract.may_be_used_for, label="may_be_used_for") != KNOWN_TRUTH_MAY_BE_USED_FOR_V1:
+        raise ValueError("known-truth may_be_used_for is not the frozen boundary")
+    if _known_truth_text(contract.must_not_be_used_for, label="must_not_be_used_for") != KNOWN_TRUTH_MUST_NOT_BE_USED_FOR_V1:
+        raise ValueError("known-truth must_not_be_used_for is not the frozen boundary")
+    if _known_truth_text(contract.archive_condition, label="archive_condition") != KNOWN_TRUTH_ARCHIVE_CONDITION_V1:
+        raise ValueError("known-truth archive_condition is not the frozen boundary")
+    return contract
+
+
 __all__ = [
     "DecisionWindow",
+    "KNOWN_TRUTH_ADMITTED_SYMBOLS_V1",
+    "KNOWN_TRUTH_ARCHIVE_CONDITION_V1",
+    "KNOWN_TRUTH_BETA_TOTAL_SCALES_V1",
+    "KNOWN_TRUTH_CANDIDATE_HORIZON_COUNTS_V1",
+    "KNOWN_TRUTH_CANDIDATE_IDENTITY_SOURCE_SHA256_V1",
+    "KNOWN_TRUTH_CANDIDATE_IDENTITY_SOURCE_V1",
+    "KNOWN_TRUTH_CORE_SCENARIO_ROLES_V1",
+    "KNOWN_TRUTH_EFFECT_CURVES_V1",
+    "KNOWN_TRUTH_EFFECT_CASE_COVERAGE_V1",
+    "KNOWN_TRUTH_FORMAL_AUTHORITY_V1",
+    "KNOWN_TRUTH_FORMAL_REPLICATES_V1",
+    "KNOWN_TRUTH_HORIZONS_V1",
+    "KNOWN_TRUTH_INPUTS_V1",
+    "KNOWN_TRUTH_LIFECYCLE_V1",
+    "KNOWN_TRUTH_MAY_BE_USED_FOR_V1",
+    "KNOWN_TRUTH_MUST_NOT_BE_USED_FOR_V1",
+    "KNOWN_TRUTH_MIRROR_SIGNS_V1",
+    "KNOWN_TRUTH_NULL_EXPRESSION_V1",
+    "KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1",
+    "KNOWN_TRUTH_REGISTRY_CANDIDATE_IDS_SHA256_V1",
+    "KNOWN_TRUTH_REGISTRY_CANDIDATE_IDS_V1",
+    "KNOWN_TRUTH_REGISTRY_FEATURE_COUNT_V1",
+    "KNOWN_TRUTH_REGISTRY_SOURCE_SHA256_V1",
+    "KNOWN_TRUTH_REGISTRY_SOURCE_V1",
+    "KNOWN_TRUTH_SCALAR_EXPRESSION_V1",
+    "KNOWN_TRUTH_SEED_PHASES_V1",
+    "KNOWN_TRUTH_SIMULATION_EFFECT_SCOPE_V1",
+    "KNOWN_TRUTH_UNIVERSE_IDENTITY_V1",
+    "KNOWN_TRUTH_UNIVERSE_SOURCE_SHA256_V1",
+    "KNOWN_TRUTH_UNIVERSE_SOURCE_V1",
+    "KnownTruthScenarioV1",
+    "KnownTruthSignalAssignmentV1",
+    "KnownTruthSimulationContractV1",
+    "KnownTruthTaskV1",
     "ObservedEffectCandidate",
     "ObservedEffectBetaTotalArtifacts",
     "ObservedEffectScaleContract",
@@ -2102,4 +2986,5 @@ __all__ = [
     "ObservedEffectScaleInput",
     "estimate_l0_l4_observed_effect_scale_v1",
     "map_observed_effect_scale_to_beta_total_v1",
+    "validate_known_truth_simulation_contract_v1",
 ]
