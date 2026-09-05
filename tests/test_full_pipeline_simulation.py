@@ -11,6 +11,37 @@ import pytest
 from qlab.data.crypto import keystore_coinglass_factors as factor_registry
 from qlab.full_pipeline_simulation import (
     DecisionWindow,
+    KNOWN_TRUTH_ADMITTED_SYMBOLS_V1,
+    KNOWN_TRUTH_ARCHIVE_CONDITION_V1,
+    KNOWN_TRUTH_BETA_TOTAL_SCALES_V1,
+    KNOWN_TRUTH_CANDIDATE_HORIZON_COUNTS_V1,
+    KNOWN_TRUTH_CANDIDATE_IDENTITY_SOURCE_SHA256_V1,
+    KNOWN_TRUTH_CANDIDATE_IDENTITY_SOURCE_V1,
+    KNOWN_TRUTH_EFFECT_CURVES_V1,
+    KNOWN_TRUTH_EFFECT_CASE_COVERAGE_V1,
+    KNOWN_TRUTH_FORMAL_AUTHORITY_V1,
+    KNOWN_TRUTH_FORMAL_REPLICATES_V1,
+    KNOWN_TRUTH_HORIZONS_V1,
+    KNOWN_TRUTH_INPUTS_V1,
+    KNOWN_TRUTH_LIFECYCLE_V1,
+    KNOWN_TRUTH_MAY_BE_USED_FOR_V1,
+    KNOWN_TRUTH_MUST_NOT_BE_USED_FOR_V1,
+    KNOWN_TRUTH_MIRROR_SIGNS_V1,
+    KNOWN_TRUTH_NULL_EXPRESSION_V1,
+    KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1,
+    KNOWN_TRUTH_REGISTRY_CANDIDATE_IDS_V1,
+    KNOWN_TRUTH_REGISTRY_FEATURE_COUNT_V1,
+    KNOWN_TRUTH_REGISTRY_IDENTITY_V1,
+    KNOWN_TRUTH_REGISTRY_SOURCE_SHA256_V1,
+    KNOWN_TRUTH_REGISTRY_SOURCE_V1,
+    KNOWN_TRUTH_SCALAR_EXPRESSION_V1,
+    KNOWN_TRUTH_UNIVERSE_IDENTITY_V1,
+    KNOWN_TRUTH_UNIVERSE_SOURCE_SHA256_V1,
+    KNOWN_TRUTH_UNIVERSE_SOURCE_V1,
+    KnownTruthScenarioV1,
+    KnownTruthSignalAssignmentV1,
+    KnownTruthSimulationContractV1,
+    KnownTruthTaskV1,
     ObservedEffectCandidate,
     ObservedEffectScaleContract,
     ObservedEffectScaleInput,
@@ -23,6 +54,7 @@ from qlab.full_pipeline_simulation import (
     _validate_contract,
     _validate_frozen_source_manifest_identity,
     estimate_l0_l4_observed_effect_scale_v1,
+    validate_known_truth_simulation_contract_v1,
 )
 
 
@@ -1165,3 +1197,624 @@ def test_public_entry_has_no_selection_or_significance_input():
             },
             l2_gate=True,
         )
+
+
+def _known_truth_contract_fixture() -> KnownTruthSimulationContractV1:
+    """Build a complete identity-only fixture; it never generates data."""
+    candidate_ids = KNOWN_TRUTH_REGISTRY_CANDIDATE_IDS_V1
+    symbols = KNOWN_TRUTH_ADMITTED_SYMBOLS_V1
+
+    def assignments_for(
+        scenario_role: str,
+    ) -> tuple[KnownTruthSignalAssignmentV1, ...]:
+        assignments = []
+        for index, candidate_id in enumerate(candidate_ids):
+            role = "null"
+            information_group = None
+            base_signal_family = None
+            base_random_stream_id = None
+            kwargs: dict[str, object] = {
+                "observation_variant_id": None,
+                "standardization_id": "null-standardization-v1",
+                "expression_type": KNOWN_TRUTH_NULL_EXPRESSION_V1,
+                "analytic_truth_proof": "null stream is disconnected from every return innovation",
+                "null_noise_stream_id": f"null-noise-{scenario_role}",
+                "return_inclusion": False,
+                "marginal_predictive_truth": 0,
+                "noise_scale": 1.0,
+            }
+            if scenario_role == "direct_sparse" and index < len(KNOWN_TRUTH_EFFECT_CASE_COVERAGE_V1):
+                role = "direct"
+                information_group = "direct-group"
+                base_signal_family = "base-family-direct"
+                base_random_stream_id = "base-random-direct"
+                scale_label, curve_id, mirror_sign = KNOWN_TRUTH_EFFECT_CASE_COVERAGE_V1[index]
+                kwargs = {
+                    "observation_variant_id": "identity-v1",
+                    "standardization_id": "standardized-scalar-v1",
+                    "expression_type": KNOWN_TRUTH_SCALAR_EXPRESSION_V1,
+                    "analytic_truth_proof": "direct standardized signal enters the return recursion",
+                    "return_inclusion": True,
+                    "marginal_predictive_truth": 1,
+                    "direction": mirror_sign,
+                    "effect_scale_label": scale_label,
+                    "effect_curve_id": curve_id,
+                    "w_effect_id": curve_id,
+                    "mirror_sign": mirror_sign,
+                    "beta_id": f"beta-{scale_label}-{curve_id}-{mirror_sign}",
+                    "beta_total": dict(KNOWN_TRUTH_BETA_TOTAL_SCALES_V1)[scale_label],
+                }
+            elif scenario_role == "proxy_and_alias" and index == 0:
+                role = "direct"
+                information_group = "proxy-group"
+                base_signal_family = "base-family-proxy"
+                base_random_stream_id = "base-random-proxy"
+                kwargs = {
+                    "observation_variant_id": "identity-v1",
+                    "standardization_id": "standardized-scalar-v1",
+                    "expression_type": KNOWN_TRUTH_SCALAR_EXPRESSION_V1,
+                    "analytic_truth_proof": "direct standardized signal enters the return recursion",
+                    "return_inclusion": True,
+                    "marginal_predictive_truth": 1,
+                    "direction": 1,
+                    "effect_scale_label": "center",
+                    "effect_curve_id": "delayed",
+                    "w_effect_id": "delayed",
+                    "mirror_sign": 1,
+                    "beta_id": "beta-center-delayed-positive",
+                    "beta_total": dict(KNOWN_TRUTH_BETA_TOTAL_SCALES_V1)["center"],
+                }
+            elif scenario_role == "proxy_and_alias" and index == 1:
+                role = "proxy"
+                information_group = "proxy-group"
+                base_signal_family = "base-family-proxy"
+                base_random_stream_id = "base-random-proxy"
+                kwargs = {
+                    "observation_variant_id": "identity-v1",
+                    "standardization_id": "standardized-scalar-v1",
+                    "expression_type": KNOWN_TRUTH_SCALAR_EXPRESSION_V1,
+                    "analytic_truth_proof": "nonzero rho preserves marginal predictive information",
+                    "measurement_noise_stream_id": "noise-proxy-0",
+                    "rho": 0.5,
+                    "noise_scale": 0.25,
+                    "direction": 1,
+                    "return_inclusion": False,
+                    "marginal_predictive_truth": 1,
+                }
+            elif scenario_role == "proxy_and_alias" and index == 2:
+                role = "alias"
+                information_group = "proxy-group"
+                base_signal_family = "base-family-proxy"
+                base_random_stream_id = "base-random-proxy"
+                kwargs = {
+                    "alias_of_candidate_id": candidate_ids[0],
+                    "observation_variant_id": "identity-v1",
+                    "standardization_id": "standardized-scalar-v1",
+                    "expression_type": KNOWN_TRUTH_SCALAR_EXPRESSION_V1,
+                    "analytic_truth_proof": "exact alias is a deterministic one-to-one direct expression",
+                    "direction": 1,
+                    "return_inclusion": False,
+                    "marginal_predictive_truth": 1,
+                }
+            elif scenario_role == "rank_only" and index == 0:
+                role = "direct"
+                information_group = "rank-group"
+                base_signal_family = "base-family-rank"
+                base_random_stream_id = "base-random-rank"
+                kwargs = {
+                    "observation_variant_id": "identity-v1",
+                    "standardization_id": "rank-standardization-v1",
+                    "expression_type": KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1,
+                    "analytic_truth_proof": "rank-only direct signal is the sole return driver",
+                    "return_inclusion": True,
+                    "marginal_predictive_truth": 1,
+                    "direction": -1,
+                    "effect_scale_label": "strong",
+                    "effect_curve_id": "persistent",
+                    "mirror_sign": -1,
+                    "beta_id": "beta-rank-strong-persistent-negative",
+                    "beta_rank": dict(KNOWN_TRUTH_BETA_TOTAL_SCALES_V1)["strong"],
+                    "w_rank": "persistent",
+                }
+            assignments.append(
+                KnownTruthSignalAssignmentV1(
+                    candidate_id=candidate_id,
+                    information_group=information_group,
+                    base_signal_family=base_signal_family,
+                    role=role,
+                    base_random_stream_id=base_random_stream_id,
+                    **kwargs,
+                )
+            )
+        return tuple(assignments)
+
+    scenario_specs = (
+        ("scenario-null", "all_null", ("null-group",), KNOWN_TRUTH_NULL_EXPRESSION_V1),
+        (
+            "scenario-direct",
+            "direct_sparse",
+            ("direct-group", "null-group"),
+            KNOWN_TRUTH_SCALAR_EXPRESSION_V1,
+        ),
+        (
+            "scenario-proxy",
+            "proxy_and_alias",
+            ("proxy-group", "null-group"),
+            KNOWN_TRUTH_SCALAR_EXPRESSION_V1,
+        ),
+        (
+            "scenario-rank",
+            "rank_only",
+            ("rank-group", "null-group"),
+            KNOWN_TRUTH_RANK_ONLY_EXPRESSION_V1,
+        ),
+    )
+    scenarios = tuple(
+        KnownTruthScenarioV1(
+            scenario_id=scenario_id,
+            truth_role=truth_role,
+            information_groups=information_groups,
+            expression_id=expression_id,
+            truth_assignments=assignments_for(truth_role),
+        )
+        for scenario_id, truth_role, information_groups, expression_id in scenario_specs
+    )
+    tasks = tuple(
+        KnownTruthTaskV1(
+            task_id=f"{scenario_id}:formal:{replicate_id}",
+            scenario_id=scenario_id,
+            phase="formal",
+            replicate_id=replicate_id,
+            seed_namespace="formal-v1",
+            seed=scenario_index * KNOWN_TRUTH_FORMAL_REPLICATES_V1 + replicate_id,
+        )
+        for scenario_index, (scenario_id, _, _, _) in enumerate(scenario_specs)
+        for replicate_id in range(1100)
+    )
+    return KnownTruthSimulationContractV1(
+        contract_id="issue-34-known-truth-contract-v1-fixture",
+        registry_candidate_ids=candidate_ids,
+        admitted_symbols=symbols,
+        registry_identity=KNOWN_TRUTH_REGISTRY_IDENTITY_V1,
+        registry_source=KNOWN_TRUTH_REGISTRY_SOURCE_V1,
+        registry_source_sha256=KNOWN_TRUTH_REGISTRY_SOURCE_SHA256_V1,
+        registry_feature_count=KNOWN_TRUTH_REGISTRY_FEATURE_COUNT_V1,
+        candidate_identity_source=KNOWN_TRUTH_CANDIDATE_IDENTITY_SOURCE_V1,
+        candidate_identity_source_sha256=KNOWN_TRUTH_CANDIDATE_IDENTITY_SOURCE_SHA256_V1,
+        candidate_horizon_counts=KNOWN_TRUTH_CANDIDATE_HORIZON_COUNTS_V1,
+        universe_identity=KNOWN_TRUTH_UNIVERSE_IDENTITY_V1,
+        universe_source=KNOWN_TRUTH_UNIVERSE_SOURCE_V1,
+        universe_source_sha256=KNOWN_TRUTH_UNIVERSE_SOURCE_SHA256_V1,
+        horizons=KNOWN_TRUTH_HORIZONS_V1,
+        beta_total_scales=KNOWN_TRUTH_BETA_TOTAL_SCALES_V1,
+        effect_curve_ids=KNOWN_TRUTH_EFFECT_CURVES_V1,
+        mirror_signs=KNOWN_TRUTH_MIRROR_SIGNS_V1,
+        effect_case_coverage=KNOWN_TRUTH_EFFECT_CASE_COVERAGE_V1,
+        formal_replicates=KNOWN_TRUTH_FORMAL_REPLICATES_V1,
+        development_seed_namespace="development-v1",
+        formal_seed_namespace="formal-v1",
+        allow_adaptive_append=False,
+        append_policy="stop_and_report_uncertain_no_append_v1",
+        reality_analysis_scope="independent_per_signal_horizon_v1",
+        simulation_effect_scope="shared_beta_total_released_by_curve_v1",
+        scenarios=scenarios,
+        tasks=tasks,
+        lifecycle=KNOWN_TRUTH_LIFECYCLE_V1,
+        authority=KNOWN_TRUTH_FORMAL_AUTHORITY_V1,
+        inputs=KNOWN_TRUTH_INPUTS_V1,
+        may_be_used_for=KNOWN_TRUTH_MAY_BE_USED_FOR_V1,
+        must_not_be_used_for=KNOWN_TRUTH_MUST_NOT_BE_USED_FOR_V1,
+        archive_condition=KNOWN_TRUTH_ARCHIVE_CONDITION_V1,
+    )
+
+
+def test_known_truth_contract_accepts_frozen_identity_only_fixture():
+    contract = _known_truth_contract_fixture()
+
+    assert validate_known_truth_simulation_contract_v1(contract) is contract
+    assert len(contract.registry_candidate_ids) == 159
+    assert len(contract.admitted_symbols) == 20
+    assert len(contract.tasks) == 4 * 1100
+    assert tuple(value for _, value in contract.beta_total_scales) == tuple(
+        value for _, value in KNOWN_TRUTH_BETA_TOTAL_SCALES_V1
+    )
+
+
+def test_known_truth_contract_rejects_wrong_formal_replicate_count():
+    contract = _known_truth_contract_fixture()
+
+    with pytest.raises(ValueError, match="exactly 1100"):
+        validate_known_truth_simulation_contract_v1(
+            replace(contract, formal_replicates=1099)
+        )
+
+
+def test_known_truth_contract_rejects_wrong_outer_beta_total_value():
+    contract = _known_truth_contract_fixture()
+    wrong_scales = (("very_weak", 0.0),) + contract.beta_total_scales[1:]
+
+    with pytest.raises(ValueError, match="scale value changed"):
+        validate_known_truth_simulation_contract_v1(
+            replace(contract, beta_total_scales=wrong_scales)
+        )
+
+
+def test_known_truth_contract_rejects_result_driven_append():
+    contract = _known_truth_contract_fixture()
+
+    with pytest.raises(ValueError, match="forbid result-driven append"):
+        validate_known_truth_simulation_contract_v1(
+            replace(contract, allow_adaptive_append=True)
+        )
+
+
+def test_known_truth_contract_rejects_duplicate_task_identity():
+    contract = _known_truth_contract_fixture()
+    tasks = list(contract.tasks)
+    tasks[1] = tasks[0]
+
+    with pytest.raises(ValueError, match="task identity is duplicated"):
+        validate_known_truth_simulation_contract_v1(
+            replace(contract, tasks=tuple(tasks))
+        )
+
+
+def test_known_truth_contract_rejects_overlapping_seed_namespaces():
+    contract = _known_truth_contract_fixture()
+
+    with pytest.raises(ValueError, match="namespaces must differ"):
+        validate_known_truth_simulation_contract_v1(
+            replace(
+                contract,
+                development_seed_namespace=contract.formal_seed_namespace,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        (
+            "registry_candidate_ids",
+            KNOWN_TRUTH_REGISTRY_CANDIDATE_IDS_V1[:-1],
+            "formal qlab registry",
+        ),
+        ("horizons", ("4h", "8h", "1d"), "horizons must be"),
+    ),
+)
+def test_known_truth_contract_rejects_incomplete_registry_or_horizons(
+    field, value, message
+):
+    contract = _known_truth_contract_fixture()
+
+    with pytest.raises(ValueError, match=message):
+        validate_known_truth_simulation_contract_v1(
+            replace(contract, **{field: value})
+        )
+
+
+def _replace_known_truth_assignment(
+    contract: KnownTruthSimulationContractV1,
+    scenario_id: str,
+    candidate_id: str,
+    **changes,
+) -> KnownTruthSimulationContractV1:
+    scenarios = list(contract.scenarios)
+    for scenario_index, scenario in enumerate(scenarios):
+        if scenario.scenario_id != scenario_id:
+            continue
+        assignments = list(scenario.truth_assignments)
+        for assignment_index, assignment in enumerate(assignments):
+            if assignment.candidate_id == candidate_id:
+                assignments[assignment_index] = replace(assignment, **changes)
+                scenarios[scenario_index] = replace(
+                    scenario,
+                    truth_assignments=tuple(assignments),
+                )
+                return replace(contract, scenarios=tuple(scenarios))
+    raise AssertionError(f"fixture candidate not found: {scenario_id}/{candidate_id}")
+
+
+def test_known_truth_contract_binds_frozen_registry_universe_and_distribution():
+    contract = _known_truth_contract_fixture()
+
+    assert contract.registry_candidate_ids == KNOWN_TRUTH_REGISTRY_CANDIDATE_IDS_V1
+    assert contract.admitted_symbols == KNOWN_TRUTH_ADMITTED_SYMBOLS_V1
+    assert contract.registry_feature_count == 68
+    assert contract.candidate_horizon_counts == KNOWN_TRUTH_CANDIDATE_HORIZON_COUNTS_V1
+    assert contract.registry_source_sha256 == KNOWN_TRUTH_REGISTRY_SOURCE_SHA256_V1
+    assert contract.candidate_identity_source_sha256 == KNOWN_TRUTH_CANDIDATE_IDENTITY_SOURCE_SHA256_V1
+    assert contract.universe_source_sha256 == KNOWN_TRUTH_UNIVERSE_SOURCE_SHA256_V1
+
+    forged_ids = ("forged-production-id::4h",) + contract.registry_candidate_ids[1:]
+    with pytest.raises(ValueError, match="formal qlab registry"):
+        validate_known_truth_simulation_contract_v1(
+            replace(contract, registry_candidate_ids=forged_ids)
+        )
+
+    forged_symbols = ("FORGED",) + contract.admitted_symbols[1:]
+    with pytest.raises(ValueError, match="frozen universe"):
+        validate_known_truth_simulation_contract_v1(
+            replace(contract, admitted_symbols=forged_symbols)
+        )
+
+    with pytest.raises(ValueError, match="23/23/45/68"):
+        validate_known_truth_simulation_contract_v1(
+            replace(
+                contract,
+                candidate_horizon_counts=(
+                    ("4h", 22),
+                    ("8h", 23),
+                    ("12h", 45),
+                    ("1d", 68),
+                ),
+            )
+        )
+
+    with pytest.raises(ValueError, match="frozen 68"):
+        validate_known_truth_simulation_contract_v1(
+            replace(contract, registry_feature_count=68.0)
+        )
+
+    with pytest.raises(ValueError, match="23/23/45/68"):
+        validate_known_truth_simulation_contract_v1(
+            replace(
+                contract,
+                candidate_horizon_counts=(
+                    ("4h", 23.0),
+                    ("8h", 23),
+                    ("12h", 45),
+                    ("1d", 68),
+                ),
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "candidate_index", "changes", "message"),
+    (
+        (
+            "scenario-direct",
+            0,
+            {"measurement_noise_stream_id": "forged-noise"},
+            "only proxy and near_alias",
+        ),
+        (
+            "scenario-proxy",
+            1,
+            {"measurement_noise_stream_id": None},
+            "measurement_noise_stream_id",
+        ),
+        (
+            "scenario-null",
+            0,
+            {"null_noise_stream_id": None},
+            "null_noise_stream_id",
+        ),
+        (
+            "scenario-null",
+            0,
+            {"observation_variant_id": "identity-v1"},
+            "null candidates cannot use an observation variant",
+        ),
+        (
+            "scenario-direct",
+            0,
+            {"standardization_id": None},
+            "standardization_id",
+        ),
+        (
+            "scenario-direct",
+            0,
+            {"return_inclusion": False},
+            "only direct candidates may enter",
+        ),
+        (
+            "scenario-direct",
+            0,
+            {"marginal_predictive_truth": 0},
+            "predictive known-truth candidates must have M=1",
+        ),
+        (
+            "scenario-direct",
+            0,
+            {"effect_curve_id": None},
+            "require scale, curve",
+        ),
+    ),
+)
+def test_known_truth_contract_rejects_role_payload_conflicts(
+    scenario_id, candidate_index, changes, message
+):
+    contract = _known_truth_contract_fixture()
+    candidate_id = contract.registry_candidate_ids[candidate_index]
+    changed = _replace_known_truth_assignment(
+        contract,
+        scenario_id,
+        candidate_id,
+        **changes,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        validate_known_truth_simulation_contract_v1(changed)
+
+
+def test_known_truth_contract_requires_direct_alias_target_and_same_group():
+    contract = _known_truth_contract_fixture()
+    alias_id = contract.registry_candidate_ids[2]
+
+    points_to_null = _replace_known_truth_assignment(
+        contract,
+        "scenario-proxy",
+        alias_id,
+        alias_of_candidate_id=contract.registry_candidate_ids[3],
+    )
+    with pytest.raises(ValueError, match="direct candidate"):
+        validate_known_truth_simulation_contract_v1(points_to_null)
+
+    wrong_group = _replace_known_truth_assignment(
+        contract,
+        "scenario-proxy",
+        alias_id,
+        information_group="null-group",
+    )
+    with pytest.raises(ValueError, match="share information_group"):
+        validate_known_truth_simulation_contract_v1(wrong_group)
+
+    non_alias_reference = _replace_known_truth_assignment(
+        contract,
+        "scenario-direct",
+        contract.registry_candidate_ids[0],
+        alias_of_candidate_id=contract.registry_candidate_ids[1],
+    )
+    with pytest.raises(ValueError, match="only alias candidates"):
+        validate_known_truth_simulation_contract_v1(non_alias_reference)
+
+    wrong_proxy_family = _replace_known_truth_assignment(
+        contract,
+        "scenario-proxy",
+        contract.registry_candidate_ids[1],
+        base_signal_family="forged-family",
+    )
+    with pytest.raises(ValueError, match="share base family and random stream"):
+        validate_known_truth_simulation_contract_v1(wrong_proxy_family)
+
+    wrong_proxy_stream = _replace_known_truth_assignment(
+        contract,
+        "scenario-proxy",
+        contract.registry_candidate_ids[1],
+        base_random_stream_id="forged-stream",
+    )
+    with pytest.raises(ValueError, match="share base family and random stream"):
+        validate_known_truth_simulation_contract_v1(wrong_proxy_stream)
+
+    null_noise_reuses_signal = _replace_known_truth_assignment(
+        contract,
+        "scenario-proxy",
+        contract.registry_candidate_ids[3],
+        null_noise_stream_id="base-random-proxy",
+    )
+    with pytest.raises(ValueError, match="null noise stream must be independent"):
+        validate_known_truth_simulation_contract_v1(null_noise_reuses_signal)
+
+
+def test_known_truth_contract_rejects_rank_only_label_without_rank_expression():
+    contract = _known_truth_contract_fixture()
+    rank_scenario = next(row for row in contract.scenarios if row.truth_role == "rank_only")
+    changed_scenario = replace(
+        rank_scenario,
+        expression_id=KNOWN_TRUTH_SCALAR_EXPRESSION_V1,
+    )
+    changed = replace(
+        contract,
+        scenarios=tuple(
+            changed_scenario if row is rank_scenario else row
+            for row in contract.scenarios
+        ),
+    )
+
+    with pytest.raises(ValueError, match="expression"):
+        validate_known_truth_simulation_contract_v1(changed)
+
+
+def test_known_truth_contract_requires_all_effect_cases():
+    contract = _known_truth_contract_fixture()
+
+    with pytest.raises(ValueError, match="five-by-three-by-two"):
+        validate_known_truth_simulation_contract_v1(
+            replace(contract, effect_case_coverage=KNOWN_TRUTH_EFFECT_CASE_COVERAGE_V1[:-1])
+        )
+
+
+def test_known_truth_contract_requires_effect_cases_in_direct_assignments():
+    contract = _known_truth_contract_fixture()
+    scenario = next(row for row in contract.scenarios if row.truth_role == "direct_sparse")
+    assignments = list(scenario.truth_assignments)
+    first = assignments[0]
+    last = assignments[len(KNOWN_TRUTH_EFFECT_CASE_COVERAGE_V1) - 1]
+    assignments[len(KNOWN_TRUTH_EFFECT_CASE_COVERAGE_V1) - 1] = replace(
+        last,
+        direction=first.direction,
+        effect_scale_label=first.effect_scale_label,
+        effect_curve_id=first.effect_curve_id,
+        w_effect_id=first.w_effect_id,
+        mirror_sign=first.mirror_sign,
+        beta_id=first.beta_id,
+        beta_total=first.beta_total,
+    )
+    changed_scenario = replace(scenario, truth_assignments=tuple(assignments))
+    changed = replace(
+        contract,
+        scenarios=tuple(
+            changed_scenario if row is scenario else row
+            for row in contract.scenarios
+        ),
+    )
+
+    with pytest.raises(ValueError, match="realized by direct truth assignments"):
+        validate_known_truth_simulation_contract_v1(changed)
+
+
+def test_known_truth_contract_requires_independent_rank_only_effect_fields():
+    contract = _known_truth_contract_fixture()
+    rank_id = contract.registry_candidate_ids[0]
+
+    scalar_field = _replace_known_truth_assignment(
+        contract,
+        "scenario-rank",
+        rank_id,
+        beta_total=KNOWN_TRUTH_BETA_TOTAL_SCALES_V1[2][1],
+    )
+    with pytest.raises(ValueError, match="rank-only direct candidates cannot bind"):
+        validate_known_truth_simulation_contract_v1(scalar_field)
+
+    rank_field = _replace_known_truth_assignment(
+        contract,
+        "scenario-rank",
+        rank_id,
+        beta_rank=None,
+    )
+    with pytest.raises(ValueError, match="rank-only direct candidates require"):
+        validate_known_truth_simulation_contract_v1(rank_field)
+
+
+def test_known_truth_contract_requires_closed_formal_replicate_set_and_unique_seeds():
+    contract = _known_truth_contract_fixture()
+
+    closed_range_broken = list(contract.tasks)
+    closed_range_broken[0] = replace(
+        closed_range_broken[0],
+        replicate_id=KNOWN_TRUTH_FORMAL_REPLICATES_V1,
+    )
+    with pytest.raises(ValueError, match="closed range"):
+        validate_known_truth_simulation_contract_v1(
+            replace(contract, tasks=tuple(closed_range_broken))
+        )
+
+    duplicate_seed = list(contract.tasks)
+    duplicate_seed[KNOWN_TRUTH_FORMAL_REPLICATES_V1] = replace(
+        duplicate_seed[KNOWN_TRUTH_FORMAL_REPLICATES_V1],
+        seed=duplicate_seed[0].seed,
+    )
+    with pytest.raises(ValueError, match="seed must be unique"):
+        validate_known_truth_simulation_contract_v1(
+            replace(contract, tasks=tuple(duplicate_seed))
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    (
+        ("lifecycle", "candidate-contract lifecycle"),
+        ("authority", "Issue #34/#36 authority"),
+        ("may_be_used_for", "may_be_used_for"),
+        ("must_not_be_used_for", "must_not_be_used_for"),
+        ("archive_condition", "archive_condition"),
+    ),
+)
+def test_known_truth_contract_requires_exact_lifecycle_boundaries(field, message):
+    contract = _known_truth_contract_fixture()
+    changed = replace(contract, **{field: "loosely described boundary"})
+
+    with pytest.raises(ValueError, match=message):
+        validate_known_truth_simulation_contract_v1(changed)
