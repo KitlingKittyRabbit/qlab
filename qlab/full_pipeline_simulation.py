@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import struct
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from numbers import Integral
@@ -2205,6 +2206,143 @@ KNOWN_TRUTH_INPUTS_V1 = (
 KNOWN_TRUTH_SEED_PHASES_V1 = ("development", "formal")
 
 
+DETERMINISTIC_RANDOM_ADDRESS_VERSION_V1 = "ksv4-deterministic-random-address/v1"
+DETERMINISTIC_RANDOM_ALLOWED_PHASES_V1 = ("development", "formal")
+DETERMINISTIC_RANDOM_ALLOWED_STREAM_KINDS_V1 = (
+    "base",
+    "measurement",
+    "null",
+    "price",
+)
+_DETERMINISTIC_RANDOM_MAX_TEXT_BYTES_V1 = 128
+_DETERMINISTIC_RANDOM_MAX_TIME_INDEX_V1 = (1 << 63) - 1
+_DETERMINISTIC_RANDOM_MAX_ASSET_INDEX_V1 = (1 << 32) - 1
+
+
+@dataclass(frozen=True)
+class DeterministicRandomAddressV1:
+    """One stable address and uint64 seed for a registered simulation stream.
+
+    This is an address derivation primitive only.  It does not sample a
+    distribution or create a price, signal, innovation, or return.  The v1
+    wire format is deliberately explicit and cross-process stable:
+
+    ``SHA256(domain || LP(namespace) || LP(phase) || LP(stream_kind) ||
+    LP(registered_stream_or_group_id) || U64BE(time_index) ||
+    U32BE(asset_index))``.
+
+    ``domain`` is the ASCII bytes
+    ``b"ksv4-deterministic-random-address/v1\\0"`` and ``LP`` is a four-byte
+    unsigned big-endian byte length followed by visible ASCII bytes.  The
+    full digest, lower-case hexadecimal, is ``address_hex``; the first eight
+    digest bytes interpreted as an unsigned big-endian integer are
+    ``seed_uint64``.  The text fields are non-empty visible ASCII and at most
+    128 bytes.  Indices are non-negative integers in their documented v1
+    ranges; booleans and floating-point values are rejected.
+    """
+
+    address_hex: str
+    seed_uint64: int
+
+
+def _validate_deterministic_random_text_v1(value: object, *, label: str) -> bytes:
+    if type(value) is not str:
+        raise TypeError(f"{label} must be an exact str")
+    if not value:
+        raise ValueError(f"{label} must be non-empty")
+    if not value.isascii() or any(not (0x21 <= ord(char) <= 0x7E) for char in value):
+        raise ValueError(f"{label} must contain visible ASCII only")
+    encoded = value.encode("ascii")
+    if len(encoded) > _DETERMINISTIC_RANDOM_MAX_TEXT_BYTES_V1:
+        raise ValueError(f"{label} exceeds 128 bytes")
+    return encoded
+
+
+def _validate_deterministic_random_index_v1(
+    value: object,
+    *,
+    label: str,
+    maximum: int,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise TypeError(f"{label} must be an integer")
+    normalized = int(value)
+    if normalized < 0 or normalized > maximum:
+        raise ValueError(f"{label} must be in [0, {maximum}]")
+    return normalized
+
+
+def derive_deterministic_random_address_v1(
+    seed_namespace: str,
+    phase: str,
+    stream_kind: str,
+    registered_stream_or_group_id: str,
+    time_index: int,
+    asset_index: int,
+) -> DeterministicRandomAddressV1:
+    """Derive a deterministic, order-independent v1 random address and seed.
+
+    Every identity field is serialized into the digest, so callers may
+    reorder files, tasks, or parallel shards without changing an address.
+    ``phase`` and ``stream_kind`` are closed vocabularies; namespace and
+    registered stream/group identifiers use the visible-ASCII rule documented
+    on :class:`DeterministicRandomAddressV1`.  This function only derives
+    bytes and never touches a process-global RNG.
+    """
+    namespace_bytes = _validate_deterministic_random_text_v1(
+        seed_namespace,
+        label="seed_namespace",
+    )
+    if type(phase) is not str or phase not in DETERMINISTIC_RANDOM_ALLOWED_PHASES_V1:
+        raise ValueError(
+            "phase must be one of "
+            + ", ".join(DETERMINISTIC_RANDOM_ALLOWED_PHASES_V1)
+        )
+    if (
+        type(stream_kind) is not str
+        or stream_kind not in DETERMINISTIC_RANDOM_ALLOWED_STREAM_KINDS_V1
+    ):
+        raise ValueError(
+            "stream_kind must be one of "
+            + ", ".join(DETERMINISTIC_RANDOM_ALLOWED_STREAM_KINDS_V1)
+        )
+    phase_bytes = _validate_deterministic_random_text_v1(phase, label="phase")
+    stream_kind_bytes = _validate_deterministic_random_text_v1(
+        stream_kind,
+        label="stream_kind",
+    )
+    stream_id_bytes = _validate_deterministic_random_text_v1(
+        registered_stream_or_group_id,
+        label="registered_stream_or_group_id",
+    )
+    normalized_time = _validate_deterministic_random_index_v1(
+        time_index,
+        label="time_index",
+        maximum=_DETERMINISTIC_RANDOM_MAX_TIME_INDEX_V1,
+    )
+    normalized_asset = _validate_deterministic_random_index_v1(
+        asset_index,
+        label="asset_index",
+        maximum=_DETERMINISTIC_RANDOM_MAX_ASSET_INDEX_V1,
+    )
+
+    def length_prefix(value: bytes) -> bytes:
+        return struct.pack(">I", len(value)) + value
+
+    payload = DETERMINISTIC_RANDOM_ADDRESS_VERSION_V1.encode("ascii") + b"\0"
+    payload += length_prefix(namespace_bytes)
+    payload += length_prefix(phase_bytes)
+    payload += length_prefix(stream_kind_bytes)
+    payload += length_prefix(stream_id_bytes)
+    payload += struct.pack(">Q", normalized_time)
+    payload += struct.pack(">I", normalized_asset)
+    digest = hashlib.sha256(payload).digest()
+    return DeterministicRandomAddressV1(
+        address_hex=digest.hex(),
+        seed_uint64=int.from_bytes(digest[:8], byteorder="big", signed=False),
+    )
+
+
 def _known_truth_formal_candidate_ids_v1() -> tuple[str, ...]:
     """Derive the frozen candidate identities from qlab's formal registry."""
     timeframe_hours = {"1h": 1, "4h": 4, "8h": 8, "12h": 12, "1d": 24}
@@ -2945,6 +3083,10 @@ def validate_known_truth_simulation_contract_v1(
 
 __all__ = [
     "DecisionWindow",
+    "DETERMINISTIC_RANDOM_ADDRESS_VERSION_V1",
+    "DETERMINISTIC_RANDOM_ALLOWED_PHASES_V1",
+    "DETERMINISTIC_RANDOM_ALLOWED_STREAM_KINDS_V1",
+    "DeterministicRandomAddressV1",
     "KNOWN_TRUTH_ADMITTED_SYMBOLS_V1",
     "KNOWN_TRUTH_ARCHIVE_CONDITION_V1",
     "KNOWN_TRUTH_BETA_TOTAL_SCALES_V1",
@@ -2984,6 +3126,7 @@ __all__ = [
     "ObservedEffectScaleContract",
     "ObservedEffectScaleArtifacts",
     "ObservedEffectScaleInput",
+    "derive_deterministic_random_address_v1",
     "estimate_l0_l4_observed_effect_scale_v1",
     "map_observed_effect_scale_to_beta_total_v1",
     "validate_known_truth_simulation_contract_v1",
