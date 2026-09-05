@@ -2,14 +2,15 @@
 
 Lifecycle: candidate implementation for the Issue #34 known-truth simulation
 blueprint.  Authority: the sole qlab public entries for the observed-effect
-inventory and its signal-level observed beta-total scale evidence.  Inputs: two
+inventory and the core G_beta_total_v1 observed-scale mapping.  Inputs: two
 independently frozen B/C cache and price identities plus a pre-frozen registry,
 windows, and candidate contract.  May be used for: retaining every unfiltered
-candidate estimate and producing duplicate-aware observed beta-total scale
-evidence.  Must not be used for: candidate selection, significance testing,
-L2/L3/L4 discovery, G_beta_total_v1 simulation-grid construction, simulation
-generation, or a research conclusion.  Archive condition: this v1 contract is
-superseded by an approved, versioned successor.
+candidate estimate and producing the frozen core G_beta_total_v1 weak/center/
+strong mapping from duplicate-aware observed beta-total scale evidence.  Must
+not be used for: candidate selection, significance testing, L2/L3/L4 discovery,
+unapproved outer very-weak/very-strong multipliers, Monte Carlo N or append
+rules, simulation generation, or a research conclusion.  Archive condition:
+this v1 contract is superseded by an approved, versioned successor.
 
 The module deliberately reuses the formal qlab panel/rank and executable
 return paths; it does not approximate them in a research-layer calculation.
@@ -273,10 +274,11 @@ class ObservedEffectScaleArtifacts:
 class ObservedEffectBetaTotalArtifacts:
     """Signal-level observed ``beta_total`` scale evidence.
 
-    This is deliberately an observed-scale mapping, not the user-frozen
-    ``G_beta_total_v1`` simulation grid.  It consumes the already completed
-    per-(candidate, horizon) inventory and never reads significance, L2/L3/L4
-    selection, or discovery fields.
+    This is the formal core ``G_beta_total_v1`` weak/center/strong scale
+    mapping.  It consumes the already completed per-(candidate, horizon)
+    inventory and never reads significance, L2/L3/L4 selection, or discovery
+    fields.  Outer very-weak/very-strong multipliers and Monte Carlo rules are
+    outside this core mapping.
     """
 
     signal_level_scales: pd.DataFrame
@@ -2023,8 +2025,11 @@ def map_observed_effect_scale_to_beta_total_v1(
     canonical representative per legal horizon is considered, the maximum
     absolute ``beta_obs`` is selected, and ties use the fixed order
     ``4h < 8h < 12h < 1d`` followed by ``candidate_id``.  The returned
-    quantiles are observed-scale evidence only; this function does not create
-    the later user-frozen ``G_beta_total_v1`` simulation grid.
+    absolute P10/P50/P90 are the frozen core ``G_beta_total_v1`` weak/center/
+    strong scale mapping.  This remains separate from the per-(signal,
+    horizon) real-analysis estimand and does not decide outer
+    very-weak/very-strong multipliers, Monte Carlo N, append rules, or
+    simulation generation.
     """
     if not isinstance(artifacts, ObservedEffectScaleArtifacts):
         raise TypeError("artifacts must be ObservedEffectScaleArtifacts")
