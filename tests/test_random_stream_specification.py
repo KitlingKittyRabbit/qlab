@@ -157,6 +157,44 @@ def test_random_stream_specification_rejects_non_frozen_asset_order():
         validate_random_stream_specification_v1(registry)
 
 
+def test_random_stream_specification_rejects_only_r_identity():
+    broken_stream = replace(
+        _stream("broken", "base", "broken", information_group_id="alpha"),
+        r_decomposition_identity=None,
+    )
+    registry = _registry(
+        streams=(
+            broken_stream,
+            _stream("measurement-alpha", "measurement", "measurement-alpha",
+                    information_group_id="alpha"),
+            _stream("null-main", "null", "null-main"),
+            _stream("price-main", "price", "price-main"),
+        )
+    )
+
+    with pytest.raises(ValueError, match="both r_identity and r_decomposition_identity"):
+        validate_random_stream_specification_v1(registry)
+
+
+def test_random_stream_specification_rejects_only_r_decomposition_identity():
+    broken_stream = replace(
+        _stream("broken", "base", "broken", information_group_id="alpha"),
+        r_identity=None,
+    )
+    registry = _registry(
+        streams=(
+            broken_stream,
+            _stream("measurement-alpha", "measurement", "measurement-alpha",
+                    information_group_id="alpha"),
+            _stream("null-main", "null", "null-main"),
+            _stream("price-main", "price", "price-main"),
+        )
+    )
+
+    with pytest.raises(ValueError, match="both r_identity and r_decomposition_identity"):
+        validate_random_stream_specification_v1(registry)
+
+
 @pytest.mark.parametrize(
     "broken_stream",
     (

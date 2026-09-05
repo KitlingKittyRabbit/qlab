@@ -2588,15 +2588,15 @@ def validate_random_stream_specification_v1(
                 raise ValueError(
                     f"{label}.{stream.stream_kind} stream cannot bind an information group"
                 )
-        if stream.r_identity is None and stream.r_decomposition_identity is None:
-            raise ValueError(f"{label} requires r_identity or r_decomposition_identity")
-        if stream.r_identity is not None:
-            _validate_random_stream_text_v1(stream.r_identity, label=f"{label}.r_identity")
-        if stream.r_decomposition_identity is not None:
-            _validate_random_stream_text_v1(
-                stream.r_decomposition_identity,
-                label=f"{label}.r_decomposition_identity",
+        if stream.r_identity is None or stream.r_decomposition_identity is None:
+            raise ValueError(
+                f"{label} requires both r_identity and r_decomposition_identity"
             )
+        _validate_random_stream_text_v1(stream.r_identity, label=f"{label}.r_identity")
+        _validate_random_stream_text_v1(
+            stream.r_decomposition_identity,
+            label=f"{label}.r_decomposition_identity",
+        )
         _validate_random_stream_text_v1(
             stream.r_calibration_identity,
             label=f"{label}.r_calibration_identity",
