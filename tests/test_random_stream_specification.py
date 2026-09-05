@@ -30,6 +30,14 @@ PROCESS = RandomTimeProcessSpecificationV1(
     calibration_status="unavailable",
     tail_rule_identity="finite-tail-v1",
 )
+VOLUME_PROCESS = replace(
+    PROCESS,
+    family_id="volume-iid-v1",
+    parameter_identity="volume-iid-parameters-v1",
+    initialization_identity="volume-zero-init-v1",
+    calibration_identity="volume-calibration-v1",
+    tail_rule_identity="volume-finite-tail-v1",
+)
 
 
 def _stream(
@@ -49,7 +57,7 @@ def _stream(
         r_identity=f"{stream_kind}-r-v1",
         r_decomposition_identity=f"{stream_kind}-decomposition-v1",
         r_calibration_identity=f"{stream_kind}-r-calibration-v1",
-        time_process=PROCESS,
+        time_process=VOLUME_PROCESS if stream_kind == "volume" else PROCESS,
     )
 
 
@@ -70,6 +78,7 @@ def _registry(
             ),
             _stream("null-main", "null", "null-main"),
             _stream("price-main", "price", "price-main"),
+            _stream("volume-main", "volume", "volume-main"),
         )
     if bindings is None:
         bindings = (
@@ -98,7 +107,7 @@ def _registry(
     return RandomStreamSpecificationRegistryV1(**values)
 
 
-def test_random_stream_specification_accepts_four_kinds_and_explicit_group_binding():
+def test_random_stream_specification_accepts_five_kinds_and_explicit_group_binding():
     registry = _registry()
 
     assert validate_random_stream_specification_v1(registry) is registry
@@ -107,6 +116,7 @@ def test_random_stream_specification_accepts_four_kinds_and_explicit_group_bindi
         "measurement",
         "null",
         "price",
+        "volume",
     }
     assert registry.asset_symbols == KNOWN_TRUTH_ADMITTED_SYMBOLS_V1
 
@@ -169,6 +179,7 @@ def test_random_stream_specification_rejects_only_r_identity():
                     information_group_id="alpha"),
             _stream("null-main", "null", "null-main"),
             _stream("price-main", "price", "price-main"),
+            _stream("volume-main", "volume", "volume-main"),
         )
     )
 
@@ -188,6 +199,7 @@ def test_random_stream_specification_rejects_only_r_decomposition_identity():
                     information_group_id="alpha"),
             _stream("null-main", "null", "null-main"),
             _stream("price-main", "price", "price-main"),
+            _stream("volume-main", "volume", "volume-main"),
         )
     )
 
@@ -228,6 +240,7 @@ def test_random_stream_specification_rejects_missing_r_t_or_process_identity(bro
                     information_group_id="alpha"),
             _stream("null-main", "null", "null-main"),
             _stream("price-main", "price", "price-main"),
+            _stream("volume-main", "volume", "volume-main"),
         )
     )
 
@@ -248,6 +261,41 @@ def test_random_stream_specification_rejects_cross_kind_random_address_sharing()
         )
 
 
+@pytest.mark.parametrize(
+    "field",
+    (
+        "r_identity",
+        "r_decomposition_identity",
+        "r_calibration_identity",
+        "time_process.family_id",
+        "time_process.parameter_identity",
+        "time_process.initialization_identity",
+        "time_process.calibration_identity",
+        "time_process.tail_rule_identity",
+    ),
+)
+def test_random_stream_specification_rejects_volume_cross_kind_r_t_identity_reuse(field):
+    registry = _registry()
+    volume = registry.streams[-1]
+    other = registry.streams[0]
+    if field.startswith("time_process."):
+        process_field = field.split(".", 1)[1]
+        volume = replace(
+            volume,
+            time_process=replace(
+                volume.time_process,
+                **{process_field: getattr(other.time_process, process_field)},
+            ),
+        )
+    else:
+        volume = replace(volume, **{field: getattr(other, field)})
+
+    with pytest.raises(ValueError, match="volume stream identity cannot be shared"):
+        validate_random_stream_specification_v1(
+            replace(registry, streams=(*registry.streams[:-1], volume))
+        )
+
+
 def test_random_stream_specification_rejects_null_sharing_base_or_measurement():
     registry = _registry()
     shared_null = replace(
@@ -257,7 +305,10 @@ def test_random_stream_specification_rejects_null_sharing_base_or_measurement():
 
     with pytest.raises(ValueError, match="across stream kinds"):
         validate_random_stream_specification_v1(
-            replace(registry, streams=(*registry.streams[:2], shared_null, registry.streams[3]))
+            replace(
+                registry,
+                streams=(*registry.streams[:2], shared_null, *registry.streams[3:]),
+            )
         )
 
 
