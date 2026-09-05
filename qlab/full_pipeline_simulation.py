@@ -2343,6 +2343,370 @@ def derive_deterministic_random_address_v1(
     )
 
 
+RANDOM_STREAM_SPECIFICATION_VERSION_V1 = "ksv4-random-stream-specification/v1"
+RANDOM_STREAM_CALIBRATION_STATUSES_V1 = ("frozen", "unavailable")
+RANDOM_STREAM_SPECIFICATION_LIFECYCLE_V1 = (
+    "candidate_random_stream_specification_validation_only_v1"
+)
+RANDOM_STREAM_SPECIFICATION_AUTHORITY_V1 = (
+    "issue_34_known_truth_blueprint_random_stream_specification_v1"
+)
+RANDOM_STREAM_SPECIFICATION_MAY_BE_USED_FOR_V1 = (
+    "random_stream_identity_validation_before_generation_v1"
+)
+RANDOM_STREAM_SPECIFICATION_MUST_NOT_BE_USED_FOR_V1 = (
+    "no_sampling_no_generation_no_l0_l4_no_research_conclusion_v1"
+)
+RANDOM_STREAM_SPECIFICATION_ARCHIVE_CONDITION_V1 = (
+    "superseded_by_approved_random_stream_specification_v1"
+)
+
+
+@dataclass(frozen=True)
+class RandomTimeProcessSpecificationV1:
+    """Identity-only specification for one registered time-process family.
+
+    This object deliberately stores identities rather than AR/MA parameters or
+    any sampled state.  ``calibration_status=unavailable`` is a valid explicit
+    state: it records that no result-blind calibration was available without
+    inventing a reality claim.
+    """
+
+    family_id: str
+    parameter_identity: str
+    initialization_identity: str
+    burn_in_steps: int
+    native_frequency: str
+    time_order_identity: str
+    calibration_identity: str
+    calibration_status: str
+    tail_rule_identity: str
+
+
+@dataclass(frozen=True)
+class RandomStreamSpecificationV1:
+    """One base, measurement, null, or price stream identity.
+
+    ``random_address_group_id`` is the registered stream/group identifier
+    passed to :func:`derive_deterministic_random_address_v1`.  Reusing it is
+    therefore an explicit declaration of shared addresses; the validator
+    permits sharing only within one stream kind and requires a justification.
+    This record never creates innovations, prices, signals, or returns.
+    """
+
+    stream_id: str
+    stream_kind: str
+    information_group_id: str | None
+    random_address_group_id: str
+    innovation_distribution_id: str
+    asset_symbols: tuple[str, ...]
+    r_identity: str | None
+    r_decomposition_identity: str | None
+    r_calibration_identity: str
+    time_process: RandomTimeProcessSpecificationV1
+    shared_random_group_justification_id: str | None = None
+
+
+@dataclass(frozen=True)
+class RandomInformationGroupStreamBindingV1:
+    """The base stream identity shared by a group's proxy/near-alias roles.
+
+    A later candidate map may contain many proxy or near-alias candidates, but
+    all of them must use ``proxy_near_alias_base_stream_id``.  Keeping this
+    relation in the stream registry makes a wrong base reference fail before
+    any scenario or generator code exists.
+    """
+
+    information_group_id: str
+    base_stream_id: str
+    proxy_near_alias_base_stream_id: str
+    measurement_stream_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RandomStreamSpecificationRegistryV1:
+    """Immutable registry for random-stream and R/T identities only.
+
+    The registry binds the already approved deterministic address primitive,
+    phase, fixed 20-asset order, four stream kinds, R identities, T
+    identities, initialization, burn-in, native frequency and calibration
+    status.  It is a pre-generation validation object, not a scenario
+    manifest and not a random-number, price, signal, or return generator.
+    """
+
+    specification_version: str
+    seed_namespace: str
+    phase: str
+    address_derivation_version: str
+    asset_symbols: tuple[str, ...]
+    streams: tuple[RandomStreamSpecificationV1, ...]
+    information_group_bindings: tuple[RandomInformationGroupStreamBindingV1, ...]
+    lifecycle: str
+    authority: str
+    may_be_used_for: str
+    must_not_be_used_for: str
+    archive_condition: str
+
+
+def _validate_random_stream_text_v1(value: object, *, label: str) -> str:
+    _validate_deterministic_random_text_v1(value, label=label)
+    return value  # type: ignore[return-value]
+
+
+def _validate_random_time_process_specification_v1(
+    process: object,
+    *,
+    label: str,
+) -> RandomTimeProcessSpecificationV1:
+    if not isinstance(process, RandomTimeProcessSpecificationV1):
+        raise TypeError(f"{label} must be RandomTimeProcessSpecificationV1")
+    for field_name in (
+        "family_id",
+        "parameter_identity",
+        "initialization_identity",
+        "native_frequency",
+        "time_order_identity",
+        "calibration_identity",
+        "tail_rule_identity",
+    ):
+        _validate_random_stream_text_v1(
+            getattr(process, field_name),
+            label=f"{label}.{field_name}",
+        )
+    if (
+        isinstance(process.burn_in_steps, bool)
+        or not isinstance(process.burn_in_steps, Integral)
+        or process.burn_in_steps < 0
+    ):
+        raise ValueError(f"{label}.burn_in_steps must be a non-negative integer")
+    if process.calibration_status not in RANDOM_STREAM_CALIBRATION_STATUSES_V1:
+        raise ValueError(
+            f"{label}.calibration_status must be one of "
+            + ", ".join(RANDOM_STREAM_CALIBRATION_STATUSES_V1)
+        )
+    return process
+
+
+def validate_random_stream_specification_v1(
+    registry: RandomStreamSpecificationRegistryV1,
+) -> RandomStreamSpecificationRegistryV1:
+    """Validate a closed random-stream/R/T identity registry.
+
+    Validation is intentionally structural.  It does not select scientific
+    parameters, construct an R matrix or T recursion, sample an innovation,
+    or call any L0--L4 path.  The registry's ``random_address_group_id`` is
+    checked through the approved pure address primitive at ``t=0, i=0`` only
+    to prove that the recorded identity is consumable by that primitive.
+    """
+    if not isinstance(registry, RandomStreamSpecificationRegistryV1):
+        raise TypeError(
+            "registry must be RandomStreamSpecificationRegistryV1"
+        )
+    if registry.specification_version != RANDOM_STREAM_SPECIFICATION_VERSION_V1:
+        raise ValueError("random-stream specification_version is not the frozen v1 version")
+    _validate_random_stream_text_v1(registry.seed_namespace, label="seed_namespace")
+    if registry.phase not in DETERMINISTIC_RANDOM_ALLOWED_PHASES_V1:
+        raise ValueError(
+            "random-stream phase must be one of "
+            + ", ".join(DETERMINISTIC_RANDOM_ALLOWED_PHASES_V1)
+        )
+    if registry.address_derivation_version != DETERMINISTIC_RANDOM_ADDRESS_VERSION_V1:
+        raise ValueError(
+            "random-stream address_derivation_version does not match the approved primitive"
+        )
+    if type(registry.asset_symbols) is not tuple:
+        raise ValueError("random-stream asset_symbols must be an immutable tuple")
+    if registry.asset_symbols != KNOWN_TRUTH_ADMITTED_SYMBOLS_V1:
+        raise ValueError(
+            "random-stream asset_symbols must equal the frozen 20-asset order"
+        )
+    if type(registry.streams) is not tuple or not registry.streams:
+        raise ValueError("random-stream streams must be a non-empty immutable tuple")
+    if type(registry.information_group_bindings) is not tuple:
+        raise ValueError(
+            "random-stream information_group_bindings must be an immutable tuple"
+        )
+    for field_name, expected in (
+        ("lifecycle", RANDOM_STREAM_SPECIFICATION_LIFECYCLE_V1),
+        ("authority", RANDOM_STREAM_SPECIFICATION_AUTHORITY_V1),
+        ("may_be_used_for", RANDOM_STREAM_SPECIFICATION_MAY_BE_USED_FOR_V1),
+        ("must_not_be_used_for", RANDOM_STREAM_SPECIFICATION_MUST_NOT_BE_USED_FOR_V1),
+        ("archive_condition", RANDOM_STREAM_SPECIFICATION_ARCHIVE_CONDITION_V1),
+    ):
+        actual = getattr(registry, field_name)
+        _validate_random_stream_text_v1(actual, label=f"random-stream {field_name}")
+        if actual != expected:
+            raise ValueError(f"random-stream {field_name} is not the frozen boundary")
+
+    by_stream_id: dict[str, RandomStreamSpecificationV1] = {}
+    by_kind: dict[str, list[RandomStreamSpecificationV1]] = {
+        kind: [] for kind in DETERMINISTIC_RANDOM_ALLOWED_STREAM_KINDS_V1
+    }
+    by_random_address_group: dict[str, list[RandomStreamSpecificationV1]] = {}
+    base_by_information_group: dict[str, RandomStreamSpecificationV1] = {}
+
+    for index, stream in enumerate(registry.streams):
+        label = f"random-stream streams[{index}]"
+        if not isinstance(stream, RandomStreamSpecificationV1):
+            raise TypeError(f"{label} must be RandomStreamSpecificationV1")
+        _validate_random_stream_text_v1(stream.stream_id, label=f"{label}.stream_id")
+        if stream.stream_id in by_stream_id:
+            raise ValueError(f"duplicate random stream_id: {stream.stream_id}")
+        by_stream_id[stream.stream_id] = stream
+        if stream.stream_kind not in DETERMINISTIC_RANDOM_ALLOWED_STREAM_KINDS_V1:
+            raise ValueError(f"{label}.stream_kind is not registered")
+        by_kind[stream.stream_kind].append(stream)
+        _validate_random_stream_text_v1(
+            stream.random_address_group_id,
+            label=f"{label}.random_address_group_id",
+        )
+        by_random_address_group.setdefault(stream.random_address_group_id, []).append(stream)
+        _validate_random_stream_text_v1(
+            stream.innovation_distribution_id,
+            label=f"{label}.innovation_distribution_id",
+        )
+        if type(stream.asset_symbols) is not tuple:
+            raise ValueError(f"{label}.asset_symbols must be an immutable tuple")
+        if stream.asset_symbols != registry.asset_symbols:
+            raise ValueError(f"{label}.asset_symbols must equal the registry order")
+        if stream.information_group_id is not None:
+            _validate_random_stream_text_v1(
+                stream.information_group_id,
+                label=f"{label}.information_group_id",
+            )
+        if stream.stream_kind == "base":
+            if stream.information_group_id is None:
+                raise ValueError(f"{label}.base stream requires information_group_id")
+            if stream.information_group_id in base_by_information_group:
+                raise ValueError(
+                    "each information group must have exactly one base stream: "
+                    + stream.information_group_id
+                )
+            base_by_information_group[stream.information_group_id] = stream
+        elif stream.stream_kind in ("null", "price"):
+            if stream.information_group_id is not None:
+                raise ValueError(
+                    f"{label}.{stream.stream_kind} stream cannot bind an information group"
+                )
+        if stream.r_identity is None or stream.r_decomposition_identity is None:
+            raise ValueError(
+                f"{label} requires both r_identity and r_decomposition_identity"
+            )
+        _validate_random_stream_text_v1(stream.r_identity, label=f"{label}.r_identity")
+        _validate_random_stream_text_v1(
+            stream.r_decomposition_identity,
+            label=f"{label}.r_decomposition_identity",
+        )
+        _validate_random_stream_text_v1(
+            stream.r_calibration_identity,
+            label=f"{label}.r_calibration_identity",
+        )
+        _validate_random_time_process_specification_v1(
+            stream.time_process,
+            label=f"{label}.time_process",
+        )
+        if stream.shared_random_group_justification_id is not None:
+            _validate_random_stream_text_v1(
+                stream.shared_random_group_justification_id,
+                label=f"{label}.shared_random_group_justification_id",
+            )
+        derive_deterministic_random_address_v1(
+            registry.seed_namespace,
+            registry.phase,
+            stream.stream_kind,
+            stream.random_address_group_id,
+            0,
+            0,
+        )
+
+    for kind in DETERMINISTIC_RANDOM_ALLOWED_STREAM_KINDS_V1:
+        if not by_kind[kind]:
+            raise ValueError(f"random-stream registry requires at least one {kind} stream")
+    if len(by_kind["price"]) != 1:
+        raise ValueError("random-stream registry requires exactly one price stream")
+    base_address_groups = [stream.random_address_group_id for stream in by_kind["base"]]
+    if len(set(base_address_groups)) != len(base_address_groups):
+        raise ValueError("base streams for different information groups must be independent")
+
+    for group_id, streams in by_random_address_group.items():
+        kinds = {stream.stream_kind for stream in streams}
+        if len(kinds) > 1:
+            raise ValueError(
+                "random_address_group_id cannot be shared across stream kinds: " + group_id
+            )
+        if len(streams) > 1:
+            justifications = {
+                stream.shared_random_group_justification_id for stream in streams
+            }
+            if len(justifications) != 1 or None in justifications:
+                raise ValueError(
+                    "shared random address group requires one explicit justification: "
+                    + group_id
+                )
+
+    binding_by_group: dict[str, RandomInformationGroupStreamBindingV1] = {}
+    for index, binding in enumerate(registry.information_group_bindings):
+        label = f"random-stream information_group_bindings[{index}]"
+        if not isinstance(binding, RandomInformationGroupStreamBindingV1):
+            raise TypeError(
+                f"{label} must be RandomInformationGroupStreamBindingV1"
+            )
+        _validate_random_stream_text_v1(
+            binding.information_group_id,
+            label=f"{label}.information_group_id",
+        )
+        if binding.information_group_id in binding_by_group:
+            raise ValueError(
+                "duplicate random information-group binding: "
+                + binding.information_group_id
+            )
+        binding_by_group[binding.information_group_id] = binding
+        base = by_stream_id.get(binding.base_stream_id)
+        proxy_base = by_stream_id.get(binding.proxy_near_alias_base_stream_id)
+        if base is None or proxy_base is None:
+            raise ValueError(f"{label} references an unregistered base stream")
+        if base.stream_kind != "base" or proxy_base.stream_kind != "base":
+            raise ValueError(f"{label} base references must be base streams")
+        if base.information_group_id != binding.information_group_id:
+            raise ValueError(f"{label}.base_stream_id has the wrong information group")
+        if proxy_base.information_group_id != binding.information_group_id:
+            raise ValueError(
+                f"{label}.proxy_near_alias_base_stream_id has the wrong information group"
+            )
+        if binding.base_stream_id != binding.proxy_near_alias_base_stream_id:
+            raise ValueError(
+                f"{label} proxy/near_alias roles must share the group's base stream"
+            )
+        if type(binding.measurement_stream_ids) is not tuple:
+            raise ValueError(f"{label}.measurement_stream_ids must be an immutable tuple")
+        if len(set(binding.measurement_stream_ids)) != len(binding.measurement_stream_ids):
+            raise ValueError(f"{label}.measurement_stream_ids contains duplicates")
+        for measurement_id in binding.measurement_stream_ids:
+            measurement = by_stream_id.get(measurement_id)
+            if measurement is None or measurement.stream_kind != "measurement":
+                raise ValueError(f"{label} references an unregistered measurement stream")
+            if (
+                measurement.information_group_id is not None
+                and measurement.information_group_id != binding.information_group_id
+            ):
+                raise ValueError(
+                    f"{label} measurement stream has the wrong information group"
+                )
+
+    if set(binding_by_group) != set(base_by_information_group):
+        raise ValueError(
+            "information-group bindings must cover exactly all registered base groups"
+        )
+    for stream in by_kind["measurement"]:
+        if stream.information_group_id is not None:
+            binding = binding_by_group.get(stream.information_group_id)
+            if binding is None or stream.stream_id not in binding.measurement_stream_ids:
+                raise ValueError(
+                    "group-bound measurement stream is missing from its information-group binding"
+                )
+    return registry
+
+
 def _known_truth_formal_candidate_ids_v1() -> tuple[str, ...]:
     """Derive the frozen candidate identities from qlab's formal registry."""
     timeframe_hours = {"1h": 1, "4h": 4, "8h": 8, "12h": 12, "1d": 24}
@@ -3087,6 +3451,13 @@ __all__ = [
     "DETERMINISTIC_RANDOM_ALLOWED_PHASES_V1",
     "DETERMINISTIC_RANDOM_ALLOWED_STREAM_KINDS_V1",
     "DeterministicRandomAddressV1",
+    "RANDOM_STREAM_CALIBRATION_STATUSES_V1",
+    "RANDOM_STREAM_SPECIFICATION_ARCHIVE_CONDITION_V1",
+    "RANDOM_STREAM_SPECIFICATION_AUTHORITY_V1",
+    "RANDOM_STREAM_SPECIFICATION_LIFECYCLE_V1",
+    "RANDOM_STREAM_SPECIFICATION_MAY_BE_USED_FOR_V1",
+    "RANDOM_STREAM_SPECIFICATION_MUST_NOT_BE_USED_FOR_V1",
+    "RANDOM_STREAM_SPECIFICATION_VERSION_V1",
     "KNOWN_TRUTH_ADMITTED_SYMBOLS_V1",
     "KNOWN_TRUTH_ARCHIVE_CONDITION_V1",
     "KNOWN_TRUTH_BETA_TOTAL_SCALES_V1",
@@ -3121,6 +3492,10 @@ __all__ = [
     "KnownTruthSignalAssignmentV1",
     "KnownTruthSimulationContractV1",
     "KnownTruthTaskV1",
+    "RandomInformationGroupStreamBindingV1",
+    "RandomStreamSpecificationRegistryV1",
+    "RandomStreamSpecificationV1",
+    "RandomTimeProcessSpecificationV1",
     "ObservedEffectCandidate",
     "ObservedEffectBetaTotalArtifacts",
     "ObservedEffectScaleContract",
@@ -3129,5 +3504,6 @@ __all__ = [
     "derive_deterministic_random_address_v1",
     "estimate_l0_l4_observed_effect_scale_v1",
     "map_observed_effect_scale_to_beta_total_v1",
+    "validate_random_stream_specification_v1",
     "validate_known_truth_simulation_contract_v1",
 ]
