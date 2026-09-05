@@ -2647,6 +2647,43 @@ def validate_random_stream_specification_v1(
                     + group_id
                 )
 
+    # The market-input blueprint gives the volume process its own R/T
+    # identities.  The common UTC minute clock, native frequency, and burn-in
+    # values are required bindings, not identity reuse; the identity-bearing
+    # fields below must nevertheless not be shared with a non-volume stream.
+    for volume_stream in by_kind["volume"]:
+        volume_identity_fields = (
+            ("r_identity", volume_stream.r_identity),
+            ("r_decomposition_identity", volume_stream.r_decomposition_identity),
+            ("r_calibration_identity", volume_stream.r_calibration_identity),
+            ("time_process.family_id", volume_stream.time_process.family_id),
+            ("time_process.parameter_identity", volume_stream.time_process.parameter_identity),
+            ("time_process.initialization_identity", volume_stream.time_process.initialization_identity),
+            ("time_process.calibration_identity", volume_stream.time_process.calibration_identity),
+            ("time_process.tail_rule_identity", volume_stream.time_process.tail_rule_identity),
+        )
+        for other_stream in registry.streams:
+            if other_stream.stream_kind == "volume":
+                continue
+            other_identity_fields = dict(
+                (
+                    ("r_identity", other_stream.r_identity),
+                    ("r_decomposition_identity", other_stream.r_decomposition_identity),
+                    ("r_calibration_identity", other_stream.r_calibration_identity),
+                    ("time_process.family_id", other_stream.time_process.family_id),
+                    ("time_process.parameter_identity", other_stream.time_process.parameter_identity),
+                    ("time_process.initialization_identity", other_stream.time_process.initialization_identity),
+                    ("time_process.calibration_identity", other_stream.time_process.calibration_identity),
+                    ("time_process.tail_rule_identity", other_stream.time_process.tail_rule_identity),
+                )
+            )
+            for field_name, volume_value in volume_identity_fields:
+                if volume_value == other_identity_fields[field_name]:
+                    raise ValueError(
+                        "volume stream identity cannot be shared across stream kinds: "
+                        f"{field_name}={volume_value!r} with {other_stream.stream_id}"
+                    )
+
     binding_by_group: dict[str, RandomInformationGroupStreamBindingV1] = {}
     for index, binding in enumerate(registry.information_group_bindings):
         label = f"random-stream information_group_bindings[{index}]"

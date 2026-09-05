@@ -30,6 +30,14 @@ PROCESS = RandomTimeProcessSpecificationV1(
     calibration_status="unavailable",
     tail_rule_identity="finite-tail-v1",
 )
+VOLUME_PROCESS = replace(
+    PROCESS,
+    family_id="volume-iid-v1",
+    parameter_identity="volume-iid-parameters-v1",
+    initialization_identity="volume-zero-init-v1",
+    calibration_identity="volume-calibration-v1",
+    tail_rule_identity="volume-finite-tail-v1",
+)
 
 
 def _stream(
@@ -49,7 +57,7 @@ def _stream(
         r_identity=f"{stream_kind}-r-v1",
         r_decomposition_identity=f"{stream_kind}-decomposition-v1",
         r_calibration_identity=f"{stream_kind}-r-calibration-v1",
-        time_process=PROCESS,
+        time_process=VOLUME_PROCESS if stream_kind == "volume" else PROCESS,
     )
 
 
@@ -250,6 +258,41 @@ def test_random_stream_specification_rejects_cross_kind_random_address_sharing()
     with pytest.raises(ValueError, match="across stream kinds"):
         validate_random_stream_specification_v1(
             replace(registry, streams=(registry.streams[0], shared_measurement, *registry.streams[2:]))
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "r_identity",
+        "r_decomposition_identity",
+        "r_calibration_identity",
+        "time_process.family_id",
+        "time_process.parameter_identity",
+        "time_process.initialization_identity",
+        "time_process.calibration_identity",
+        "time_process.tail_rule_identity",
+    ),
+)
+def test_random_stream_specification_rejects_volume_cross_kind_r_t_identity_reuse(field):
+    registry = _registry()
+    volume = registry.streams[-1]
+    other = registry.streams[0]
+    if field.startswith("time_process."):
+        process_field = field.split(".", 1)[1]
+        volume = replace(
+            volume,
+            time_process=replace(
+                volume.time_process,
+                **{process_field: getattr(other.time_process, process_field)},
+            ),
+        )
+    else:
+        volume = replace(volume, **{field: getattr(other, field)})
+
+    with pytest.raises(ValueError, match="volume stream identity cannot be shared"):
+        validate_random_stream_specification_v1(
+            replace(registry, streams=(*registry.streams[:-1], volume))
         )
 
 
