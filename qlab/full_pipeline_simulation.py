@@ -1,14 +1,15 @@
 """Formal, pre-simulation diagnostics for the complete L0--L4 route.
 
 Lifecycle: candidate implementation for the Issue #34 known-truth simulation
-blueprint.  Authority: the sole qlab public entry for the pre-implementation
-observed-effect scale inventory.  Inputs: two independently frozen B/C cache
-and price identities plus a pre-frozen registry, windows, and candidate
-contract.  May be used for: retaining every unfiltered candidate estimate and
-summarising duplicate-aware observed scales.  Must not be used for: candidate
-selection, significance testing, L2/L3/L4 discovery, beta-total mapping,
-simulation generation, or a research conclusion.  Archive condition: this v1
-contract is superseded by an approved, versioned successor.
+blueprint.  Authority: the sole qlab public entries for the observed-effect
+inventory and its signal-level observed beta-total scale evidence.  Inputs: two
+independently frozen B/C cache and price identities plus a pre-frozen registry,
+windows, and candidate contract.  May be used for: retaining every unfiltered
+candidate estimate and producing duplicate-aware observed beta-total scale
+evidence.  Must not be used for: candidate selection, significance testing,
+L2/L3/L4 discovery, G_beta_total_v1 simulation-grid construction, simulation
+generation, or a research conclusion.  Archive condition: this v1 contract is
+superseded by an approved, versioned successor.
 
 The module deliberately reuses the formal qlab panel/rank and executable
 return paths; it does not approximate them in a research-layer calculation.
@@ -263,6 +264,23 @@ class ObservedEffectScaleArtifacts:
 
     candidate_estimates: pd.DataFrame
     duplicate_mapping: pd.DataFrame
+    distribution_summary: pd.DataFrame
+    input_case_comparison: pd.DataFrame
+    input_identity_manifest: pd.DataFrame
+
+
+@dataclass(frozen=True)
+class ObservedEffectBetaTotalArtifacts:
+    """Signal-level observed ``beta_total`` scale evidence.
+
+    This is deliberately an observed-scale mapping, not the user-frozen
+    ``G_beta_total_v1`` simulation grid.  It consumes the already completed
+    per-(candidate, horizon) inventory and never reads significance, L2/L3/L4
+    selection, or discovery fields.
+    """
+
+    signal_level_scales: pd.DataFrame
+    canonical_signal_mapping: pd.DataFrame
     distribution_summary: pd.DataFrame
     input_case_comparison: pd.DataFrame
     input_identity_manifest: pd.DataFrame
@@ -1426,11 +1444,657 @@ def estimate_l0_l4_observed_effect_scale_v1(
     )
 
 
+_BETA_TOTAL_HORIZON_ORDER = {horizon: ordinal for ordinal, horizon in enumerate(_REQUIRED_OBSERVED_HORIZONS)}
+_BETA_TOTAL_ESTIMATE_COLUMNS = (
+    "input_case",
+    "candidate_id",
+    "feature_name",
+    "return_horizon",
+    "status",
+    "failure_reason",
+    "beta_obs",
+)
+_BETA_TOTAL_DUPLICATE_COLUMNS = (
+    "input_case",
+    "candidate_id",
+    "return_horizon",
+    "duplicate_group_id",
+    "canonical_candidate_id",
+    "declared_alias_of",
+    "canonical_orientation",
+    "is_exact_duplicate",
+)
+_BETA_TOTAL_SIGNAL_COLUMNS = (
+    "input_case",
+    "canonical_signal_id",
+    "signal_feature_names",
+    "candidate_ids",
+    "legal_horizons",
+    "available_horizons",
+    "excluded_horizons",
+    "excluded_horizon_reasons",
+    "excluded_candidate_ids",
+    "exclusion_reasons",
+    "selected_horizon",
+    "selected_candidate_id",
+    "selected_signed_beta_obs",
+    "selected_canonical_signed_beta_obs",
+    "selected_abs_beta_total_scale",
+    "tie_candidate_ids",
+    "status",
+)
+_BETA_TOTAL_CANONICAL_COLUMNS = (
+    "input_case",
+    "candidate_id",
+    "feature_name",
+    "return_horizon",
+    "duplicate_group_id",
+    "canonical_candidate_id",
+    "declared_alias_of",
+    "canonical_orientation",
+    "is_exact_duplicate",
+    "canonical_signal_id",
+    "is_exact_duplicate_signal",
+)
+_BETA_TOTAL_DISTRIBUTION_COLUMNS = (
+    "input_case",
+    "distribution",
+    "status",
+    "signal_count",
+    "positive_count",
+    "negative_count",
+    "zero_count",
+    "p10",
+    "p50",
+    "p90",
+    "quantile_method",
+)
+_BETA_TOTAL_COMPARISON_COLUMNS = (
+    "canonical_signal_id",
+    "signal_equal",
+    "scale_equal",
+    "status",
+)
+_BETA_TOTAL_BC_ESTIMATE_COMPARE_COLUMNS = (
+    "candidate_id",
+    "feature_name",
+    "return_horizon",
+    "status",
+    "failure_reason",
+    "beta_obs",
+)
+_BETA_TOTAL_BC_DUPLICATE_COMPARE_COLUMNS = (
+    "candidate_id",
+    "return_horizon",
+    "duplicate_group_id",
+    "canonical_candidate_id",
+    "declared_alias_of",
+    "canonical_orientation",
+    "is_exact_duplicate",
+    "status",
+)
+_BETA_TOTAL_UPSTREAM_COMPARISON_COLUMNS = (
+    "candidate_id",
+    "return_horizon",
+    "signal_equal",
+    "return_equal",
+    "estimate_equal",
+    "status",
+)
+
+
+def _beta_total_optional_text(value: object) -> str | None:
+    if value is None or value is pd.NA:
+        return None
+    if isinstance(value, (float, np.floating)) and np.isnan(value):
+        return None
+    return str(value)
+
+
+def _beta_total_json(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _beta_total_bool(value: object, *, label: str) -> bool:
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, (int, np.integer)) and int(value) in {0, 1}:
+        return bool(value)
+    raise ValueError(f"{label} must be a boolean")
+
+
+def _beta_total_case_tables(
+    *,
+    input_case: str,
+    estimates: pd.DataFrame,
+    duplicate_mapping: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if not isinstance(estimates, pd.DataFrame) or not isinstance(duplicate_mapping, pd.DataFrame):
+        raise TypeError("beta-total mapping inputs must be pandas DataFrames")
+    missing_estimates = sorted(set(_BETA_TOTAL_ESTIMATE_COLUMNS).difference(estimates.columns))
+    missing_duplicates = sorted(set(_BETA_TOTAL_DUPLICATE_COLUMNS).difference(duplicate_mapping.columns))
+    if missing_estimates:
+        raise ValueError(f"candidate estimates are missing required columns: {missing_estimates}")
+    if missing_duplicates:
+        raise ValueError(f"duplicate mapping is missing required columns: {missing_duplicates}")
+    case_estimates = estimates.loc[estimates["input_case"].astype(str) == input_case].copy()
+    case_duplicates = duplicate_mapping.loc[
+        duplicate_mapping["input_case"].astype(str) == input_case
+    ].copy()
+    if case_estimates.empty or case_duplicates.empty:
+        raise ValueError(f"beta-total mapping has no complete input case {input_case}")
+    case_estimates["candidate_id"] = case_estimates["candidate_id"].astype(str)
+    case_estimates["feature_name"] = case_estimates["feature_name"].astype(str)
+    case_estimates["return_horizon"] = case_estimates["return_horizon"].astype(str)
+    case_duplicates["candidate_id"] = case_duplicates["candidate_id"].astype(str)
+    case_duplicates["return_horizon"] = case_duplicates["return_horizon"].astype(str)
+    case_duplicates["duplicate_group_id"] = case_duplicates["duplicate_group_id"].astype(str)
+    case_duplicates["canonical_candidate_id"] = case_duplicates["canonical_candidate_id"].astype(str)
+    if case_estimates["candidate_id"].duplicated().any():
+        raise ValueError(f"input case {input_case} has duplicate candidate estimate identities")
+    if case_duplicates["candidate_id"].duplicated().any():
+        raise ValueError(f"input case {input_case} has duplicate duplicate-mapping identities")
+    estimate_ids = set(case_estimates["candidate_id"])
+    duplicate_ids = set(case_duplicates["candidate_id"])
+    if estimate_ids != duplicate_ids:
+        raise ValueError(
+            f"input case {input_case} candidate/duplicate identities differ: "
+            f"estimates_only={sorted(estimate_ids - duplicate_ids)[:5]} "
+            f"duplicates_only={sorted(duplicate_ids - estimate_ids)[:5]}"
+        )
+    estimate_by_id = case_estimates.set_index("candidate_id", drop=False)
+    duplicate_by_id = case_duplicates.set_index("candidate_id", drop=False)
+    for candidate_id in sorted(estimate_ids):
+        estimate = estimate_by_id.loc[candidate_id]
+        duplicate = duplicate_by_id.loc[candidate_id]
+        if str(estimate["return_horizon"]) != str(duplicate["return_horizon"]):
+            raise ValueError(f"candidate/duplicate horizon differs for {input_case}/{candidate_id}")
+        if _beta_total_optional_text(duplicate["canonical_candidate_id"]) is None:
+            raise ValueError(f"canonical candidate is missing for {input_case}/{candidate_id}")
+        if int(duplicate["canonical_orientation"]) not in {-1, 1}:
+            raise ValueError(f"canonical orientation is not +/-1 for {input_case}/{candidate_id}")
+        if not _beta_total_optional_text(duplicate["duplicate_group_id"]):
+            raise ValueError(f"duplicate group is missing for {input_case}/{candidate_id}")
+    return case_estimates, case_duplicates
+
+
+def _beta_total_case_result(
+    *,
+    input_case: str,
+    estimates: pd.DataFrame,
+    duplicate_mapping: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    estimates, duplicate_mapping = _beta_total_case_tables(
+        input_case=input_case,
+        estimates=estimates,
+        duplicate_mapping=duplicate_mapping,
+    )
+    estimate_by_id = estimates.set_index("candidate_id", drop=False)
+    duplicate_by_id = duplicate_mapping.set_index("candidate_id", drop=False)
+    feature_by_candidate = {
+        candidate_id: str(row["feature_name"])
+        for candidate_id, row in estimate_by_id.iterrows()
+    }
+    horizon_by_candidate = {
+        candidate_id: str(row["return_horizon"])
+        for candidate_id, row in estimate_by_id.iterrows()
+    }
+    if any(horizon not in _BETA_TOTAL_HORIZON_ORDER for horizon in horizon_by_candidate.values()):
+        raise ValueError(f"input case {input_case} contains an unknown observed horizon")
+    features = set(feature_by_candidate.values())
+    parent = {feature: feature for feature in features}
+
+    def find(feature: str) -> str:
+        current = feature
+        while parent[current] != current:
+            parent[current] = parent[parent[current]]
+            current = parent[current]
+        return current
+
+    def union(left: str, right: str) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    grouped = list(duplicate_mapping.groupby(["return_horizon", "duplicate_group_id"], sort=True))
+    nontrivial_groups: list[tuple[str, str]] = []
+    group_canonical_by_pair: dict[tuple[str, str], str] = {}
+    for (horizon, group_id), group in grouped:
+        members = [str(value) for value in group["candidate_id"]]
+        canonical_ids = {str(value) for value in group["canonical_candidate_id"]}
+        if len(canonical_ids) != 1:
+            raise ValueError(f"duplicate group has multiple canonical candidates: {input_case}/{group_id}")
+        canonical_id = next(iter(canonical_ids))
+        if canonical_id not in members:
+            raise ValueError(f"duplicate group canonical candidate is not a member: {input_case}/{group_id}")
+        member_features = {feature_by_candidate[member] for member in members}
+        if len(member_features) > 1:
+            nontrivial_groups.append((str(horizon), str(group_id)))
+            canonical_feature = feature_by_candidate[canonical_id]
+            for feature in member_features:
+                union(canonical_feature, feature)
+        group_canonical_by_pair[(str(horizon), str(group_id))] = canonical_id
+        for member in members:
+            expected_duplicate = member != canonical_id
+            actual_duplicate = _beta_total_bool(
+                duplicate_by_id.loc[member, "is_exact_duplicate"],
+                label=f"is_exact_duplicate {input_case}/{member}",
+            )
+            if actual_duplicate != expected_duplicate:
+                raise ValueError(f"duplicate flag disagrees with canonical identity: {input_case}/{member}")
+            alias = _beta_total_optional_text(duplicate_by_id.loc[member, "declared_alias_of"])
+            if alias is not None:
+                if alias not in feature_by_candidate:
+                    raise ValueError(f"declared alias is not in the same input case: {input_case}/{member}")
+                if horizon_by_candidate[alias] != horizon_by_candidate[member]:
+                    raise ValueError(f"declared alias horizon differs: {input_case}/{member}")
+                union(feature_by_candidate[member], feature_by_candidate[alias])
+                if (str(horizon), str(group_id)) not in nontrivial_groups:
+                    nontrivial_groups.append((str(horizon), str(group_id)))
+
+    component_features: dict[str, set[str]] = {}
+    for feature in sorted(features):
+        component_features.setdefault(find(feature), set()).add(feature)
+    component_authorities: dict[str, set[str]] = {root: set() for root in component_features}
+    for horizon, group_id in nontrivial_groups:
+        group = duplicate_mapping.loc[
+            (duplicate_mapping["return_horizon"].astype(str) == horizon)
+            & (duplicate_mapping["duplicate_group_id"].astype(str) == group_id)
+        ]
+        canonical_id = group_canonical_by_pair[(horizon, group_id)]
+        component_authorities[find(feature_by_candidate[canonical_id])].add(
+            feature_by_candidate[canonical_id]
+        )
+    canonical_signal_by_feature: dict[str, str] = {}
+    for root, component in component_features.items():
+        authorities = component_authorities[root]
+        if not authorities:
+            if len(component) != 1:
+                raise ValueError(
+                    f"canonical signal grouping is not determined for {input_case}: {sorted(component)}"
+                )
+            canonical_signal = next(iter(component))
+        elif len(authorities) != 1:
+            raise ValueError(
+                f"ambiguous canonical signal grouping for {input_case}: {sorted(authorities)}"
+            )
+        else:
+            canonical_signal = next(iter(authorities))
+        for feature in component:
+            canonical_signal_by_feature[feature] = canonical_signal
+
+    # Exact duplicate groups must agree after the frozen sign orientation.  A
+    # disagreement is an input-contract failure, not a reason to choose one
+    # member or average the estimates.
+    for (horizon, group_id), group in grouped:
+        if len(group) <= 1:
+            continue
+        normalized_betas: list[float] = []
+        statuses: list[str] = []
+        for member in group["candidate_id"].astype(str):
+            estimate = estimate_by_id.loc[member]
+            status = str(estimate["status"])
+            statuses.append(status)
+            beta = pd.to_numeric(pd.Series([estimate["beta_obs"]]), errors="coerce").iloc[0]
+            if status == "ok" and not np.isfinite(float(beta)):
+                raise ValueError(f"exact duplicate group has non-finite beta: {input_case}/{group_id}")
+            if status == "ok":
+                normalized_betas.append(
+                    float(beta) * int(duplicate_by_id.loc[member, "canonical_orientation"])
+                )
+        if len(set(statuses)) != 1:
+            raise ValueError(f"exact duplicate group has inconsistent status: {input_case}/{group_id}")
+        if normalized_betas:
+            reference = np.asarray(normalized_betas[0], dtype="<f8").tobytes()
+            if any(np.asarray(value, dtype="<f8").tobytes() != reference for value in normalized_betas[1:]):
+                raise ValueError(f"exact duplicate group has inconsistent beta: {input_case}/{group_id}")
+
+    canonical_rows_by_signal_horizon: dict[tuple[str, str], list[str]] = {}
+    for (horizon, group_id), canonical_id in group_canonical_by_pair.items():
+        canonical_signal = canonical_signal_by_feature[feature_by_candidate[canonical_id]]
+        canonical_rows_by_signal_horizon.setdefault((canonical_signal, horizon), []).append(canonical_id)
+    if any(len(set(values)) != 1 for values in canonical_rows_by_signal_horizon.values()):
+        raise ValueError(
+            f"canonical signal has multiple exact representatives at one horizon for {input_case}"
+        )
+
+    canonical_mapping_rows: list[dict[str, object]] = []
+    for candidate_id in sorted(feature_by_candidate):
+        duplicate = duplicate_by_id.loc[candidate_id]
+        feature = feature_by_candidate[candidate_id]
+        canonical_signal = canonical_signal_by_feature[feature]
+        canonical_mapping_rows.append(
+            {
+                "input_case": input_case,
+                "candidate_id": candidate_id,
+                "feature_name": feature,
+                "return_horizon": horizon_by_candidate[candidate_id],
+                "duplicate_group_id": str(duplicate["duplicate_group_id"]),
+                "canonical_candidate_id": str(duplicate["canonical_candidate_id"]),
+                "declared_alias_of": _beta_total_optional_text(duplicate["declared_alias_of"]),
+                "canonical_orientation": int(duplicate["canonical_orientation"]),
+                "is_exact_duplicate": _beta_total_bool(
+                    duplicate["is_exact_duplicate"],
+                    label=f"is_exact_duplicate {input_case}/{candidate_id}",
+                ),
+                "canonical_signal_id": canonical_signal,
+                "is_exact_duplicate_signal": feature != canonical_signal,
+            }
+        )
+    canonical_mapping = pd.DataFrame(canonical_mapping_rows, columns=_BETA_TOTAL_CANONICAL_COLUMNS)
+
+    component_candidates: dict[str, list[str]] = {}
+    for candidate_id, feature in feature_by_candidate.items():
+        component_candidates.setdefault(canonical_signal_by_feature[feature], []).append(candidate_id)
+    signal_rows: list[dict[str, object]] = []
+    for canonical_signal in sorted(component_candidates):
+        candidate_ids = sorted(
+            component_candidates[canonical_signal],
+            key=lambda candidate_id: (
+                _BETA_TOTAL_HORIZON_ORDER[horizon_by_candidate[candidate_id]],
+                candidate_id,
+            ),
+        )
+        legal_horizons = sorted(
+            {horizon_by_candidate[candidate_id] for candidate_id in candidate_ids},
+            key=_BETA_TOTAL_HORIZON_ORDER.get,
+        )
+        canonical_candidate_ids = {
+            horizon: next(iter(set(values)))
+            for (signal, horizon), values in canonical_rows_by_signal_horizon.items()
+            if signal == canonical_signal
+        }
+        valid_canonical_rows: list[tuple[str, str, float, int]] = []
+        exclusion_reasons: dict[str, str] = {}
+        for candidate_id in candidate_ids:
+            estimate = estimate_by_id.loc[candidate_id]
+            status = str(estimate["status"])
+            beta_value = pd.to_numeric(pd.Series([estimate["beta_obs"]]), errors="coerce").iloc[0]
+            if status != "ok":
+                failure_reason = _beta_total_optional_text(estimate["failure_reason"]) or "unspecified"
+                exclusion_reasons[candidate_id] = f"status:{status};reason:{failure_reason}"
+            elif not np.isfinite(float(beta_value)):
+                exclusion_reasons[candidate_id] = "non_finite_beta_obs"
+        for horizon, canonical_id in sorted(
+            canonical_candidate_ids.items(), key=lambda item: _BETA_TOTAL_HORIZON_ORDER[item[0]]
+        ):
+            estimate = estimate_by_id.loc[canonical_id]
+            status = str(estimate["status"])
+            beta_value = pd.to_numeric(pd.Series([estimate["beta_obs"]]), errors="coerce").iloc[0]
+            if status == "ok" and np.isfinite(float(beta_value)):
+                valid_canonical_rows.append(
+                    (
+                        horizon,
+                        canonical_id,
+                        float(beta_value),
+                        int(duplicate_by_id.loc[canonical_id, "canonical_orientation"]),
+                    )
+                )
+        available_horizons = [row[0] for row in valid_canonical_rows]
+        excluded_horizons = [horizon for horizon in legal_horizons if horizon not in available_horizons]
+        excluded_horizon_reasons = {
+            horizon: sorted(
+                {
+                    exclusion_reasons[candidate_id]
+                    for candidate_id in candidate_ids
+                    if horizon_by_candidate[candidate_id] == horizon and candidate_id in exclusion_reasons
+                }
+            )
+            for horizon in excluded_horizons
+        }
+        if valid_canonical_rows:
+            maximum = max(abs(row[2]) for row in valid_canonical_rows)
+            tied_candidate_ids = sorted(
+                [
+                    candidate_id
+                    for _, candidate_id, beta_value, _ in valid_canonical_rows
+                    if abs(beta_value) == maximum
+                ],
+                key=lambda candidate_id: (
+                    _BETA_TOTAL_HORIZON_ORDER[horizon_by_candidate[candidate_id]],
+                    candidate_id,
+                ),
+            )
+            selected = min(
+                [row for row in valid_canonical_rows if abs(row[2]) == maximum],
+                key=lambda row: (_BETA_TOTAL_HORIZON_ORDER[row[0]], row[1]),
+            )
+            signal_status = "ok"
+            selected_horizon, selected_candidate_id, selected_beta, selected_orientation = selected
+            selected_canonical_beta = selected_beta * selected_orientation
+            selected_abs = abs(selected_beta)
+        else:
+            tied_candidate_ids = []
+            signal_status = "no_valid_horizon"
+            selected_horizon = ""
+            selected_candidate_id = ""
+            selected_beta = float("nan")
+            selected_canonical_beta = float("nan")
+            selected_abs = float("nan")
+        signal_rows.append(
+            {
+                "input_case": input_case,
+                "canonical_signal_id": canonical_signal,
+                "signal_feature_names": _beta_total_json(
+                    sorted({feature_by_candidate[candidate_id] for candidate_id in candidate_ids})
+                ),
+                "candidate_ids": _beta_total_json(candidate_ids),
+                "legal_horizons": _beta_total_json(legal_horizons),
+                "available_horizons": _beta_total_json(available_horizons),
+                "excluded_horizons": _beta_total_json(excluded_horizons),
+                "excluded_horizon_reasons": _beta_total_json(excluded_horizon_reasons),
+                "excluded_candidate_ids": _beta_total_json(sorted(exclusion_reasons)),
+                "exclusion_reasons": _beta_total_json(exclusion_reasons),
+                "selected_horizon": selected_horizon,
+                "selected_candidate_id": selected_candidate_id,
+                "selected_signed_beta_obs": selected_beta,
+                "selected_canonical_signed_beta_obs": selected_canonical_beta,
+                "selected_abs_beta_total_scale": selected_abs,
+                "tie_candidate_ids": _beta_total_json(tied_candidate_ids),
+                "status": signal_status,
+            }
+        )
+    signal_scales = pd.DataFrame(signal_rows, columns=_BETA_TOTAL_SIGNAL_COLUMNS)
+    valid_scales = signal_scales.loc[signal_scales["status"] == "ok"]
+    distribution_rows: list[dict[str, object]] = []
+    for distribution in ("signed", "absolute"):
+        values = valid_scales["selected_signed_beta_obs"].to_numpy(dtype=float)
+        if distribution == "absolute":
+            values = np.abs(values)
+        if len(values) == 0:
+            distribution_rows.append(
+                {
+                    "input_case": input_case,
+                    "distribution": distribution,
+                    "status": "no_valid_signal_scales",
+                    "signal_count": 0,
+                    "positive_count": 0,
+                    "negative_count": 0,
+                    "zero_count": 0,
+                    "p10": float("nan"),
+                    "p50": float("nan"),
+                    "p90": float("nan"),
+                    "quantile_method": "linear",
+                }
+            )
+            continue
+        distribution_rows.append(
+            {
+                "input_case": input_case,
+                "distribution": distribution,
+                "status": "ok",
+                "signal_count": int(len(values)),
+                "positive_count": int((values > 0.0).sum()),
+                "negative_count": int((values < 0.0).sum()),
+                "zero_count": int((values == 0.0).sum()),
+                "p10": float(np.quantile(values, 0.10, method="linear")),
+                "p50": float(np.quantile(values, 0.50, method="linear")),
+                "p90": float(np.quantile(values, 0.90, method="linear")),
+                "quantile_method": "linear",
+            }
+        )
+    distribution_summary = pd.DataFrame(
+        distribution_rows, columns=_BETA_TOTAL_DISTRIBUTION_COLUMNS
+    )
+    return signal_scales, canonical_mapping, distribution_summary
+
+
+def _beta_total_validate_frozen_b_c_inputs(
+    artifacts: ObservedEffectScaleArtifacts,
+) -> None:
+    """Fail closed unless the complete upstream B/C inventory is identical."""
+
+    def case_frame(frame: pd.DataFrame, case: str, columns: tuple[str, ...]) -> pd.DataFrame:
+        missing = sorted(set(columns).difference(frame.columns))
+        if missing:
+            raise ValueError(f"B/C mapping gate is missing upstream columns: {missing}")
+        selected = frame.loc[frame["input_case"].astype(str) == case, list(columns)].copy()
+        if selected.empty:
+            raise ValueError(f"B/C mapping gate has no upstream rows for case {case}")
+        return selected.sort_values(list(columns[:3]), kind="stable").reset_index(drop=True)
+
+    b_estimates = case_frame(
+        artifacts.candidate_estimates,
+        "B",
+        _BETA_TOTAL_BC_ESTIMATE_COMPARE_COLUMNS,
+    )
+    c_estimates = case_frame(
+        artifacts.candidate_estimates,
+        "C",
+        _BETA_TOTAL_BC_ESTIMATE_COMPARE_COLUMNS,
+    )
+    if not _frames_exact_equal(b_estimates, c_estimates):
+        raise ValueError(
+            "frozen B/C observed beta-total mapping differs in an upstream candidate/horizon row"
+        )
+
+    b_duplicates = case_frame(
+        artifacts.duplicate_mapping,
+        "B",
+        _BETA_TOTAL_BC_DUPLICATE_COMPARE_COLUMNS,
+    )
+    c_duplicates = case_frame(
+        artifacts.duplicate_mapping,
+        "C",
+        _BETA_TOTAL_BC_DUPLICATE_COMPARE_COLUMNS,
+    )
+    if not _frames_exact_equal(b_duplicates, c_duplicates):
+        raise ValueError("frozen B/C observed beta-total mapping differs in duplicate identity")
+
+    comparison = artifacts.input_case_comparison
+    missing_comparison = sorted(
+        set(_BETA_TOTAL_UPSTREAM_COMPARISON_COLUMNS).difference(comparison.columns)
+    )
+    if missing_comparison or comparison.empty:
+        raise ValueError(
+            "B/C mapping gate requires the complete upstream input_case_comparison: "
+            f"missing={missing_comparison}"
+        )
+    try:
+        comparison_flags = {
+            column: [
+                _beta_total_bool(value, label=f"upstream {column}")
+                for value in comparison[column]
+            ]
+            for column in ("signal_equal", "return_equal", "estimate_equal")
+        }
+    except ValueError as exc:
+        raise ValueError("upstream B/C input_case_comparison contains non-boolean flags") from exc
+    if not (
+        all(comparison_flags["signal_equal"])
+        and all(comparison_flags["return_equal"])
+        and all(comparison_flags["estimate_equal"])
+        and comparison["status"].astype(str).eq("equal").all()
+    ):
+        raise ValueError("upstream B/C input_case_comparison is not fully equal")
+
+
+def map_observed_effect_scale_to_beta_total_v1(
+    artifacts: ObservedEffectScaleArtifacts,
+) -> ObservedEffectBetaTotalArtifacts:
+    """Map per-(candidate, horizon) observations to signal-level beta scales.
+
+    The input must be the output of the formal observed-effect inventory for
+    the independently materialised ``B`` and ``C`` cases.  Exact duplicate
+    relationships are converted into signal-level connected components.  A
+    component with conflicting canonical roots fails closed rather than
+    selecting a convenient identity.  Within each component, exactly one
+    canonical representative per legal horizon is considered, the maximum
+    absolute ``beta_obs`` is selected, and ties use the fixed order
+    ``4h < 8h < 12h < 1d`` followed by ``candidate_id``.  The returned
+    quantiles are observed-scale evidence only; this function does not create
+    the later user-frozen ``G_beta_total_v1`` simulation grid.
+    """
+    if not isinstance(artifacts, ObservedEffectScaleArtifacts):
+        raise TypeError("artifacts must be ObservedEffectScaleArtifacts")
+    if set(artifacts.candidate_estimates["input_case"].astype(str)) != {"B", "C"}:
+        raise ValueError("beta-total mapping requires exactly input cases B and C")
+    _beta_total_validate_frozen_b_c_inputs(artifacts)
+    case_results = {
+        input_case: _beta_total_case_result(
+            input_case=input_case,
+            estimates=artifacts.candidate_estimates,
+            duplicate_mapping=artifacts.duplicate_mapping,
+        )
+        for input_case in ("B", "C")
+    }
+    comparison_rows: list[dict[str, object]] = []
+    mismatches: list[str] = []
+    b_scales, b_mapping, b_distribution = case_results["B"]
+    c_scales, c_mapping, c_distribution = case_results["C"]
+    signal_ids = sorted(
+        set(b_scales["canonical_signal_id"]) | set(c_scales["canonical_signal_id"])
+    )
+    for signal_id in signal_ids:
+        b_scale = b_scales.loc[b_scales["canonical_signal_id"] == signal_id].drop(columns="input_case")
+        c_scale = c_scales.loc[c_scales["canonical_signal_id"] == signal_id].drop(columns="input_case")
+        b_signal = b_mapping.loc[b_mapping["canonical_signal_id"] == signal_id].drop(columns="input_case")
+        c_signal = c_mapping.loc[c_mapping["canonical_signal_id"] == signal_id].drop(columns="input_case")
+        signal_equal = _frames_exact_equal(
+            b_signal.sort_values(list(_BETA_TOTAL_CANONICAL_COLUMNS[1:]), kind="stable").reset_index(drop=True),
+            c_signal.sort_values(list(_BETA_TOTAL_CANONICAL_COLUMNS[1:]), kind="stable").reset_index(drop=True),
+        )
+        scale_equal = _frames_exact_equal(
+            b_scale.sort_values(["canonical_signal_id"], kind="stable").reset_index(drop=True),
+            c_scale.sort_values(["canonical_signal_id"], kind="stable").reset_index(drop=True),
+        )
+        equal = signal_equal and scale_equal
+        comparison_rows.append(
+            {
+                "canonical_signal_id": signal_id,
+                "signal_equal": signal_equal,
+                "scale_equal": scale_equal,
+                "status": "equal" if equal else "mismatch",
+            }
+        )
+        if not equal:
+            mismatches.append(signal_id)
+    b_dist_core = b_distribution.drop(columns="input_case").reset_index(drop=True)
+    c_dist_core = c_distribution.drop(columns="input_case").reset_index(drop=True)
+    if not _frames_exact_equal(b_dist_core, c_dist_core):
+        mismatches.append("distribution_summary")
+    if mismatches:
+        raise ValueError(
+            "frozen B/C observed beta-total mapping differs for: " + ", ".join(mismatches[:8])
+        )
+    comparison = pd.DataFrame(comparison_rows, columns=_BETA_TOTAL_COMPARISON_COLUMNS)
+    return ObservedEffectBetaTotalArtifacts(
+        signal_level_scales=pd.concat([b_scales, c_scales], ignore_index=True),
+        canonical_signal_mapping=pd.concat([b_mapping, c_mapping], ignore_index=True),
+        distribution_summary=pd.concat([b_distribution, c_distribution], ignore_index=True),
+        input_case_comparison=comparison,
+        input_identity_manifest=artifacts.input_identity_manifest.copy(deep=True),
+    )
+
+
 __all__ = [
     "DecisionWindow",
     "ObservedEffectCandidate",
+    "ObservedEffectBetaTotalArtifacts",
     "ObservedEffectScaleContract",
     "ObservedEffectScaleArtifacts",
     "ObservedEffectScaleInput",
     "estimate_l0_l4_observed_effect_scale_v1",
+    "map_observed_effect_scale_to_beta_total_v1",
 ]
