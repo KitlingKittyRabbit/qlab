@@ -70,6 +70,7 @@ def _registry(
             ),
             _stream("null-main", "null", "null-main"),
             _stream("price-main", "price", "price-main"),
+            _stream("volume-main", "volume", "volume-main"),
         )
     if bindings is None:
         bindings = (
@@ -98,7 +99,7 @@ def _registry(
     return RandomStreamSpecificationRegistryV1(**values)
 
 
-def test_random_stream_specification_accepts_four_kinds_and_explicit_group_binding():
+def test_random_stream_specification_accepts_five_kinds_and_explicit_group_binding():
     registry = _registry()
 
     assert validate_random_stream_specification_v1(registry) is registry
@@ -107,6 +108,7 @@ def test_random_stream_specification_accepts_four_kinds_and_explicit_group_bindi
         "measurement",
         "null",
         "price",
+        "volume",
     }
     assert registry.asset_symbols == KNOWN_TRUTH_ADMITTED_SYMBOLS_V1
 
@@ -169,6 +171,7 @@ def test_random_stream_specification_rejects_only_r_identity():
                     information_group_id="alpha"),
             _stream("null-main", "null", "null-main"),
             _stream("price-main", "price", "price-main"),
+            _stream("volume-main", "volume", "volume-main"),
         )
     )
 
@@ -188,6 +191,7 @@ def test_random_stream_specification_rejects_only_r_decomposition_identity():
                     information_group_id="alpha"),
             _stream("null-main", "null", "null-main"),
             _stream("price-main", "price", "price-main"),
+            _stream("volume-main", "volume", "volume-main"),
         )
     )
 
@@ -228,6 +232,7 @@ def test_random_stream_specification_rejects_missing_r_t_or_process_identity(bro
                     information_group_id="alpha"),
             _stream("null-main", "null", "null-main"),
             _stream("price-main", "price", "price-main"),
+            _stream("volume-main", "volume", "volume-main"),
         )
     )
 
@@ -257,7 +262,10 @@ def test_random_stream_specification_rejects_null_sharing_base_or_measurement():
 
     with pytest.raises(ValueError, match="across stream kinds"):
         validate_random_stream_specification_v1(
-            replace(registry, streams=(*registry.streams[:2], shared_null, registry.streams[3]))
+            replace(
+                registry,
+                streams=(*registry.streams[:2], shared_null, *registry.streams[3:]),
+            )
         )
 
 

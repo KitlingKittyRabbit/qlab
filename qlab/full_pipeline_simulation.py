@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import struct
 from dataclasses import dataclass, field
@@ -32,6 +33,7 @@ import pandas as pd
 
 from . import factor_research
 from .data.crypto import keystore_coinglass_factors as factor_registry
+from .data.crypto.binance_um_klines import KLINE_COLUMNS, normalize_klines
 from .data.crypto.keystore_coinglass_panel import (
     build_decision_grid_index,
     build_panel_from_payloads,
@@ -2213,6 +2215,7 @@ DETERMINISTIC_RANDOM_ALLOWED_STREAM_KINDS_V1 = (
     "measurement",
     "null",
     "price",
+    "volume",
 )
 _DETERMINISTIC_RANDOM_MAX_TEXT_BYTES_V1 = 128
 _DETERMINISTIC_RANDOM_MAX_TIME_INDEX_V1 = (1 << 63) - 1
@@ -2385,7 +2388,7 @@ class RandomTimeProcessSpecificationV1:
 
 @dataclass(frozen=True)
 class RandomStreamSpecificationV1:
-    """One base, measurement, null, or price stream identity.
+    """One base, measurement, null, price, or volume stream identity.
 
     ``random_address_group_id`` is the registered stream/group identifier
     passed to :func:`derive_deterministic_random_address_v1`.  Reusing it is
@@ -2428,7 +2431,7 @@ class RandomStreamSpecificationRegistryV1:
     """Immutable registry for random-stream and R/T identities only.
 
     The registry binds the already approved deterministic address primitive,
-    phase, fixed 20-asset order, four stream kinds, R identities, T
+    phase, fixed 20-asset order, five stream kinds, R identities, T
     identities, initialization, burn-in, native frequency and calibration
     status.  It is a pre-generation validation object, not a scenario
     manifest and not a random-number, price, signal, or return generator.
@@ -2583,7 +2586,7 @@ def validate_random_stream_specification_v1(
                     + stream.information_group_id
                 )
             base_by_information_group[stream.information_group_id] = stream
-        elif stream.stream_kind in ("null", "price"):
+        elif stream.stream_kind in ("null", "price", "volume"):
             if stream.information_group_id is not None:
                 raise ValueError(
                     f"{label}.{stream.stream_kind} stream cannot bind an information group"
@@ -2705,6 +2708,510 @@ def validate_random_stream_specification_v1(
                     "group-bound measurement stream is missing from its information-group binding"
                 )
     return registry
+
+
+MARKET_INPUT_SPINE_SCHEMA_V1 = "ksv4-market-input-spine-records/v1"
+MARKET_INPUT_SPINE_LIFECYCLE_V1 = "candidate_market_input_spine_fixture_v1"
+MARKET_INPUT_SPINE_AUTHORITY_V1 = "issue_34_market_input_spine_v1"
+MARKET_INPUT_SPINE_MAY_BE_USED_FOR_V1 = "pre_l0_market_raw_fixture_only_v1"
+MARKET_INPUT_SPINE_MUST_NOT_BE_USED_FOR_V1 = (
+    "no_truth_no_signal_no_l0_l4_no_research_conclusion_v1"
+)
+MARKET_INPUT_SPINE_ARCHIVE_CONDITION_V1 = (
+    "superseded_by_approved_market_input_spine_v1"
+)
+MARKET_INPUT_SPINE_INNOVATION_DISTRIBUTION_V1 = "standard_normal_v1"
+MARKET_INPUT_SPINE_ALLOWED_TIME_PROCESSES_V1 = ("iid", "ar1", "ma")
+MARKET_INPUT_SPINE_NATIVE_FREQUENCY_V1 = "1min"
+MARKET_INPUT_SPINE_TIME_ORDER_V1 = "utc-minute-order-v1"
+MARKET_INPUT_SPINE_SOURCE_V1 = "synthetic_market_input_spine_v1"
+MARKET_INPUT_SPINE_VALUE_STATUS_V1 = "ok"
+MARKET_INPUT_SPINE_RECORD_COLUMNS_V1 = (
+    "symbol",
+    "open_time",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "close_time",
+    "source",
+    "generation_batch",
+    "value_status",
+    "content_identity",
+)
+
+
+@dataclass(frozen=True)
+class MarketInputSpineStreamV1:
+    """Executable fixture parameters for one price or volume stream.
+
+    The stream registry remains the authority for the registered stream id,
+    innovation distribution, R/T identity, burn-in, native frequency and
+    calibration identity.  This record supplies only the explicit numerical
+    fixture values consumed by the vertical slice.  It is not a truth stream
+    and contains no signal, return, or discovery input.
+    """
+
+    stream_id: str
+    process_family: str
+    process_family_id: str
+    parameter_identity: str
+    initialization_identity: str
+    process_parameters: tuple[float, ...]
+    initial_state: tuple[float, ...]
+    level_values: tuple[float, ...]
+    state_scale: float
+    correlation_matrix: tuple[tuple[float, ...], ...]
+    correlation_decomposition: tuple[tuple[float, ...], ...]
+
+
+@dataclass(frozen=True)
+class MarketInputSpineSpecificationV1:
+    """Closed, parameterized market-input contract for the vertical slice.
+
+    ``asset_symbols`` may be a non-empty subsequence of the registry's frozen
+    20-asset order.  This is the explicit two-asset fixture projection; it
+    never changes the registry order used by a later full-universe run.
+    """
+
+    schema_version: str
+    generation_batch: str
+    seed_namespace: str
+    phase: str
+    asset_symbols: tuple[str, ...]
+    start_time: pd.Timestamp
+    periods: int
+    asset_processing_order: tuple[int, ...]
+    price: MarketInputSpineStreamV1
+    volume: MarketInputSpineStreamV1
+    lifecycle: str
+    authority: str
+    may_be_used_for: str
+    must_not_be_used_for: str
+    archive_condition: str
+
+
+@dataclass(frozen=True)
+class MarketInputSpineArtifactsV1:
+    """Generated OHLCV records plus their immutable fixture identity."""
+
+    records: pd.DataFrame
+    schema_version: str
+    generation_batch: str
+    asset_symbols: tuple[str, ...]
+    start_time: pd.Timestamp
+    periods: int
+
+
+def _validate_market_spine_matrix_v1(
+    value: object,
+    *,
+    size: int,
+    label: str,
+) -> np.ndarray:
+    try:
+        matrix = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a finite square matrix") from exc
+    if matrix.shape != (size, size) or not np.isfinite(matrix).all():
+        raise ValueError(f"{label} must be a finite {size}x{size} matrix")
+    if not np.allclose(matrix, matrix.T, rtol=0.0, atol=1e-12) and label.endswith(
+        "correlation_matrix"
+    ):
+        raise ValueError(f"{label} must be symmetric")
+    return matrix
+
+
+def _validate_market_spine_r_and_decomposition_v1(
+    stream: MarketInputSpineStreamV1,
+    *,
+    size: int,
+    label: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    correlation = _validate_market_spine_matrix_v1(
+        stream.correlation_matrix,
+        size=size,
+        label=f"{label}.correlation_matrix",
+    )
+    if not np.allclose(np.diag(correlation), np.ones(size), rtol=0.0, atol=1e-12):
+        raise ValueError(f"{label}.correlation_matrix diagonal must be one")
+    try:
+        canonical_decomposition = np.linalg.cholesky(correlation)
+    except np.linalg.LinAlgError as exc:
+        raise ValueError(f"{label}.correlation_matrix must be positive definite") from exc
+    decomposition = _validate_market_spine_matrix_v1(
+        stream.correlation_decomposition,
+        size=size,
+        label=f"{label}.correlation_decomposition",
+    )
+    if not np.allclose(decomposition, np.tril(decomposition), rtol=0.0, atol=1e-12):
+        raise ValueError(f"{label}.correlation_decomposition must be lower triangular")
+    if (np.diag(decomposition) <= 0.0).any():
+        raise ValueError(
+            f"{label}.correlation_decomposition must have positive diagonal for canonical Cholesky"
+        )
+    if not np.allclose(
+        decomposition @ decomposition.T,
+        correlation,
+        rtol=0.0,
+        atol=1e-12,
+    ):
+        raise ValueError(f"{label}.correlation_decomposition does not match R")
+    if not np.allclose(
+        decomposition,
+        canonical_decomposition,
+        rtol=0.0,
+        atol=1e-12,
+    ):
+        raise ValueError(f"{label}.correlation_decomposition is not canonical Cholesky")
+    return correlation, decomposition
+
+
+def _validate_market_spine_stream_v1(
+    stream: object,
+    *,
+    registry: RandomStreamSpecificationRegistryV1,
+    expected_kind: str,
+    size: int,
+    label: str,
+) -> tuple[RandomStreamSpecificationV1, np.ndarray, np.ndarray]:
+    if not isinstance(stream, MarketInputSpineStreamV1):
+        raise TypeError(f"{label} must be MarketInputSpineStreamV1")
+    _validate_random_stream_text_v1(stream.stream_id, label=f"{label}.stream_id")
+    registered = next(
+        (item for item in registry.streams if item.stream_id == stream.stream_id),
+        None,
+    )
+    if registered is None or registered.stream_kind != expected_kind:
+        raise ValueError(f"{label}.stream_id is not the registered {expected_kind} stream")
+    if registered.innovation_distribution_id != MARKET_INPUT_SPINE_INNOVATION_DISTRIBUTION_V1:
+        raise ValueError(f"{label} has an unsupported innovation distribution")
+    if registered.asset_symbols != registry.asset_symbols:
+        raise ValueError(f"{label} registry asset order is not frozen")
+    _validate_random_stream_text_v1(
+        stream.process_family,
+        label=f"{label}.process_family",
+    )
+    if stream.process_family not in MARKET_INPUT_SPINE_ALLOWED_TIME_PROCESSES_V1:
+        raise ValueError(f"{label}.process_family is not an allowed v1 process")
+    if stream.process_family_id != registered.time_process.family_id:
+        raise ValueError(f"{label}.process_family_id does not match registry")
+    if stream.parameter_identity != registered.time_process.parameter_identity:
+        raise ValueError(f"{label}.parameter_identity does not match registry")
+    if stream.initialization_identity != registered.time_process.initialization_identity:
+        raise ValueError(f"{label}.initialization_identity does not match registry")
+    process = registered.time_process
+    if process.native_frequency != MARKET_INPUT_SPINE_NATIVE_FREQUENCY_V1:
+        raise ValueError(f"{label} native frequency must be 1min")
+    if process.time_order_identity != MARKET_INPUT_SPINE_TIME_ORDER_V1:
+        raise ValueError(f"{label} time order identity must be UTC minute order")
+    if type(stream.process_parameters) is not tuple:
+        raise ValueError(f"{label}.process_parameters must be an immutable tuple")
+    parameters = np.asarray(stream.process_parameters, dtype=np.float64)
+    if not np.isfinite(parameters).all():
+        raise ValueError(f"{label}.process_parameters must be finite")
+    if stream.process_family == "iid" and len(parameters) != 0:
+        raise ValueError(f"{label} IID process cannot have parameters")
+    if stream.process_family == "ar1":
+        if len(parameters) != 1 or not -1.0 < float(parameters[0]) < 1.0:
+            raise ValueError(f"{label} AR1 requires phi in (-1, 1)")
+    if stream.process_family == "ma":
+        if len(parameters) < 1 or not np.isclose(np.sum(parameters**2), 1.0, rtol=0.0, atol=1e-12):
+            raise ValueError(f"{label} MA coefficients must have unit squared norm")
+    if type(stream.initial_state) is not tuple or len(stream.initial_state) != size:
+        raise ValueError(f"{label}.initial_state must match the asset count")
+    initial_state = np.asarray(stream.initial_state, dtype=np.float64)
+    if not np.isfinite(initial_state).all():
+        raise ValueError(f"{label}.initial_state must be finite")
+    if stream.process_family in ("iid", "ma") and not np.allclose(
+        initial_state, 0.0, rtol=0.0, atol=0.0
+    ):
+        raise ValueError(f"{label} IID/MA initial state must be zero")
+    if type(stream.level_values) is not tuple or len(stream.level_values) != size:
+        raise ValueError(f"{label}.level_values must match the asset count")
+    levels = np.asarray(stream.level_values, dtype=np.float64)
+    if not np.isfinite(levels).all() or (levels <= 0.0).any():
+        raise ValueError(f"{label}.level_values must be strictly positive and finite")
+    if isinstance(stream.state_scale, bool) or not isinstance(stream.state_scale, (int, float)):
+        raise ValueError(f"{label}.state_scale must be numeric")
+    if not math.isfinite(float(stream.state_scale)) or float(stream.state_scale) <= 0.0:
+        raise ValueError(f"{label}.state_scale must be strictly positive")
+    correlation, decomposition = _validate_market_spine_r_and_decomposition_v1(
+        stream,
+        size=size,
+        label=label,
+    )
+    return registered, correlation, decomposition
+
+
+def validate_market_input_spine_specification_v1(
+    specification: MarketInputSpineSpecificationV1,
+    registry: RandomStreamSpecificationRegistryV1,
+) -> MarketInputSpineSpecificationV1:
+    """Validate the closed price/volume fixture contract before sampling."""
+    if not isinstance(specification, MarketInputSpineSpecificationV1):
+        raise TypeError("specification must be MarketInputSpineSpecificationV1")
+    validate_random_stream_specification_v1(registry)
+    if specification.schema_version != MARKET_INPUT_SPINE_SCHEMA_V1:
+        raise ValueError("market-input schema_version is not the frozen v1 version")
+    for field_name, expected in (
+        ("lifecycle", MARKET_INPUT_SPINE_LIFECYCLE_V1),
+        ("authority", MARKET_INPUT_SPINE_AUTHORITY_V1),
+        ("may_be_used_for", MARKET_INPUT_SPINE_MAY_BE_USED_FOR_V1),
+        ("must_not_be_used_for", MARKET_INPUT_SPINE_MUST_NOT_BE_USED_FOR_V1),
+        ("archive_condition", MARKET_INPUT_SPINE_ARCHIVE_CONDITION_V1),
+    ):
+        if getattr(specification, field_name) != expected:
+            raise ValueError(f"market-input {field_name} is outside the frozen boundary")
+    _validate_random_stream_text_v1(
+        specification.generation_batch,
+        label="generation_batch",
+    )
+    if specification.seed_namespace != registry.seed_namespace:
+        raise ValueError("market-input seed_namespace does not match registry")
+    if specification.phase != registry.phase:
+        raise ValueError("market-input phase does not match registry")
+    if type(specification.asset_symbols) is not tuple or not specification.asset_symbols:
+        raise ValueError("market-input asset_symbols must be a non-empty tuple")
+    if len(set(specification.asset_symbols)) != len(specification.asset_symbols):
+        raise ValueError("market-input asset_symbols contain duplicates")
+    positions = []
+    for symbol in specification.asset_symbols:
+        if symbol not in registry.asset_symbols:
+            raise ValueError(f"market-input asset is not in the frozen registry: {symbol}")
+        positions.append(registry.asset_symbols.index(symbol))
+    if positions != sorted(positions):
+        raise ValueError("market-input assets must preserve the frozen registry order")
+    if (
+        isinstance(specification.periods, bool)
+        or not isinstance(specification.periods, Integral)
+        or specification.periods <= 0
+        or specification.periods > 1_000_000
+    ):
+        raise ValueError("market-input periods must be a positive bounded integer")
+    if not isinstance(specification.start_time, pd.Timestamp):
+        raise TypeError("market-input start_time must be a pandas Timestamp")
+    if specification.start_time.tz is None or str(specification.start_time.tz) != "UTC":
+        raise ValueError("market-input start_time must be UTC-aware")
+    if specification.start_time != specification.start_time.floor("min"):
+        raise ValueError("market-input start_time must be minute aligned")
+    if type(specification.asset_processing_order) is not tuple:
+        raise ValueError("market-input asset_processing_order must be an immutable tuple")
+    if sorted(specification.asset_processing_order) != list(range(len(specification.asset_symbols))):
+        raise ValueError("market-input processing order must be a complete local permutation")
+    price_registered, _, _ = _validate_market_spine_stream_v1(
+        specification.price,
+        registry=registry,
+        expected_kind="price",
+        size=len(specification.asset_symbols),
+        label="price",
+    )
+    volume_registered, _, _ = _validate_market_spine_stream_v1(
+        specification.volume,
+        registry=registry,
+        expected_kind="volume",
+        size=len(specification.asset_symbols),
+        label="volume",
+    )
+    if price_registered.random_address_group_id == volume_registered.random_address_group_id:
+        raise ValueError("price and volume streams must have independent random addresses")
+    return specification
+
+
+def _market_input_spine_standard_normal_from_address_v1(
+    address: DeterministicRandomAddressV1,
+) -> float:
+    digest = bytes.fromhex(address.address_hex)
+    u1 = (int.from_bytes(digest[:8], byteorder="big", signed=False) + 0.5) / 2**64
+    u2 = (int.from_bytes(digest[8:16], byteorder="big", signed=False) + 0.5) / 2**64
+    return math.sqrt(-2.0 * math.log(u1)) * math.cos(2.0 * math.pi * u2)
+
+
+def _market_input_spine_innovations_v1(
+    specification: MarketInputSpineSpecificationV1,
+    registry: RandomStreamSpecificationRegistryV1,
+    *,
+    stream: MarketInputSpineStreamV1,
+    registered: RandomStreamSpecificationV1,
+    kind: str,
+    size: int,
+    injected_standard_innovations: Mapping[str, object] | None,
+) -> np.ndarray:
+    total_steps = registered.time_process.burn_in_steps + specification.periods
+    if injected_standard_innovations is not None:
+        if set(injected_standard_innovations) != {"price", "volume"}:
+            raise ValueError("injected innovations must contain exactly price and volume")
+        try:
+            innovations = np.asarray(injected_standard_innovations[kind], dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"injected {kind} innovations are not numeric") from exc
+        if innovations.shape != (total_steps, size) or not np.isfinite(innovations).all():
+            raise ValueError(f"injected {kind} innovations have the wrong shape or values")
+        return innovations.copy()
+    result = np.empty((total_steps, size), dtype=np.float64)
+    global_positions = [registry.asset_symbols.index(symbol) for symbol in specification.asset_symbols]
+    for time_index in range(total_steps):
+        for local_index in specification.asset_processing_order:
+            result[time_index, local_index] = _market_input_spine_standard_normal_from_address_v1(
+                derive_deterministic_random_address_v1(
+                    specification.seed_namespace,
+                    specification.phase,
+                    kind,
+                    registered.random_address_group_id,
+                    time_index,
+                    global_positions[local_index],
+                )
+            )
+    return result
+
+
+def _market_input_spine_apply_time_process_v1(
+    innovations: np.ndarray,
+    stream: MarketInputSpineStreamV1,
+) -> np.ndarray:
+    states = np.empty_like(innovations)
+    if stream.process_family == "iid":
+        states[:] = innovations
+        return states
+    if stream.process_family == "ar1":
+        phi = float(stream.process_parameters[0])
+        innovation_scale = math.sqrt(1.0 - phi**2)
+        previous = np.asarray(stream.initial_state, dtype=np.float64)
+        for index, innovation in enumerate(innovations):
+            states[index] = phi * previous + innovation_scale * innovation
+            previous = states[index]
+        return states
+    coefficients = np.asarray(stream.process_parameters, dtype=np.float64)
+    states[:] = 0.0
+    for index in range(len(innovations)):
+        for lag, coefficient in enumerate(coefficients):
+            if index >= lag:
+                states[index] += coefficient * innovations[index - lag]
+    return states
+
+
+def generate_market_input_spine_v1(
+    specification: MarketInputSpineSpecificationV1,
+    registry: RandomStreamSpecificationRegistryV1,
+    *,
+    injected_standard_innovations: Mapping[str, object] | None = None,
+) -> MarketInputSpineArtifactsV1:
+    """Generate a deterministic 1-minute OHLCV spine for a small fixture.
+
+    The default path derives one standard-normal innovation per registered
+    stream/time/asset address, applies the registered R decomposition and
+    time process, and then emits only market raw records.  ``injected`` is a
+    test-only deterministic innovation seam; it still passes through the same
+    R, T, positivity, and formal Binance kline validation and cannot carry
+    truth or future-return fields.
+    """
+    validate_market_input_spine_specification_v1(specification, registry)
+    size = len(specification.asset_symbols)
+    price_registered, _, price_decomposition = _validate_market_spine_stream_v1(
+        specification.price,
+        registry=registry,
+        expected_kind="price",
+        size=size,
+        label="price",
+    )
+    volume_registered, _, volume_decomposition = _validate_market_spine_stream_v1(
+        specification.volume,
+        registry=registry,
+        expected_kind="volume",
+        size=size,
+        label="volume",
+    )
+    price_standard = _market_input_spine_innovations_v1(
+        specification,
+        registry,
+        stream=specification.price,
+        registered=price_registered,
+        kind="price",
+        size=size,
+        injected_standard_innovations=injected_standard_innovations,
+    )
+    volume_standard = _market_input_spine_innovations_v1(
+        specification,
+        registry,
+        stream=specification.volume,
+        registered=volume_registered,
+        kind="volume",
+        size=size,
+        injected_standard_innovations=injected_standard_innovations,
+    )
+    price_states = _market_input_spine_apply_time_process_v1(
+        price_standard @ price_decomposition.T,
+        specification.price,
+    )[price_registered.time_process.burn_in_steps :]
+    volume_states = _market_input_spine_apply_time_process_v1(
+        volume_standard @ volume_decomposition.T,
+        specification.volume,
+    )[volume_registered.time_process.burn_in_steps :]
+    current_prices = np.asarray(specification.price.level_values, dtype=np.float64).copy()
+    base_volumes = np.asarray(specification.volume.level_values, dtype=np.float64)
+    rows: list[dict[str, object]] = []
+    for period_index in range(specification.periods):
+        open_time = specification.start_time + pd.Timedelta(minutes=period_index)
+        close_time = open_time + pd.Timedelta(minutes=1) - pd.Timedelta(milliseconds=1)
+        for asset_index, symbol in enumerate(specification.asset_symbols):
+            open_price = float(current_prices[asset_index])
+            close_price = open_price * math.exp(
+                float(price_states[period_index, asset_index]) * float(specification.price.state_scale)
+            )
+            high_price = max(open_price, close_price)
+            low_price = min(open_price, close_price)
+            volume = float(
+                base_volumes[asset_index]
+                * math.exp(
+                    float(volume_states[period_index, asset_index])
+                    * float(specification.volume.state_scale)
+                )
+            )
+            if not math.isfinite(volume) or volume <= 0.0:
+                raise ValueError("generated volume must be strictly positive and finite")
+            content_payload = {
+                "schema_version": MARKET_INPUT_SPINE_SCHEMA_V1,
+                "symbol": symbol,
+                "open_time": open_time.isoformat(),
+                "open": format(open_price, ".17g"),
+                "high": format(high_price, ".17g"),
+                "low": format(low_price, ".17g"),
+                "close": format(close_price, ".17g"),
+                "volume": format(volume, ".17g"),
+                "close_time": close_time.isoformat(),
+                "source": MARKET_INPUT_SPINE_SOURCE_V1,
+                "generation_batch": specification.generation_batch,
+                "value_status": MARKET_INPUT_SPINE_VALUE_STATUS_V1,
+            }
+            rows.append(
+                {
+                    **content_payload,
+                    "open": open_price,
+                    "high": high_price,
+                    "low": low_price,
+                    "close": close_price,
+                    "volume": volume,
+                    "content_identity": _json_content_sha256(content_payload),
+                }
+            )
+            current_prices[asset_index] = close_price
+    records = pd.DataFrame(rows, columns=MARKET_INPUT_SPINE_RECORD_COLUMNS_V1)
+    if len(records) != specification.periods * size:
+        raise ValueError("market-input record count is inconsistent")
+    for symbol in specification.asset_symbols:
+        asset_rows = records.loc[records["symbol"] == symbol, list(KLINE_COLUMNS)]
+        normalized = normalize_klines(asset_rows, "1m")
+        if len(normalized) != specification.periods:
+            raise ValueError(f"market-input asset has an incomplete kline sequence: {symbol}")
+    return MarketInputSpineArtifactsV1(
+        records=records,
+        schema_version=specification.schema_version,
+        generation_batch=specification.generation_batch,
+        asset_symbols=specification.asset_symbols,
+        start_time=specification.start_time,
+        periods=specification.periods,
+    )
 
 
 def _known_truth_formal_candidate_ids_v1() -> tuple[str, ...]:
@@ -3451,6 +3958,19 @@ __all__ = [
     "DETERMINISTIC_RANDOM_ALLOWED_PHASES_V1",
     "DETERMINISTIC_RANDOM_ALLOWED_STREAM_KINDS_V1",
     "DeterministicRandomAddressV1",
+    "MARKET_INPUT_SPINE_ALLOWED_TIME_PROCESSES_V1",
+    "MARKET_INPUT_SPINE_ARCHIVE_CONDITION_V1",
+    "MARKET_INPUT_SPINE_AUTHORITY_V1",
+    "MARKET_INPUT_SPINE_INNOVATION_DISTRIBUTION_V1",
+    "MARKET_INPUT_SPINE_LIFECYCLE_V1",
+    "MARKET_INPUT_SPINE_MAY_BE_USED_FOR_V1",
+    "MARKET_INPUT_SPINE_MUST_NOT_BE_USED_FOR_V1",
+    "MARKET_INPUT_SPINE_NATIVE_FREQUENCY_V1",
+    "MARKET_INPUT_SPINE_RECORD_COLUMNS_V1",
+    "MARKET_INPUT_SPINE_SCHEMA_V1",
+    "MARKET_INPUT_SPINE_SOURCE_V1",
+    "MARKET_INPUT_SPINE_TIME_ORDER_V1",
+    "MARKET_INPUT_SPINE_VALUE_STATUS_V1",
     "RANDOM_STREAM_CALIBRATION_STATUSES_V1",
     "RANDOM_STREAM_SPECIFICATION_ARCHIVE_CONDITION_V1",
     "RANDOM_STREAM_SPECIFICATION_AUTHORITY_V1",
@@ -3496,6 +4016,9 @@ __all__ = [
     "RandomStreamSpecificationRegistryV1",
     "RandomStreamSpecificationV1",
     "RandomTimeProcessSpecificationV1",
+    "MarketInputSpineArtifactsV1",
+    "MarketInputSpineSpecificationV1",
+    "MarketInputSpineStreamV1",
     "ObservedEffectCandidate",
     "ObservedEffectBetaTotalArtifacts",
     "ObservedEffectScaleContract",
@@ -3504,6 +4027,8 @@ __all__ = [
     "derive_deterministic_random_address_v1",
     "estimate_l0_l4_observed_effect_scale_v1",
     "map_observed_effect_scale_to_beta_total_v1",
+    "generate_market_input_spine_v1",
+    "validate_market_input_spine_specification_v1",
     "validate_random_stream_specification_v1",
     "validate_known_truth_simulation_contract_v1",
 ]
