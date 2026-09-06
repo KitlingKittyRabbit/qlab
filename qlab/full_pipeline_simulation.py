@@ -4268,6 +4268,68 @@ class KnownTruthDgpVerticalArtifactsV1:
     periods: int
 
 
+KNOWN_TRUTH_L0_L4_MICRO_SCHEMA_V1 = "ksv4-known-truth-l0-l4-micro-e2e/v1"
+KNOWN_TRUTH_L0_L4_MICRO_LIFECYCLE_V1 = "candidate_known_truth_l0_l4_micro_e2e_v1"
+KNOWN_TRUTH_L0_L4_MICRO_AUTHORITY_V1 = "issue_34_blueprint_section_6_1_qlab_formal_path_v1"
+KNOWN_TRUTH_L0_L4_MICRO_MAY_BE_USED_FOR_V1 = (
+    "hand_checkable_known_truth_l0_l4_diagnostic_fixture_v1"
+)
+KNOWN_TRUTH_L0_L4_MICRO_MUST_NOT_BE_USED_FOR_V1 = (
+    "no_formal_1100_simulation_no_research_conclusion_no_deployment_no_trade_v1"
+)
+KNOWN_TRUTH_L0_L4_MICRO_ARCHIVE_CONDITION_V1 = (
+    "superseded_by_approved_known_truth_l0_l4_micro_e2e_v1"
+)
+
+
+@dataclass(frozen=True)
+class KnownTruthL0L4RawInputV1:
+    """Truth-free raw records admitted by the formal micro L0--L4 path."""
+
+    market_records: pd.DataFrame
+    signal_records: pd.DataFrame
+    schema_version: str
+    generation_batch: str
+    asset_symbols: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class KnownTruthL0L4MicroArtifactsV1:
+    """Outputs of the formal raw -> L0 -> L1 -> L2 -> L3 -> L4 fixture path.
+
+    The truth sidecar is intentionally not an input or a field of this result;
+    callers may use it only after the pipeline has completed for terminal
+    test assertions.
+    """
+
+    l0_market_records: pd.DataFrame
+    l0_signal_records: pd.DataFrame
+    l1_panel: pd.DataFrame
+    l2_rank_ic: pd.DataFrame
+    l2_directions: pd.DataFrame
+    l3_summary: pd.DataFrame
+    l3_composite: pd.DataFrame
+    l3_targets: pd.DataFrame
+    l3_ic: pd.DataFrame
+    l3_bucket: pd.DataFrame
+    l3_weights: pd.DataFrame
+    l3_diagnostics: pd.DataFrame
+    l4_summary: pd.DataFrame
+    l4_detail: pd.DataFrame
+    l4_orders: pd.DataFrame
+    l4_holdings: pd.DataFrame
+    schema_version: str
+    lifecycle: str
+    authority: str
+    may_be_used_for: str
+    must_not_be_used_for: str
+    archive_condition: str
+    asset_symbols: tuple[str, ...]
+    candidate_ids: tuple[str, ...]
+    decision_frequency: str
+    return_horizon: str
+
+
 def _known_truth_dgp_curve_cdf_v1(curve_id: str, elapsed_hours: float) -> float:
     if elapsed_hours < 0.0 or not math.isfinite(elapsed_hours):
         raise ValueError("effect curve elapsed time must be finite and non-negative")
@@ -5399,6 +5461,503 @@ def generate_known_truth_dgp_vertical_slice_v1(
     )
 
 
+def _known_truth_l0_l4_micro_timestamp_v1(value: object, *, label: str) -> pd.Timestamp:
+    try:
+        timestamp = pd.Timestamp(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a timestamp") from exc
+    if timestamp.tz is None:
+        raise ValueError(f"{label} must be UTC-aware")
+    return timestamp.tz_convert("UTC")
+
+
+def _validate_known_truth_l0_l4_micro_raw_v1(
+    raw_input: KnownTruthL0L4RawInputV1,
+    candidate_ids: tuple[str, ...],
+) -> tuple[dict[str, pd.DataFrame], pd.DataFrame, pd.DataFrame]:
+    """Validate the truth-free DGP records before the formal L0--L4 path."""
+    if not isinstance(raw_input, KnownTruthL0L4RawInputV1):
+        raise TypeError("raw_input must be KnownTruthL0L4RawInputV1")
+    if raw_input.schema_version != KNOWN_TRUTH_DGP_VERTICAL_SCHEMA_V1:
+        raise ValueError("micro raw input schema is not the approved DGP schema")
+    if not raw_input.generation_batch or not isinstance(raw_input.generation_batch, str):
+        raise ValueError("micro raw input generation_batch must be a non-empty string")
+    if type(raw_input.asset_symbols) is not tuple or len(raw_input.asset_symbols) not in {2, 20}:
+        raise ValueError("micro raw input must contain either 2 or 20 assets")
+    if len(set(raw_input.asset_symbols)) != len(raw_input.asset_symbols):
+        raise ValueError("micro raw input asset symbols must be unique")
+    expected_positions = [
+        KNOWN_TRUTH_ADMITTED_SYMBOLS_V1.index(symbol)
+        for symbol in raw_input.asset_symbols
+        if symbol in KNOWN_TRUTH_ADMITTED_SYMBOLS_V1
+    ]
+    if len(expected_positions) != len(raw_input.asset_symbols) or expected_positions != sorted(expected_positions):
+        raise ValueError("micro raw input assets must preserve the frozen universe order")
+    if type(candidate_ids) is not tuple or len(candidate_ids) < 2:
+        raise ValueError("micro candidate_ids must be an immutable tuple with at least two entries")
+    if len(set(candidate_ids)) != len(candidate_ids):
+        raise ValueError("micro candidate_ids must be unique")
+    unknown_candidates = sorted(
+        set(candidate_ids).difference(KNOWN_TRUTH_REGISTRY_CANDIDATE_IDS_V1)
+    )
+    if unknown_candidates:
+        raise ValueError("micro candidate_ids are outside the formal 159-candidate registry")
+
+    market = raw_input.market_records
+    if tuple(market.columns) != MARKET_INPUT_SPINE_RECORD_COLUMNS_V1:
+        raise ValueError("micro L0 market records do not match the DGP market schema")
+    if market.empty:
+        raise ValueError("micro L0 market records must not be empty")
+    if set(market["symbol"].astype(str)) != set(raw_input.asset_symbols):
+        raise ValueError("micro L0 market records have incomplete asset symbols")
+    market_by_symbol: dict[str, pd.DataFrame] = {}
+    expected_open_times: set[pd.Timestamp] | None = None
+    for symbol in raw_input.asset_symbols:
+        symbol_rows = market.loc[market["symbol"].astype(str).eq(symbol)].copy()
+        parsed_open_times = pd.DatetimeIndex(
+            [
+                _known_truth_l0_l4_micro_timestamp_v1(
+                    value, label="market.open_time"
+                )
+                for value in symbol_rows["open_time"]
+            ]
+        )
+        raw_ohlcv = (
+            symbol_rows.loc[:, ["open", "high", "low", "close", "volume"]]
+            .apply(pd.to_numeric, errors="coerce")
+            .to_numpy(dtype=float)
+        )
+        if not np.isfinite(raw_ohlcv).all() or (raw_ohlcv <= 0.0).any():
+            raise ValueError(
+                "micro L0 market OHLCV must be finite and strictly positive"
+            )
+        ordered_open_times = parsed_open_times.sort_values()
+        if ordered_open_times.has_duplicates or (
+            len(ordered_open_times) > 1
+            and not (
+                ordered_open_times[1:] - ordered_open_times[:-1]
+                == pd.Timedelta(minutes=1)
+            ).all()
+        ):
+            raise ValueError(
+                "micro L0 market records must form a continuous UTC 1-minute grid"
+            )
+        normalized = normalize_klines(symbol_rows.loc[:, list(KLINE_COLUMNS)], "1m")
+        if normalized.empty:
+            raise ValueError(f"micro L0 market sequence is empty for {symbol}")
+        symbol_times = set(parsed_open_times)
+        if expected_open_times is None:
+            expected_open_times = symbol_times
+        elif symbol_times != expected_open_times:
+            raise ValueError(
+                "micro L0 market symbols do not share the same continuous 1-minute grid"
+            )
+        for record in symbol_rows.itertuples(index=False):
+            open_time = _known_truth_l0_l4_micro_timestamp_v1(record.open_time, label="market.open_time")
+            close_time = _known_truth_l0_l4_micro_timestamp_v1(record.close_time, label="market.close_time")
+            expected_close = open_time + pd.Timedelta(minutes=1) - pd.Timedelta(milliseconds=1)
+            if close_time != expected_close:
+                raise ValueError("micro L0 market close_time is not a one-minute bar end")
+            if record.source != KNOWN_TRUTH_DGP_MARKET_SOURCE_V1:
+                raise ValueError("micro L0 market source is not the DGP source")
+            if record.generation_batch != raw_input.generation_batch:
+                raise ValueError("micro L0 market generation batch does not match raw identity")
+            if record.value_status != KNOWN_TRUTH_DGP_VALUE_STATUS_V1:
+                raise ValueError("micro L0 market value status is not valid")
+            payload = {
+                "schema_version": KNOWN_TRUTH_DGP_VERTICAL_SCHEMA_V1,
+                "symbol": str(record.symbol),
+                "open_time": open_time.isoformat(),
+                "open": format(float(record.open), ".17g"),
+                "high": format(float(record.high), ".17g"),
+                "low": format(float(record.low), ".17g"),
+                "close": format(float(record.close), ".17g"),
+                "volume": format(float(record.volume), ".17g"),
+                "close_time": close_time.isoformat(),
+                "source": record.source,
+                "generation_batch": record.generation_batch,
+                "value_status": record.value_status,
+            }
+            if record.content_identity != _json_content_sha256(payload):
+                raise ValueError("micro L0 market content identity does not match its bytes")
+        market_by_symbol[symbol] = normalized
+
+    signals = raw_input.signal_records
+    if tuple(signals.columns) != KNOWN_TRUTH_DGP_SIGNAL_RECORD_COLUMNS_V1:
+        raise ValueError("micro L0 signal records do not match the DGP signal schema")
+    selected = signals.loc[signals["candidate_id"].isin(candidate_ids)].copy()
+    if selected.empty:
+        raise ValueError("micro L0 selected signal records are empty")
+    if selected[["candidate_id", "symbol", "decision_time"]].duplicated().any():
+        raise ValueError("micro L0 selected signal records contain duplicate identities")
+    signal_time_columns = (
+        "decision_time",
+        "assumed_execution_gate",
+        "actual_observed_availability",
+    )
+    for column in signal_time_columns:
+        for value in selected[column]:
+            _known_truth_l0_l4_micro_timestamp_v1(
+                value, label=f"signal.{column}"
+            )
+    for column in signal_time_columns:
+        selected[column] = pd.to_datetime(selected[column], utc=True)
+    if not np.isfinite(selected["signal_value"].to_numpy(dtype=float)).all():
+        raise ValueError("micro L0 signal values must be finite")
+    expected_decisions: set[pd.Timestamp] | None = None
+    expected_row_count = len(raw_input.asset_symbols)
+    for candidate_id in candidate_ids:
+        candidate_rows = selected.loc[selected["candidate_id"].eq(candidate_id)].copy()
+        if len(candidate_rows) == 0 or len(candidate_rows) % expected_row_count != 0:
+            raise ValueError(f"micro L0 candidate grid is incomplete: {candidate_id}")
+        candidate_symbols = set(candidate_rows["symbol"].astype(str))
+        candidate_times = set(pd.DatetimeIndex(candidate_rows["decision_time"]))
+        if candidate_symbols != set(raw_input.asset_symbols):
+            raise ValueError(f"micro L0 candidate symbols are incomplete: {candidate_id}")
+        if expected_decisions is None:
+            expected_decisions = candidate_times
+        elif candidate_times != expected_decisions:
+            raise ValueError("micro L0 candidates do not share the same decision grid")
+        if len(candidate_rows) != len(candidate_times) * expected_row_count:
+            raise ValueError(f"micro L0 candidate grid contains duplicate/missing rows: {candidate_id}")
+    if expected_decisions is None or len(expected_decisions) < 2:
+        raise ValueError("micro L0 requires at least two decision timestamps")
+    grouped_metadata = selected.groupby(["decision_time", "symbol"], sort=False)
+    if (
+        grouped_metadata["assumed_execution_gate"].nunique().gt(1).any()
+        or grouped_metadata["actual_observed_availability"].nunique().gt(1).any()
+    ):
+        raise ValueError("micro L0 selected candidates disagree on availability metadata")
+    expected_gate = selected["decision_time"] + pd.Timedelta(minutes=4)
+    if not (selected["assumed_execution_gate"].to_numpy() == expected_gate.to_numpy()).all():
+        raise ValueError("micro L0 assumed execution gate must be decision plus four minutes")
+    if not (selected["actual_observed_availability"].to_numpy() <= expected_gate.to_numpy()).all():
+        raise ValueError("micro L0 actual signal availability is later than execution gate")
+    for record in selected.itertuples(index=False):
+        decision_time = _known_truth_l0_l4_micro_timestamp_v1(record.decision_time, label="signal.decision_time")
+        assumed_gate = _known_truth_l0_l4_micro_timestamp_v1(
+            record.assumed_execution_gate, label="signal.assumed_execution_gate"
+        )
+        actual_availability = _known_truth_l0_l4_micro_timestamp_v1(
+            record.actual_observed_availability, label="signal.actual_observed_availability"
+        )
+        if record.source != KNOWN_TRUTH_DGP_SIGNAL_SOURCE_V1:
+            raise ValueError("micro L0 signal source is not the DGP source")
+        if record.generation_batch != raw_input.generation_batch:
+            raise ValueError("micro L0 signal generation batch does not match raw identity")
+        if record.value_status != KNOWN_TRUTH_DGP_VALUE_STATUS_V1:
+            raise ValueError("micro L0 signal value status is not valid")
+        payload = {
+            "schema_version": KNOWN_TRUTH_DGP_VERTICAL_SCHEMA_V1,
+            "candidate_id": record.candidate_id,
+            "symbol": str(record.symbol),
+            "decision_time": decision_time.isoformat(),
+            "assumed_execution_gate": assumed_gate.isoformat(),
+            "actual_observed_availability": actual_availability.isoformat(),
+            "signal_value": format(float(record.signal_value), ".17g"),
+            "source": record.source,
+            "generation_batch": record.generation_batch,
+            "value_status": record.value_status,
+        }
+        if record.content_identity != _json_content_sha256(payload):
+            raise ValueError("micro L0 signal content identity does not match its bytes")
+    canonical_market = raw_input.market_records.copy(deep=True)
+    canonical_market["_micro_open_time"] = pd.DatetimeIndex(
+        [
+            _known_truth_l0_l4_micro_timestamp_v1(
+                value, label="market.open_time"
+            )
+            for value in canonical_market["open_time"]
+        ]
+    )
+    canonical_market["_micro_asset_order"] = pd.Categorical(
+        canonical_market["symbol"].astype(str),
+        categories=list(raw_input.asset_symbols),
+        ordered=True,
+    )
+    canonical_market["symbol"] = canonical_market["symbol"].astype(str)
+    canonical_market["open_time"] = pd.DatetimeIndex(
+        [
+            _known_truth_l0_l4_micro_timestamp_v1(
+                value, label="market.open_time"
+            )
+            for value in canonical_market["open_time"]
+        ]
+    )
+    canonical_market["close_time"] = pd.DatetimeIndex(
+        [
+            _known_truth_l0_l4_micro_timestamp_v1(
+                value, label="market.close_time"
+            )
+            for value in canonical_market["close_time"]
+        ]
+    )
+    for column in ["open", "high", "low", "close", "volume"]:
+        canonical_market[column] = pd.to_numeric(
+            canonical_market[column], errors="raise"
+        ).astype(float)
+    for column in ["source", "generation_batch", "value_status", "content_identity"]:
+        canonical_market[column] = canonical_market[column].astype(str)
+    canonical_market = (
+        canonical_market.sort_values(
+            ["_micro_open_time", "_micro_asset_order"], kind="mergesort"
+        )
+        .drop(columns=["_micro_open_time", "_micro_asset_order"])
+        .reset_index(drop=True)
+    )
+    canonical_selected = selected.sort_values(
+        ["candidate_id", "decision_time", "symbol"], kind="mergesort"
+    ).reset_index(drop=True)
+    for column in ["candidate_id", "symbol", "source", "generation_batch", "value_status", "content_identity"]:
+        canonical_selected[column] = canonical_selected[column].astype(str)
+    canonical_selected["signal_value"] = pd.to_numeric(
+        canonical_selected["signal_value"], errors="raise"
+    ).astype(float)
+    return market_by_symbol, canonical_selected, canonical_market
+
+
+def run_known_truth_l0_l4_micro_e2e_v1(
+    raw_input: KnownTruthL0L4RawInputV1,
+    *,
+    candidate_ids: tuple[str, ...],
+    folds: Sequence[object],
+    walk_forward_spec: Mapping[str, int],
+    horizon_deltas: Mapping[str, pd.Timedelta],
+    frequency_periods_per_year: Mapping[str, int | float],
+    decision_frequency: str = "4h",
+    return_horizon: str = "4h",
+    supported_signal_timeframes: Sequence[str] = ("1m",),
+    execution_delay_minutes: int = 4,
+    weight_scheme: str = "equal",
+    combo_id: str = "known_truth_micro_combo_v1",
+    track: str = "known_truth_micro_e2e_v1",
+    n_buckets: int = 2,
+    min_cross_section: int | None = None,
+    cost_multipliers: Sequence[float],
+    taker_fee_rate: float,
+) -> KnownTruthL0L4MicroArtifactsV1:
+    """Run the truth-free DGP raw records through qlab's formal L0--L4 path.
+
+    This is a small diagnostic entry, not a simulator.  L0/L1 admission is
+    limited to the supplied raw records; L2/L3/L4 calculations are delegated
+    to the existing qlab factor and executable-replay entries.  A truth
+    sidecar is intentionally neither accepted nor consulted here.
+    """
+    candidate_ids = tuple(candidate_ids)
+    market_by_symbol, selected, canonical_market = _validate_known_truth_l0_l4_micro_raw_v1(
+        raw_input, candidate_ids
+    )
+    if decision_frequency != return_horizon:
+        raise ValueError("micro continuous route requires decision_frequency == return_horizon")
+    if not isinstance(execution_delay_minutes, int) or isinstance(execution_delay_minutes, bool):
+        raise ValueError("micro execution_delay_minutes must be an integer")
+    if execution_delay_minutes != 4:
+        raise ValueError("micro route is frozen to the four-minute execution gate")
+    if not combo_id or not track or weight_scheme != "equal":
+        raise ValueError("micro combo identity and equal weight scheme are frozen")
+    if not folds:
+        raise ValueError("micro route requires at least one walk-forward fold")
+    required_walk_forward = {"train_days", "test_days", "embargo_days", "step_days"}
+    if not required_walk_forward.issubset(walk_forward_spec):
+        raise ValueError("micro walk_forward_spec is incomplete")
+    if decision_frequency not in horizon_deltas or "1m" not in horizon_deltas:
+        raise ValueError("micro horizon_deltas must include decision frequency and 1m")
+    if decision_frequency not in frequency_periods_per_year:
+        raise ValueError("micro frequency_periods_per_year is missing decision frequency")
+    if not supported_signal_timeframes:
+        raise ValueError("micro supported_signal_timeframes must not be empty")
+    for multiplier in cost_multipliers:
+        if not math.isfinite(float(multiplier)) or float(multiplier) <= 0.0:
+            raise ValueError("micro cost multipliers must be positive and finite")
+    if not math.isfinite(float(taker_fee_rate)) or float(taker_fee_rate) < 0.0:
+        raise ValueError("micro taker_fee_rate must be non-negative and finite")
+    for fold in folds:
+        for field_name in ("fold_idx", "train_start", "train_end", "test_start", "test_end"):
+            if not hasattr(fold, field_name):
+                raise ValueError(f"micro fold is missing {field_name}")
+        if not isinstance(fold.fold_idx, Integral) or isinstance(fold.fold_idx, bool):
+            raise ValueError("micro fold_idx must be an integer")
+        for field_name in ("train_start", "train_end", "test_start", "test_end"):
+            _known_truth_l0_l4_micro_timestamp_v1(
+                getattr(fold, field_name), label=f"fold.{field_name}"
+            )
+    if min_cross_section is None:
+        min_cross_section = len(raw_input.asset_symbols)
+    if int(min_cross_section) != len(raw_input.asset_symbols):
+        raise ValueError("micro min_cross_section must equal the complete raw asset count")
+    if int(n_buckets) != 2 or int(min_cross_section) < int(n_buckets):
+        raise ValueError("micro route requires two buckets and a complete two-asset cross-section")
+
+    # DGP signal rows already satisfy the approved L0 raw schema: their
+    # ``decision_time`` is the canonical period-end label and their explicit
+    # availability fields are preserved below.  The pivot is therefore only
+    # the deterministic raw-record-to-panel shape adapter.  L1's frequency
+    # filter and executable availability/price ledger remain the existing
+    # qlab entries; no research-layer transform or return calculation is
+    # introduced here.
+    panel_values = selected.pivot(
+        index=["decision_time", "symbol"],
+        columns="candidate_id",
+        values="signal_value",
+    ).reindex(columns=list(candidate_ids))
+    panel_values.index.names = ["decision_ts", "symbol"]
+    if panel_values.isna().any().any():
+        raise ValueError("micro L1 panel contains incomplete candidate rows")
+    panel_values["signal_bar_end_ts"] = panel_values.index.get_level_values("decision_ts")
+    panel_values["canonical_period_end_ts"] = panel_values.index.get_level_values("decision_ts")
+    availability = selected.drop_duplicates(["decision_time", "symbol"]).set_index(
+        ["decision_time", "symbol"]
+    )[["assumed_execution_gate", "actual_observed_availability"]]
+    availability.index.names = ["decision_ts", "symbol"]
+    panel_values = panel_values.join(availability, how="left", validate="one_to_one")
+    panel_values["control_zero"] = 0.0
+    panel_values = panel_values.sort_index()
+    decision_panel = factor_research.filter_frame_to_decision_frequency(
+        panel_values,
+        decision_frequency,
+        horizon_deltas,
+    )
+    if decision_panel.empty:
+        raise ValueError("micro L1 has no decision-frequency rows")
+    contract = ContinuousHoldingTimeContract(
+        return_horizon=return_horizon,
+        decision_interval=decision_frequency,
+        holding_interval=return_horizon,
+        strategy_return_interval=return_horizon,
+        signal_timeframes=("1m",),
+        execution_delay_minutes=execution_delay_minutes,
+        data_observed_rule="assumed_available_by_t_plus_4m",
+    )
+    validate_continuous_holding_contract(contract, horizon_deltas)
+    l1_panel = panel_with_executable_return(
+        decision_panel,
+        market_by_symbol,
+        contract,
+        horizon_deltas,
+    ).sort_index(kind="mergesort")
+    # The formal factor/rank entries consume the canonical ``forward_return``
+    # name.  This is only the name adapter for the already-computed executable
+    # open-to-open return; no second label or price path is calculated here.
+    l1_panel["forward_return"] = l1_panel["executable_return"].astype(float)
+
+    l2_rows: list[dict[str, object]] = []
+    for feature_name in candidate_ids:
+        for row in factor_research.rank_ic_diagnostics_for_frame(
+            l1_panel[["symbol", feature_name, "forward_return"]],
+            feature_name,
+            int(min_cross_section),
+        ):
+            l2_rows.append({"feature_name": feature_name, **row})
+    l2_rank_ic = pd.DataFrame(l2_rows)
+    if l2_rank_ic.empty:
+        raise ValueError("micro L2 produced no formal rank diagnostics")
+    direction_rows: list[dict[str, object]] = []
+    for fold in folds:
+        train_slice = factor_research.select_dates(
+            l1_panel,
+            fold,
+            "train",
+        )
+        for feature_name in candidate_ids:
+            direction = factor_research.single_feature_train_direction(
+                train_slice[["symbol", feature_name, "forward_return"]],
+                feature_name,
+                int(min_cross_section),
+            )
+            direction_rows.append(
+                {
+                    "fold_idx": int(fold.fold_idx),
+                    "feature_name": feature_name,
+                    "train_mean_ic": direction.train_mean_ic,
+                    "direction": direction.direction,
+                    "observation_count": direction.observation_count,
+                    "status": direction.status,
+                }
+            )
+    l2_directions = pd.DataFrame(direction_rows)
+    if l2_directions.empty:
+        raise ValueError("micro L2 produced no formal train directions")
+
+    combo_spec = factor_research.ComboSpec(
+        combo_id=combo_id,
+        track=track,
+        panel_frequency=decision_frequency,
+        return_horizon=return_horizon,
+        feature_names=candidate_ids,
+        weight_scheme=weight_scheme,
+    )
+    l3_summary, l3_composite, l3_ic, l3_bucket, l3_weights, l3_diagnostics = (
+        factor_research.evaluate_combo_signal_two_gate_diagnostics(
+            combo_spec,
+            l1_panel,
+            folds,
+            walk_forward_spec,
+            weight_scheme=weight_scheme,
+            feature_families=None,
+            control_columns=("control_zero",),
+            decision_frequency=decision_frequency,
+            n_buckets=n_buckets,
+            min_cross_section=int(min_cross_section),
+            frequency_periods_per_year=frequency_periods_per_year,
+            horizon_deltas=horizon_deltas,
+            supported_signal_timeframes=supported_signal_timeframes,
+        )
+    )
+    l3_targets = factor_research.combo_signal_target_membership(
+        l3_composite,
+        n_buckets=n_buckets,
+    )
+    l4_summary_dict, l4_detail, l4_orders, l4_holdings = (
+        factor_research.evaluate_executable_long_short_strategy_with_orders(
+            combo_spec,
+            l1_panel,
+            folds,
+            walk_forward_spec,
+            weight_scheme=weight_scheme,
+            feature_families=None,
+            decision_frequency=decision_frequency,
+            n_buckets=n_buckets,
+            min_cross_section=int(min_cross_section),
+            frequency_periods_per_year=frequency_periods_per_year,
+            cost_multipliers=cost_multipliers,
+            taker_fee_rate=taker_fee_rate,
+            horizon_deltas=horizon_deltas,
+            supported_signal_timeframes=supported_signal_timeframes,
+            execution_delay_minutes=execution_delay_minutes,
+        )
+    )
+    if l3_summary.empty or l3_composite.empty or l3_targets.empty or l4_detail.empty:
+        raise ValueError("micro L0--L4 path produced an incomplete formal result")
+    return KnownTruthL0L4MicroArtifactsV1(
+        l0_market_records=canonical_market,
+        l0_signal_records=selected.copy(deep=True),
+        l1_panel=l1_panel,
+        l2_rank_ic=l2_rank_ic,
+        l2_directions=l2_directions,
+        l3_summary=l3_summary,
+        l3_composite=l3_composite,
+        l3_targets=l3_targets,
+        l3_ic=l3_ic,
+        l3_bucket=l3_bucket,
+        l3_weights=l3_weights,
+        l3_diagnostics=l3_diagnostics,
+        l4_summary=pd.DataFrame([l4_summary_dict]),
+        l4_detail=l4_detail,
+        l4_orders=l4_orders,
+        l4_holdings=l4_holdings,
+        schema_version=KNOWN_TRUTH_L0_L4_MICRO_SCHEMA_V1,
+        lifecycle=KNOWN_TRUTH_L0_L4_MICRO_LIFECYCLE_V1,
+        authority=KNOWN_TRUTH_L0_L4_MICRO_AUTHORITY_V1,
+        may_be_used_for=KNOWN_TRUTH_L0_L4_MICRO_MAY_BE_USED_FOR_V1,
+        must_not_be_used_for=KNOWN_TRUTH_L0_L4_MICRO_MUST_NOT_BE_USED_FOR_V1,
+        archive_condition=KNOWN_TRUTH_L0_L4_MICRO_ARCHIVE_CONDITION_V1,
+        asset_symbols=raw_input.asset_symbols,
+        candidate_ids=candidate_ids,
+        decision_frequency=decision_frequency,
+        return_horizon=return_horizon,
+    )
+
+
 __all__ = [
     "DecisionWindow",
     "DETERMINISTIC_RANDOM_ADDRESS_VERSION_V1",
@@ -5490,6 +6049,8 @@ __all__ = [
     "KnownTruthDgpVerticalSpecificationV1",
     "KnownTruthScenarioV1",
     "KnownTruthSignalAssignmentV1",
+    "KnownTruthL0L4RawInputV1",
+    "KnownTruthL0L4MicroArtifactsV1",
     "KnownTruthSimulationContractV1",
     "KnownTruthTaskV1",
     "_known_truth_dgp_rank_effect_weight_v1",
@@ -5500,6 +6061,12 @@ __all__ = [
     "MarketInputSpineArtifactsV1",
     "MarketInputSpineSpecificationV1",
     "MarketInputSpineStreamV1",
+    "KNOWN_TRUTH_L0_L4_MICRO_ARCHIVE_CONDITION_V1",
+    "KNOWN_TRUTH_L0_L4_MICRO_AUTHORITY_V1",
+    "KNOWN_TRUTH_L0_L4_MICRO_LIFECYCLE_V1",
+    "KNOWN_TRUTH_L0_L4_MICRO_MAY_BE_USED_FOR_V1",
+    "KNOWN_TRUTH_L0_L4_MICRO_MUST_NOT_BE_USED_FOR_V1",
+    "KNOWN_TRUTH_L0_L4_MICRO_SCHEMA_V1",
     "ObservedEffectCandidate",
     "ObservedEffectBetaTotalArtifacts",
     "ObservedEffectScaleContract",
@@ -5510,6 +6077,7 @@ __all__ = [
     "map_observed_effect_scale_to_beta_total_v1",
     "generate_market_input_spine_v1",
     "generate_known_truth_dgp_vertical_slice_v1",
+    "run_known_truth_l0_l4_micro_e2e_v1",
     "validate_market_input_spine_specification_v1",
     "validate_random_stream_specification_v1",
     "validate_known_truth_simulation_contract_v1",
