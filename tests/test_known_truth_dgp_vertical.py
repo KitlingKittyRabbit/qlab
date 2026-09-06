@@ -1,10 +1,13 @@
 from dataclasses import replace
+import inspect
 import math
 import pickle
 
 import numpy as np
 import pandas as pd
 import pytest
+
+from qlab.data.crypto import keystore_coinglass_factors as factor_registry
 
 from qlab.full_pipeline_simulation import (
     DETERMINISTIC_RANDOM_ADDRESS_VERSION_V1,
@@ -69,6 +72,16 @@ from qlab.full_pipeline_simulation import (
     _known_truth_dgp_rank_effect_weight_v1,
     generate_known_truth_dgp_vertical_slice_v1,
     KnownTruthL0L4RawInputV1,
+    KnownTruthL0L4PipelineDiscoveryArtifactsV1,
+    KnownTruthL0L4TruthBlindEvaluationInputV1,
+    KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_SCHEMA_V1,
+    KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_LIFECYCLE_V1,
+    KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_AUTHORITY_V1,
+    KNOWN_TRUTH_L4_ACTIVATION_COLUMNS_V1,
+    KNOWN_TRUTH_PIPELINE_DISCOVERY_COLUMNS_V1,
+    bind_known_truth_l0_l4_truth_blind_evaluation_input_v1,
+    evaluate_known_truth_pipeline_terminal_v1,
+    run_known_truth_l0_l4_pipeline_discovery_micro_e2e_v1,
     run_known_truth_l0_l4_micro_e2e_v1,
     validate_known_truth_dgp_vertical_specification_v1,
 )
@@ -370,6 +383,27 @@ def _scenario_rank_only() -> KnownTruthScenarioV1:
     )
 
 
+def _scenario_pipeline_discovery() -> KnownTruthScenarioV1:
+    """One true information group, an exact alias, and registered nulls."""
+    direct_id = CANDIDATES[67]  # 1h signal, 4h discovery unit
+    alias_id = CANDIDATES[71]   # another 1h signal, same true base
+    assignments = []
+    for candidate_id in CANDIDATES:
+        if candidate_id == direct_id:
+            assignments.append(_assignment_direct(candidate_id))
+        elif candidate_id == alias_id:
+            assignments.append(_assignment_alias(candidate_id, direct_id))
+        else:
+            assignments.append(_assignment_null(candidate_id))
+    return KnownTruthScenarioV1(
+        scenario_id="fixture-pipeline-discovery-v1",
+        truth_role="direct_sparse",
+        information_groups=("alpha",),
+        expression_id=KNOWN_TRUTH_SCALAR_EXPRESSION_V1,
+        truth_assignments=tuple(assignments),
+    )
+
+
 def _signal_stream(
     stream_id: str,
     process: RandomTimeProcessSpecificationV1,
@@ -493,7 +527,12 @@ def _spec(
     if "near_alias" in roles:
         variants.append(_variant("variant-near", "near_alias", "base_signal", "alpha"))
     if "alias" in roles:
-        variants.append(_variant("variant-alias", "alias", "direct_candidate", CANDIDATES[0]))
+        alias_target = next(
+            assignment.alias_of_candidate_id
+            for assignment in scenario_value.truth_assignments
+            if assignment.role == "alias"
+        )
+        variants.append(_variant("variant-alias", "alias", "direct_candidate", alias_target))
     curves = (
         KnownTruthDgpEffectCurveV1(
             "fast", "exponential_cdf_v1", (-4.0 / math.log(0.20),),
@@ -948,6 +987,320 @@ def test_vertical_slice_rejects_missing_formal_grid_or_schema_identity():
         validate_known_truth_dgp_vertical_specification_v1(
             replace(specification, schema_version="other-v1"),
             _registry(),
+        )
+
+
+@pytest.fixture(scope="module")
+def _pipeline_discovery_case():
+    """A full registered 4h scan with one true group and registered nulls."""
+    periods = 1445  # through t=20h plus the 4h executable return at t+4m
+    injected = _injected(periods=periods)
+    injected["base-alpha"][:] = 0.0
+    for decision_number in range(6):
+        signal = float(decision_number + 1)
+        injected["base-alpha"][1 + 240 * decision_number] = (signal, -signal)
+    # One middle-of-holding price shock makes exactly one test rank-IC
+    # observation negative while leaving the adjacent four-hour windows
+    # unchanged.  This supplies finite variance to the existing formal HAC
+    # gate without changing any production threshold or statistic.
+    injected["price-main"][1 + 240 * 3 + 120] = (0.0, 0.3)
+    injected["null-main"][:] = 0.0
+    injected.pop("measurement-alpha")
+    scenario = _scenario_pipeline_discovery()
+    dgp = generate_known_truth_dgp_vertical_slice_v1(
+        _spec(scenario=scenario, periods=periods),
+        _registry(),
+        injected_standard_innovations=injected,
+    )
+    decision_times = tuple(
+        START + pd.Timedelta(hours=4 * index) for index in range(6)
+    )
+    horizon = "4h"
+    candidate_registry = []
+    formal_registry = factor_registry.base_panel_registry("1h").reset_index(drop=True)
+    by_feature = formal_registry.set_index("feature_name", drop=False)
+    for candidate_id in CANDIDATES:
+        feature_name, candidate_horizon = candidate_id.rsplit("::", 1)
+        if candidate_horizon != horizon:
+            continue
+        row = by_feature.loc[feature_name]
+        candidate_registry.append(
+            {
+                "candidate_id": candidate_id,
+                "feature_name": candidate_id,
+                "base_feature_name": feature_name,
+                "return_horizon": horizon,
+                "family": row["family"],
+                "signal_timeframe": row["signal_timeframe"],
+            }
+        )
+    scan_registry = pd.DataFrame(
+        candidate_registry,
+        columns=[
+            "candidate_id", "feature_name", "base_feature_name",
+            "return_horizon", "family", "signal_timeframe",
+        ],
+    )
+    selected_signals = dgp.signal_records.loc[
+        dgp.signal_records["decision_time"].isin(decision_times)
+        & dgp.signal_records["candidate_id"].isin(scan_registry["candidate_id"])
+    ].copy()
+    raw = KnownTruthL0L4RawInputV1(
+        market_records=dgp.market_records,
+        signal_records=selected_signals,
+        schema_version=dgp.schema_version,
+        generation_batch=dgp.generation_batch,
+        asset_symbols=dgp.asset_symbols,
+    )
+    fold = WalkForwardFold(
+        fold_idx=0,
+        train_start=START,
+        train_end=START,
+        test_start=START + pd.Timedelta(hours=4),
+        test_end=START + pd.Timedelta(hours=20),
+    )
+    horizon_deltas = {
+        "1m": pd.Timedelta(minutes=1),
+        "1h": pd.Timedelta(hours=1),
+        "4h": pd.Timedelta(hours=4),
+        "8h": pd.Timedelta(hours=8),
+        "12h": pd.Timedelta(hours=12),
+        "1d": pd.Timedelta(days=1),
+    }
+    truth_rows = []
+    for candidate_id in scan_registry["candidate_id"]:
+        if candidate_id == CANDIDATES[67]:
+            truth_rows.append(
+                {
+                    "candidate_id": candidate_id,
+                    "return_horizon": horizon,
+                    "truth_role": "direct",
+                    "information_group": "alpha",
+                    "marginal_predictive_truth": 1,
+                    "expected_direction": 1,
+                }
+            )
+        elif candidate_id == CANDIDATES[71]:
+            truth_rows.append(
+                {
+                    "candidate_id": candidate_id,
+                    "return_horizon": horizon,
+                    "truth_role": "alias",
+                    "information_group": "alpha",
+                    "marginal_predictive_truth": 1,
+                    "expected_direction": 1,
+                }
+            )
+        else:
+            truth_rows.append(
+                {
+                    "candidate_id": candidate_id,
+                    "return_horizon": horizon,
+                    "truth_role": "null",
+                    "information_group": "",
+                    "marginal_predictive_truth": 0,
+                    "expected_direction": 0,
+                }
+            )
+    return {
+        "dgp": dgp,
+        "raw": raw,
+        "scan_registry": scan_registry,
+        "folds": (fold,),
+        "horizon_deltas": horizon_deltas,
+        "truth_manifest": pd.DataFrame(truth_rows),
+        "run_kwargs": {
+            "folds": (fold,),
+            "walk_forward_spec": {
+                "train_days": 1,
+                "test_days": 1,
+                "embargo_days": 0,
+                "step_days": 1,
+            },
+            "horizon_deltas": horizon_deltas,
+            "frequency_periods_per_year": {"4h": 2190},
+            "supported_signal_timeframes": ("1h", "4h", "8h", "12h", "1d"),
+            "cost_multipliers": (1.0,),
+            "taker_fee_rate": 0.001,
+        },
+    }
+
+
+@pytest.fixture(scope="module")
+def _pipeline_discovery_result(_pipeline_discovery_case):
+    case = _pipeline_discovery_case
+    return run_known_truth_l0_l4_pipeline_discovery_micro_e2e_v1(
+        case["raw"],
+        scan_registry=case["scan_registry"],
+        **case["run_kwargs"],
+    )
+
+
+def test_pipeline_discovery_uses_complete_registry_and_terminal_truth_blind_boundary(
+    _pipeline_discovery_case,
+    _pipeline_discovery_result,
+):
+    case = _pipeline_discovery_case
+    result = _pipeline_discovery_result
+    direct_id, alias_id = CANDIDATES[67], CANDIDATES[71]
+
+    assert isinstance(result, KnownTruthL0L4PipelineDiscoveryArtifactsV1)
+    assert tuple(result.registered_candidate_ids) == tuple(case["scan_registry"]["candidate_id"])
+    assert len(result.l2_gate_summary) == 23
+    supported = set(
+        result.l2_gate_summary.loc[
+            result.l2_gate_summary["two_gate_support"], "feature_name"
+        ]
+    )
+    assert supported == {direct_id, alias_id}
+    assert len(result.l3_catalog) == 1
+    assert set(result.l3_catalog["component_features"]) == {
+        f"{direct_id} | {alias_id}"
+    }
+    discovery = result.pipeline_discovery.set_index("candidate_id")
+    assert discovery.loc[[direct_id, alias_id], "pipeline_discovery"].tolist() == [True, True]
+    assert discovery.loc[[direct_id, alias_id], "first_loss_layer"].tolist() == ["none", "none"]
+    null_ids = [candidate_id for candidate_id in case["scan_registry"]["candidate_id"]
+                if candidate_id not in {direct_id, alias_id}]
+    assert not discovery.loc[null_ids, "pipeline_discovery"].any()
+    assert set(discovery.loc[null_ids, "first_loss_layer"]) == {"l2"}
+
+    # L4 activation is derived from the formal holdings' signed_quantity, not
+    # from detail counts or orders.  The two accepted units share one actual
+    # formal combo and therefore both expose the same holdings evidence.
+    assert set(result.l4_activation["candidate_id"]) == {direct_id, alias_id}
+    assert result.l4_activation["l4_exposure"].tolist() == [True, True]
+    assert (result.l4_holdings["signed_quantity"].abs() > 0.0).any()
+    for frame_name in ("pipeline_discovery", "l4_activation"):
+        assert not any("truth" in str(column).lower() for column in getattr(result, frame_name).columns)
+
+    parameters = inspect.signature(run_known_truth_l0_l4_pipeline_discovery_micro_e2e_v1).parameters
+    assert "candidate_ids" not in parameters
+    assert "truth_manifest" not in parameters
+
+    truth_blind = bind_known_truth_l0_l4_truth_blind_evaluation_input_v1(
+        result,
+        persistence_reference="fixture://atomic/truth-blind-output-v1",
+    )
+    evaluated = evaluate_known_truth_pipeline_terminal_v1(
+        truth_blind,
+        case["truth_manifest"],
+    )
+    summary = evaluated.summary.iloc[0]
+    assert int(summary["total_units"]) == 23
+    assert int(summary["discovered_units"]) == 2
+    assert int(summary["tp"]) == 2
+    assert int(summary["fp"]) == 0
+    assert int(summary["fn"]) == 0
+    assert float(summary["tpr"]) == pytest.approx(1.0)
+    assert float(summary["fdp"]) == pytest.approx(0.0)
+    assert int(summary["false_activation"]) == 0
+    assert int(summary["end_to_end_recovery"]) == 2
+    assert int(summary["information_group_tp"]) == 1
+    assert int(summary["information_group_fp"]) == 0
+    candidate = evaluated.candidate_results.set_index("candidate_id")
+    assert candidate.loc[[direct_id, alias_id], "end_to_end_recovery"].tolist() == [True, True]
+    assert not candidate.loc[null_ids, "false_activation"].any()
+
+
+def test_pipeline_discovery_rejects_preselected_or_truth_contaminated_inputs(
+    _pipeline_discovery_case,
+):
+    case = _pipeline_discovery_case
+    with pytest.raises(ValueError, match="complete registered horizon"):
+        run_known_truth_l0_l4_pipeline_discovery_micro_e2e_v1(
+            case["raw"],
+            scan_registry=case["scan_registry"].head(2),
+            **case["run_kwargs"],
+        )
+
+    contaminated = case["raw"].signal_records.copy(deep=True)
+    contaminated["truth_role"] = "direct"
+    with pytest.raises(ValueError, match="do not match the DGP signal schema"):
+        run_known_truth_l0_l4_pipeline_discovery_micro_e2e_v1(
+            replace(case["raw"], signal_records=contaminated),
+            scan_registry=case["scan_registry"],
+            **case["run_kwargs"],
+        )
+
+
+def test_pipeline_discovery_requires_l3_acceptance_and_not_l4_alone(
+    _pipeline_discovery_case,
+    _pipeline_discovery_result,
+):
+    case = _pipeline_discovery_case
+    result = _pipeline_discovery_result
+    from qlab.full_pipeline_simulation import _known_truth_pipeline_build_discovery_frames_v1
+
+    # An L2 qualification without a catalog/spec acceptance is not a discovery.
+    l2_only, no_activation = _known_truth_pipeline_build_discovery_frames_v1(
+        gate_summary=result.l2_gate_summary,
+        catalog=pd.DataFrame(columns=result.l3_catalog.columns),
+        l3_weights=pd.DataFrame(columns=result.l3_weights.columns),
+        l4_orders=pd.DataFrame(),
+        l4_holdings=pd.DataFrame(),
+        candidate_registry=case["scan_registry"],
+        return_horizon="4h",
+    )
+    direct_id, alias_id = CANDIDATES[67], CANDIDATES[71]
+    assert l2_only.set_index("candidate_id").loc[
+        [direct_id, alias_id], "l2_two_gate_support"
+    ].tolist() == [True, True]
+    assert not l2_only["pipeline_discovery"].any()
+    assert set(l2_only.loc[
+        l2_only["l2_two_gate_support"], "first_loss_layer"
+    ]) == {"l3"}
+    assert no_activation.empty
+
+    # Holdings alone are execution evidence, not a discovery substitute.
+    l4_only, activation = _known_truth_pipeline_build_discovery_frames_v1(
+        gate_summary=result.l2_gate_summary.assign(two_gate_support=False),
+        catalog=result.l3_catalog,
+        l3_weights=result.l3_weights,
+        l4_orders=result.l4_orders,
+        l4_holdings=result.l4_holdings,
+        candidate_registry=case["scan_registry"],
+        return_horizon="4h",
+    )
+    assert not l4_only["pipeline_discovery"].any()
+    assert set(activation["candidate_id"]) == {direct_id, alias_id}
+    assert activation["l4_exposure"].all()
+
+
+def test_pipeline_discovery_truth_blind_identity_and_l4_holdings_fail_closed(
+    _pipeline_discovery_case,
+    _pipeline_discovery_result,
+):
+    case = _pipeline_discovery_case
+    result = _pipeline_discovery_result
+    with pytest.raises(ValueError, match="complete persistence"):
+        bind_known_truth_l0_l4_truth_blind_evaluation_input_v1(
+            result,
+            persistence_reference="fixture://incomplete",
+            persistence_status="partial",
+        )
+    truth_blind = bind_known_truth_l0_l4_truth_blind_evaluation_input_v1(
+        result,
+        persistence_reference="fixture://atomic/truth-blind-output-v1",
+    )
+    with pytest.raises(ValueError, match="output identity"):
+        evaluate_known_truth_pipeline_terminal_v1(
+            replace(truth_blind, output_identity="0" * 64),
+            case["truth_manifest"],
+        )
+
+    from qlab.full_pipeline_simulation import _known_truth_pipeline_build_discovery_frames_v1
+
+    missing_exposure = result.l4_holdings.drop(columns=["signed_quantity"])
+    with pytest.raises(ValueError, match="signed_quantity exposure evidence"):
+        _known_truth_pipeline_build_discovery_frames_v1(
+            gate_summary=result.l2_gate_summary,
+            catalog=result.l3_catalog,
+            l3_weights=result.l3_weights,
+            l4_orders=result.l4_orders,
+            l4_holdings=missing_exposure,
+            candidate_registry=case["scan_registry"],
+            return_horizon="4h",
         )
 
 
