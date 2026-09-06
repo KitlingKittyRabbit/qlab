@@ -1,7 +1,10 @@
 from dataclasses import replace
+import hashlib
 import inspect
+import json
 import math
 import pickle
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -77,10 +80,23 @@ from qlab.full_pipeline_simulation import (
     KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_SCHEMA_V1,
     KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_LIFECYCLE_V1,
     KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_AUTHORITY_V1,
+    KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_COMPLETION_MARKER_BYTES_V1,
+    KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_COMPLETION_MARKER_FILENAME_V1,
+    KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_OUTPUT_FILES_V1,
+    KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_FORMAL_ENTRY_V1,
+    KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_ARCHIVE_CONDITION_V1,
+    KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_AUTHORITY_V1,
+    KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_FILENAME_V1,
+    KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_LIFECYCLE_V1,
+    KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_MAY_BE_USED_FOR_V1,
+    KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_MUST_NOT_BE_USED_FOR_V1,
+    KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_SCHEMA_V1,
+    KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_SIDECAR_FILENAME_V1,
     KNOWN_TRUTH_L4_ACTIVATION_COLUMNS_V1,
     KNOWN_TRUTH_PIPELINE_DISCOVERY_COLUMNS_V1,
     bind_known_truth_l0_l4_truth_blind_evaluation_input_v1,
     evaluate_known_truth_pipeline_terminal_v1,
+    known_truth_l0_l4_truth_blind_persisted_output_identity_v1,
     run_known_truth_l0_l4_pipeline_discovery_micro_e2e_v1,
     run_known_truth_l0_l4_micro_e2e_v1,
     validate_known_truth_dgp_vertical_specification_v1,
@@ -93,6 +109,79 @@ CANDIDATES = KNOWN_TRUTH_REGISTRY_CANDIDATE_IDS_V1
 START = pd.Timestamp("2026-01-01T00:00:00Z")
 R_CORRELATED = ((1.0, 0.5), (0.5, 1.0))
 L_CORRELATED = ((1.0, 0.0), (0.5, math.sqrt(0.75)))
+
+
+def _write_truth_blind_persistence_bundle(tmp_path: Path, result):
+    output = (tmp_path / "truth-blind-output").resolve()
+    output.mkdir()
+    frames = {
+        "pipeline_discovery": result.pipeline_discovery,
+        "l4_activation": result.l4_activation,
+    }
+    output_hashes = {}
+    output_entries = {}
+    for name, filename in KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_OUTPUT_FILES_V1.items():
+        path = output / filename
+        frame = frames[name]
+        frame.to_csv(path, index=False, lineterminator="\n")
+        output_hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        expected_columns = (
+            KNOWN_TRUTH_PIPELINE_DISCOVERY_COLUMNS_V1
+            if name == "pipeline_discovery"
+            else KNOWN_TRUTH_L4_ACTIVATION_COLUMNS_V1
+        )
+        output_entries[name] = {
+            "path": str(path),
+            "schema": list(expected_columns),
+            "row_count": int(len(frame)),
+            "size_bytes": int(path.stat().st_size),
+            "sha256": output_hashes[name],
+        }
+    marker_path = output / KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_COMPLETION_MARKER_FILENAME_V1
+    marker_path.write_bytes(KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_COMPLETION_MARKER_BYTES_V1)
+    receipt_path = output / KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_FILENAME_V1
+    payload = {
+        "schema_version": KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_SCHEMA_V1,
+        "status": "complete",
+        "lifecycle": KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_LIFECYCLE_V1,
+        "authority": KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_AUTHORITY_V1,
+        "may_be_used_for": KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_MAY_BE_USED_FOR_V1,
+        "must_not_be_used_for": KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_MUST_NOT_BE_USED_FOR_V1,
+        "archive_condition": KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_ARCHIVE_CONDITION_V1,
+        "output_root": str(output),
+        "receipt_path": str(receipt_path),
+        "completion_marker": {
+            "path": str(marker_path),
+            "sha256": hashlib.sha256(marker_path.read_bytes()).hexdigest(),
+        },
+        "input_identity": {"fixture_input": "0" * 64},
+        "repository_identity": {"qlab_commit": "1" * 40, "research_commit": "2" * 40},
+        "execution": {
+            "argv": ["fixture-runner", "--micro"],
+            "cwd": str(tmp_path.resolve()),
+            "started_at_utc": "2026-09-07T00:00:00Z",
+            "finished_at_utc": "2026-09-07T00:00:01Z",
+            "exit_code": 0,
+            "exit_code_source": "fixture_runner_completed_before_process_return",
+            "invocation_count": 1,
+        },
+        "source": {
+            "formal_entry": KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_FORMAL_ENTRY_V1,
+            "call_count": 1,
+            "truth_access": "none",
+        },
+        "publication": {"complete": True, "mode": "atomic_directory_rename_v1"},
+        "outputs": output_entries,
+        "output_identity": known_truth_l0_l4_truth_blind_persisted_output_identity_v1(output_hashes),
+    }
+    receipt_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    receipt_sha256 = hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+    sidecar_path = output / KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_SIDECAR_FILENAME_V1
+    sidecar_path.write_text(f"{receipt_sha256}  {receipt_path.name}\n", encoding="utf-8")
+    return output, receipt_path, receipt_sha256
 
 
 BASE_PROCESS = RandomTimeProcessSpecificationV1(
@@ -1139,6 +1228,7 @@ def _pipeline_discovery_result(_pipeline_discovery_case):
 def test_pipeline_discovery_uses_complete_registry_and_terminal_truth_blind_boundary(
     _pipeline_discovery_case,
     _pipeline_discovery_result,
+    tmp_path,
 ):
     case = _pipeline_discovery_case
     result = _pipeline_discovery_result
@@ -1178,9 +1268,10 @@ def test_pipeline_discovery_uses_complete_registry_and_terminal_truth_blind_boun
     assert "candidate_ids" not in parameters
     assert "truth_manifest" not in parameters
 
+    _, receipt_path, receipt_sha256 = _write_truth_blind_persistence_bundle(tmp_path, result)
     truth_blind = bind_known_truth_l0_l4_truth_blind_evaluation_input_v1(
-        result,
-        persistence_reference="fixture://atomic/truth-blind-output-v1",
+        persistence_receipt=receipt_path,
+        expected_receipt_sha256=receipt_sha256,
     )
     evaluated = evaluate_known_truth_pipeline_terminal_v1(
         truth_blind,
@@ -1270,23 +1361,80 @@ def test_pipeline_discovery_requires_l3_acceptance_and_not_l4_alone(
 def test_pipeline_discovery_truth_blind_identity_and_l4_holdings_fail_closed(
     _pipeline_discovery_case,
     _pipeline_discovery_result,
+    tmp_path,
 ):
     case = _pipeline_discovery_case
     result = _pipeline_discovery_result
-    with pytest.raises(ValueError, match="complete persistence"):
+    with pytest.raises(ValueError, match="receipt"):
         bind_known_truth_l0_l4_truth_blind_evaluation_input_v1(
-            result,
-            persistence_reference="fixture://incomplete",
-            persistence_status="partial",
+            persistence_receipt=tmp_path / "missing-receipt.json",
+            expected_receipt_sha256="0" * 64,
         )
+    output, receipt_path, receipt_sha256 = _write_truth_blind_persistence_bundle(tmp_path, result)
     truth_blind = bind_known_truth_l0_l4_truth_blind_evaluation_input_v1(
-        result,
-        persistence_reference="fixture://atomic/truth-blind-output-v1",
+        persistence_receipt=receipt_path,
+        expected_receipt_sha256=receipt_sha256,
     )
+    original_receipt_bytes = receipt_path.read_bytes()
+    sidecar_path = output / KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_SIDECAR_FILENAME_V1
+    original_sidecar_bytes = sidecar_path.read_bytes()
+    for source_change, error_match in (
+        ({"formal_entry": "caller.fake.entry"}, "formal entry"),
+        ({"truth_access": "read_truth"}, "truth access"),
+    ):
+        forged_receipt = json.loads(original_receipt_bytes)
+        forged_receipt["source"].update(source_change)
+        receipt_path.write_text(
+            json.dumps(forged_receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        forged_sha = hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+        sidecar_path.write_text(f"{forged_sha}  {receipt_path.name}\n", encoding="utf-8")
+        with pytest.raises(ValueError, match=error_match):
+            bind_known_truth_l0_l4_truth_blind_evaluation_input_v1(
+                persistence_receipt=receipt_path,
+                expected_receipt_sha256=forged_sha,
+            )
+        receipt_path.write_bytes(original_receipt_bytes)
+        sidecar_path.write_bytes(original_sidecar_bytes)
     with pytest.raises(ValueError, match="output identity"):
         evaluate_known_truth_pipeline_terminal_v1(
             replace(truth_blind, output_identity="0" * 64),
             case["truth_manifest"],
+        )
+
+    (output / "partial.tmp").write_text("residual\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="partial or contains extra"):
+        bind_known_truth_l0_l4_truth_blind_evaluation_input_v1(
+            persistence_receipt=receipt_path,
+            expected_receipt_sha256=receipt_sha256,
+        )
+    (output / "partial.tmp").unlink()
+    output_hash = output / KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_OUTPUT_FILES_V1["pipeline_discovery"]
+    original_bytes = output_hash.read_bytes()
+    output_hash.write_bytes(original_bytes + b"tamper\n")
+    with pytest.raises(ValueError, match="SHA-256 changed"):
+        bind_known_truth_l0_l4_truth_blind_evaluation_input_v1(
+            persistence_receipt=receipt_path,
+            expected_receipt_sha256=receipt_sha256,
+        )
+    output_hash.write_bytes(original_bytes)
+    activation_path = output / KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_OUTPUT_FILES_V1["l4_activation"]
+    activation_bytes = activation_path.read_bytes()
+    output_hash.write_bytes(activation_bytes)
+    activation_path.write_bytes(original_bytes)
+    with pytest.raises(ValueError, match="SHA-256 changed|schema changed"):
+        bind_known_truth_l0_l4_truth_blind_evaluation_input_v1(
+            persistence_receipt=receipt_path,
+            expected_receipt_sha256=receipt_sha256,
+        )
+    output_hash.write_bytes(original_bytes)
+    activation_path.write_bytes(activation_bytes)
+    activation_path.unlink()
+    with pytest.raises(ValueError, match="path is not bound|not a regular file|partial"):
+        bind_known_truth_l0_l4_truth_blind_evaluation_input_v1(
+            persistence_receipt=receipt_path,
+            expected_receipt_sha256=receipt_sha256,
         )
 
     from qlab.full_pipeline_simulation import _known_truth_pipeline_build_discovery_frames_v1

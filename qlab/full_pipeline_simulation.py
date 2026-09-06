@@ -26,7 +26,8 @@ import struct
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal, InvalidOperation
 from numbers import Integral
-from typing import Mapping, Sequence
+from pathlib import Path
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -4384,6 +4385,43 @@ KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_MUST_NOT_BE_USED_FOR_V1 = (
 KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_ARCHIVE_CONDITION_V1 = (
     "superseded_by_approved_known_truth_terminal_evaluation_input_v1"
 )
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_SCHEMA_V1 = (
+    "ksv4-known-truth-l0-l4-truth-blind-persistence-receipt/v1"
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_LIFECYCLE_V1 = (
+    "candidate_known_truth_l0_l4_truth_blind_persistence_receipt_v1"
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_AUTHORITY_V1 = (
+    "issue_34_blueprint_section_8_atomic_truth_blind_persistence_v1"
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_FORMAL_ENTRY_V1 = (
+    "qlab.full_pipeline_simulation.run_known_truth_l0_l4_pipeline_discovery_micro_e2e_v1"
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_MAY_BE_USED_FOR_V1 = (
+    "bind_a_completed_truth_blind_l0_l4_output_for_terminal_evaluation_only_v1"
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_MUST_NOT_BE_USED_FOR_V1 = (
+    "no_partial_output_no_truth_before_completion_no_research_conclusion_no_trade_v1"
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_ARCHIVE_CONDITION_V1 = (
+    "superseded_by_approved_known_truth_l0_l4_truth_blind_persistence_receipt_v1"
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_OUTPUT_FILES_V1 = {
+    "pipeline_discovery": "pipeline_discovery.csv",
+    "l4_activation": "l4_activation.csv",
+}
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_FILENAME_V1 = (
+    "truth_blind_persistence_receipt.json"
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_SIDECAR_FILENAME_V1 = (
+    "truth_blind_persistence_receipt.json.sha256"
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_COMPLETION_MARKER_FILENAME_V1 = (
+    ".truth_blind_complete"
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_COMPLETION_MARKER_BYTES_V1 = (
+    b"ksv4-known-truth-l0-l4-truth-blind-complete/v1\n"
+)
 KNOWN_TRUTH_TERMINAL_EVALUATION_SCHEMA_V1 = (
     "ksv4-known-truth-l0-l4-terminal-evaluation/v1"
 )
@@ -4450,10 +4488,9 @@ class KnownTruthL0L4PipelineDiscoveryArtifactsV1:
 class KnownTruthL0L4TruthBlindEvaluationInputV1:
     """An atomically persisted, truth-free output bundle for evaluation.
 
-    The persistence receipt is supplied by the thin outer runner.  This qlab
-    object verifies its declared status and a deterministic identity of the
-    two truth-blind frames, but never reads the truth sidecar before the
-    caller explicitly supplies it to the terminal evaluator.
+    The persistence receipt is produced by the thin outer runner.  This qlab
+    object reopens and verifies the receipt, completion marker, fixed output
+    files, and byte hashes; it never reads the truth sidecar.
     """
 
     pipeline_discovery: pd.DataFrame
@@ -4461,7 +4498,8 @@ class KnownTruthL0L4TruthBlindEvaluationInputV1:
     schema_version: str
     lifecycle: str
     authority: str
-    persistence_reference: str
+    persistence_receipt_path: str
+    persistence_receipt_sha256: str
     persistence_status: str
     output_identity: str
 
@@ -6571,43 +6609,222 @@ def _known_truth_pipeline_output_identity_v1(
     )
 
 
-def bind_known_truth_l0_l4_truth_blind_evaluation_input_v1(
-    artifacts: KnownTruthL0L4PipelineDiscoveryArtifactsV1,
-    *,
-    persistence_reference: str,
-    persistence_status: str = "complete",
-) -> KnownTruthL0L4TruthBlindEvaluationInputV1:
-    """Bind an externally atomically persisted truth-blind output pair.
+def known_truth_l0_l4_truth_blind_persisted_output_identity_v1(
+    output_file_sha256: Mapping[str, str],
+) -> str:
+    """Hash the fixed persisted output-file identity, excluding the receipt."""
+    expected_names = tuple(KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_OUTPUT_FILES_V1)
+    if set(output_file_sha256) != set(expected_names):
+        raise ValueError("truth-blind persisted output identity has the wrong file set")
+    rows = []
+    for name in expected_names:
+        value = output_file_sha256[name]
+        if not isinstance(value, str) or len(value) != 64 or any(
+            character not in "0123456789abcdef" for character in value
+        ):
+            raise ValueError(f"invalid persisted output SHA-256 for {name}")
+        rows.append({"name": name, "sha256": value})
+    return _json_content_sha256({"outputs": rows})
 
-    The caller supplies the real persistence reference after the output files
-    are durably written.  This function only binds/validates the output bytes;
-    it does not write files or expose the truth sidecar.
-    """
-    if not isinstance(artifacts, KnownTruthL0L4PipelineDiscoveryArtifactsV1):
-        raise TypeError("artifacts must be the formal pipeline discovery result")
-    if not isinstance(persistence_reference, str) or not persistence_reference.strip():
-        raise ValueError("persistence_reference must identify an atomic output")
-    if persistence_status != "complete":
-        raise ValueError("truth-blind evaluation input requires complete persistence")
-    pipeline = artifacts.pipeline_discovery.copy(deep=True)
-    activation = artifacts.l4_activation.copy(deep=True)
-    if tuple(pipeline.columns) != KNOWN_TRUTH_PIPELINE_DISCOVERY_COLUMNS_V1:
-        raise ValueError("pipeline discovery output schema is not frozen")
-    if tuple(activation.columns) != KNOWN_TRUTH_L4_ACTIVATION_COLUMNS_V1:
-        raise ValueError("L4 activation output schema is not frozen")
-    if any(_known_truth_pipeline_truth_column_v1(column) for column in pipeline.columns):
-        raise ValueError("truth fields cannot enter the truth-blind discovery output")
-    if any(_known_truth_pipeline_truth_column_v1(column) for column in activation.columns):
-        raise ValueError("truth fields cannot enter the truth-blind activation output")
+
+def _known_truth_sha256_file_v1(path: Path, label: str) -> str:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"{label} is not a regular file")
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _known_truth_require_sha256_v1(value: object, label: str) -> str:
+    if not isinstance(value, str) or len(value) != 64 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
+        raise ValueError(f"{label} must be a lowercase SHA-256 digest")
+    return value
+
+
+def _known_truth_read_persistence_receipt_v1(
+    persistence_receipt: Path | str,
+    expected_receipt_sha256: str,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any], str]:
+    """Read and verify the actual atomically published truth-blind directory."""
+    receipt_path = Path(persistence_receipt)
+    if not receipt_path.is_absolute() or receipt_path.is_symlink() or not receipt_path.is_file():
+        raise ValueError("truth-blind persistence receipt must be an existing regular absolute path")
+    expected_receipt_sha256 = _known_truth_require_sha256_v1(
+        expected_receipt_sha256, "expected persistence receipt SHA-256"
+    )
+    actual_receipt_sha256 = _known_truth_sha256_file_v1(
+        receipt_path, "truth-blind persistence receipt"
+    )
+    if actual_receipt_sha256 != expected_receipt_sha256:
+        raise ValueError("truth-blind persistence receipt SHA-256 does not match")
+
+    sidecar_path = receipt_path.with_name(
+        KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_SIDECAR_FILENAME_V1
+    )
+    if sidecar_path.is_symlink() or not sidecar_path.is_file():
+        raise ValueError("truth-blind persistence receipt SHA sidecar is missing")
+    sidecar_tokens = sidecar_path.read_text(encoding="utf-8").strip().split()
+    if sidecar_tokens != [actual_receipt_sha256, receipt_path.name]:
+        raise ValueError("truth-blind persistence receipt SHA sidecar is invalid")
+
+    try:
+        payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("truth-blind persistence receipt is not valid JSON") from error
+    if not isinstance(payload, dict):
+        raise ValueError("truth-blind persistence receipt must be a JSON object")
+    if payload.get("schema_version") != KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_SCHEMA_V1:
+        raise ValueError("truth-blind persistence receipt schema is not approved")
+    if payload.get("status") != "complete":
+        raise ValueError("truth-blind persistence receipt is not complete")
+    if payload.get("lifecycle") != KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_LIFECYCLE_V1:
+        raise ValueError("truth-blind persistence receipt lifecycle is not approved")
+    if payload.get("authority") != KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_AUTHORITY_V1:
+        raise ValueError("truth-blind persistence receipt authority is not approved")
+    if payload.get("may_be_used_for") != KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_MAY_BE_USED_FOR_V1:
+        raise ValueError("truth-blind persistence receipt use boundary is not approved")
+    if payload.get("must_not_be_used_for") != KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_MUST_NOT_BE_USED_FOR_V1:
+        raise ValueError("truth-blind persistence receipt prohibition is not approved")
+    if payload.get("archive_condition") != KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_ARCHIVE_CONDITION_V1:
+        raise ValueError("truth-blind persistence receipt archive condition is not approved")
+    if payload.get("receipt_path") != str(receipt_path.resolve()):
+        raise ValueError("truth-blind persistence receipt path identity does not match")
+
+    output_root_value = payload.get("output_root")
+    if not isinstance(output_root_value, str) or not output_root_value:
+        raise ValueError("truth-blind persistence output root is missing")
+    output_root = Path(output_root_value)
+    if not output_root.is_absolute() or output_root.is_symlink() or not output_root.is_dir():
+        raise ValueError("truth-blind persistence output root is not a final regular directory")
+    output_root = output_root.resolve()
+    if receipt_path.resolve() != output_root / KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_FILENAME_V1:
+        raise ValueError("truth-blind persistence receipt is not inside its declared output root")
+    if sidecar_path.resolve() != output_root / KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_SIDECAR_FILENAME_V1:
+        raise ValueError("truth-blind persistence receipt sidecar is outside its declared output root")
+
+    expected_entries = {
+        *KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_OUTPUT_FILES_V1.values(),
+        KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_COMPLETION_MARKER_FILENAME_V1,
+        KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_FILENAME_V1,
+        KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_SIDECAR_FILENAME_V1,
+    }
+    actual_entries = {entry.name for entry in output_root.iterdir()}
+    if actual_entries != expected_entries:
+        raise ValueError("truth-blind persistence output directory is partial or contains extra files")
+
+    marker_path = output_root / KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_COMPLETION_MARKER_FILENAME_V1
+    if marker_path.is_symlink() or not marker_path.is_file():
+        raise ValueError("truth-blind persistence completion marker is missing")
+    if marker_path.read_bytes() != KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_COMPLETION_MARKER_BYTES_V1:
+        raise ValueError("truth-blind persistence completion marker is invalid")
+    marker_metadata = payload.get("completion_marker")
+    if not isinstance(marker_metadata, dict) or marker_metadata.get("path") != str(marker_path) or marker_metadata.get(
+        "sha256"
+    ) != _known_truth_sha256_file_v1(marker_path, "truth-blind completion marker"):
+        raise ValueError("truth-blind persistence completion marker identity does not match")
+
+    input_identity = payload.get("input_identity")
+    if not isinstance(input_identity, dict) or not input_identity:
+        raise ValueError("truth-blind persistence input identity is missing")
+    for key, value in input_identity.items():
+        _known_truth_require_sha256_v1(value, f"input identity {key}")
+    repository_identity = payload.get("repository_identity")
+    if not isinstance(repository_identity, dict) or not repository_identity or any(
+        not isinstance(key, str) or not key or not isinstance(value, str) or not value
+        for key, value in repository_identity.items()
+    ):
+        raise ValueError("truth-blind persistence repository identity is missing")
+    execution = payload.get("execution")
+    if not isinstance(execution, dict):
+        raise ValueError("truth-blind persistence execution identity is missing")
+    argv = execution.get("argv")
+    if not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item for item in argv):
+        raise ValueError("truth-blind persistence argv is missing")
+    if execution.get("exit_code") != 0 or isinstance(execution.get("exit_code"), bool):
+        raise ValueError("truth-blind persistence exit code is not successful")
+    if execution.get("invocation_count") != 1:
+        raise ValueError("truth-blind persistence invocation count is not exactly one")
+    if not isinstance(execution.get("exit_code_source"), str) or not execution["exit_code_source"].strip():
+        raise ValueError("truth-blind persistence exit code source is missing")
+    publication = payload.get("publication")
+    if publication != {"complete": True, "mode": "atomic_directory_rename_v1"}:
+        raise ValueError("truth-blind persistence publication is not atomic and complete")
+    source = payload.get("source")
+    if not isinstance(source, dict) or source.get("call_count") != 1:
+        raise ValueError("truth-blind persistence source call identity is missing")
+    if source.get("formal_entry") != KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_FORMAL_ENTRY_V1:
+        raise ValueError("truth-blind persistence formal entry is not the approved qlab entry")
+    if source.get("truth_access") != "none":
+        raise ValueError("truth-blind persistence truth access is not none")
+
+    outputs = payload.get("outputs")
+    expected_output_names = tuple(KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_OUTPUT_FILES_V1)
+    if not isinstance(outputs, dict) or set(outputs) != set(expected_output_names):
+        raise ValueError("truth-blind persistence output file set is not frozen")
+    frames: dict[str, pd.DataFrame] = {}
+    output_hashes: dict[str, str] = {}
+    for output_name in expected_output_names:
+        entry = outputs[output_name]
+        filename = KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_OUTPUT_FILES_V1[output_name]
+        if not isinstance(entry, dict):
+            raise ValueError(f"truth-blind persistence metadata missing for {output_name}")
+        path_value = entry.get("path")
+        path = output_root / filename
+        if path_value != str(path) or path.is_symlink() or not path.is_file():
+            raise ValueError(f"truth-blind persistence path is not bound for {output_name}")
+        expected_columns = (
+            KNOWN_TRUTH_PIPELINE_DISCOVERY_COLUMNS_V1
+            if output_name == "pipeline_discovery"
+            else KNOWN_TRUTH_L4_ACTIVATION_COLUMNS_V1
+        )
+        if entry.get("schema") != list(expected_columns):
+            raise ValueError(f"truth-blind persistence schema is not frozen for {output_name}")
+        actual_sha = _known_truth_sha256_file_v1(path, f"truth-blind output {output_name}")
+        expected_sha = _known_truth_require_sha256_v1(entry.get("sha256"), f"output {output_name}")
+        if actual_sha != expected_sha:
+            raise ValueError(f"truth-blind output SHA-256 changed for {output_name}")
+        if entry.get("size_bytes") != path.stat().st_size or isinstance(entry.get("size_bytes"), bool):
+            raise ValueError(f"truth-blind output byte size changed for {output_name}")
+        try:
+            frame = pd.read_csv(path)
+        except (OSError, ValueError, pd.errors.ParserError) as error:
+            raise ValueError(f"truth-blind output cannot be read for {output_name}") from error
+        if tuple(frame.columns) != expected_columns:
+            raise ValueError(f"truth-blind output schema changed for {output_name}")
+        if len(frame) != entry.get("row_count") or isinstance(entry.get("row_count"), bool):
+            raise ValueError(f"truth-blind output row count changed for {output_name}")
+        if any(_known_truth_pipeline_truth_column_v1(column) for column in frame.columns):
+            raise ValueError("truth fields cannot enter the truth-blind persisted output")
+        frames[output_name] = frame
+        output_hashes[output_name] = actual_sha
+    if payload.get("output_identity") != known_truth_l0_l4_truth_blind_persisted_output_identity_v1(output_hashes):
+        raise ValueError("truth-blind persisted output identity does not match its bytes")
+    return frames["pipeline_discovery"], frames["l4_activation"], payload, actual_receipt_sha256
+
+
+def bind_known_truth_l0_l4_truth_blind_evaluation_input_v1(
+    *,
+    persistence_receipt: Path | str,
+    expected_receipt_sha256: str,
+) -> KnownTruthL0L4TruthBlindEvaluationInputV1:
+    """Bind only a real, complete, atomically published truth-blind bundle."""
+    pipeline, activation, receipt, receipt_sha256 = _known_truth_read_persistence_receipt_v1(
+        persistence_receipt, expected_receipt_sha256
+    )
     return KnownTruthL0L4TruthBlindEvaluationInputV1(
         pipeline_discovery=pipeline,
         l4_activation=activation,
         schema_version=KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_SCHEMA_V1,
         lifecycle=KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_LIFECYCLE_V1,
         authority=KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_AUTHORITY_V1,
-        persistence_reference=persistence_reference,
-        persistence_status=persistence_status,
-        output_identity=_known_truth_pipeline_output_identity_v1(pipeline, activation),
+        persistence_receipt_path=str(Path(persistence_receipt).resolve()),
+        persistence_receipt_sha256=receipt_sha256,
+        persistence_status=str(receipt["status"]),
+        output_identity=str(receipt["output_identity"]),
     )
 
 
@@ -6624,16 +6841,16 @@ def evaluate_known_truth_pipeline_terminal_v1(
         raise ValueError("truth-blind input lifecycle is not approved")
     if truth_blind_input.authority != KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_AUTHORITY_V1:
         raise ValueError("truth-blind input authority is not approved")
-    if truth_blind_input.persistence_status != "complete" or not truth_blind_input.persistence_reference.strip():
-        raise ValueError("terminal evaluation requires complete persisted truth-blind output")
-    expected_identity = _known_truth_pipeline_output_identity_v1(
-        truth_blind_input.pipeline_discovery,
-        truth_blind_input.l4_activation,
+    pipeline, activation, receipt, receipt_sha256 = _known_truth_read_persistence_receipt_v1(
+        truth_blind_input.persistence_receipt_path,
+        truth_blind_input.persistence_receipt_sha256,
     )
-    if truth_blind_input.output_identity != expected_identity:
-        raise ValueError("truth-blind output identity does not match its bytes")
-    pipeline = truth_blind_input.pipeline_discovery.copy(deep=True)
-    activation = truth_blind_input.l4_activation.copy(deep=True)
+    if truth_blind_input.persistence_status != receipt.get("status"):
+        raise ValueError("truth-blind input persistence status does not match its receipt")
+    if truth_blind_input.output_identity != receipt.get("output_identity"):
+        raise ValueError("truth-blind input output identity does not match its receipt")
+    if truth_blind_input.persistence_receipt_sha256 != receipt_sha256:
+        raise ValueError("truth-blind input receipt identity does not match its bytes")
     if tuple(pipeline.columns) != KNOWN_TRUTH_PIPELINE_DISCOVERY_COLUMNS_V1:
         raise ValueError("pipeline discovery output schema is not frozen")
     if tuple(activation.columns) != KNOWN_TRUTH_L4_ACTIVATION_COLUMNS_V1:
@@ -6927,6 +7144,18 @@ __all__ = [
     "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_MAY_BE_USED_FOR_V1",
     "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_MUST_NOT_BE_USED_FOR_V1",
     "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_SCHEMA_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_COMPLETION_MARKER_BYTES_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_COMPLETION_MARKER_FILENAME_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_OUTPUT_FILES_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_FORMAL_ENTRY_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_ARCHIVE_CONDITION_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_AUTHORITY_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_FILENAME_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_LIFECYCLE_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_MAY_BE_USED_FOR_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_MUST_NOT_BE_USED_FOR_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_SCHEMA_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_SIDECAR_FILENAME_V1",
     "KNOWN_TRUTH_L4_ACTIVATION_COLUMNS_V1",
     "KNOWN_TRUTH_PIPELINE_DISCOVERY_COLUMNS_V1",
     "KNOWN_TRUTH_TERMINAL_EVALUATION_ARCHIVE_CONDITION_V1",
@@ -6948,6 +7177,7 @@ __all__ = [
     "run_known_truth_l0_l4_micro_e2e_v1",
     "run_known_truth_l0_l4_pipeline_discovery_micro_e2e_v1",
     "bind_known_truth_l0_l4_truth_blind_evaluation_input_v1",
+    "known_truth_l0_l4_truth_blind_persisted_output_identity_v1",
     "evaluate_known_truth_pipeline_terminal_v1",
     "validate_market_input_spine_specification_v1",
     "validate_random_stream_specification_v1",
