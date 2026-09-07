@@ -4666,7 +4666,8 @@ KNOWN_TRUTH_L0_L4_LINEAGE_SCHEMA_COLUMNS_V1 = {
         "holding_interval", "exit_rule", "score_order", "fold_idx", "decision_ts",
         "symbol", "leg", "target_weight", "signed_quantity", "entry_price", "exit_price",
         "executable_return", "actual_notional", "pnl_usd", "bucket", "signal_value",
-        "forward_return", "weight", "contribution",
+        "forward_return", "weight", "contribution", "execution_price",
+        "next_execution_price",
     ),
 }
 
@@ -4696,6 +4697,103 @@ def known_truth_l0_l4_lineage_schema_authority_v1(
             "schema": schema,
         }
     return result
+
+
+def validate_known_truth_l0_l4_lineage_artifacts_v1(
+    artifacts: KnownTruthL0L4PipelineDiscoveryArtifactsV1,
+) -> dict[str, object]:
+    """Describe and validate all formal truth-blind L0--L4 artifact frames.
+
+    The qlab artifact object is the only schema input.  This function walks
+    the complete 18-frame authority in stable order and reports every missing
+    frame, missing/extra column, and order mismatch in one result.  Row
+    counts remain a task-manifest contract and are deliberately reported but
+    not decided here.
+    """
+    if not isinstance(artifacts, KnownTruthL0L4PipelineDiscoveryArtifactsV1):
+        raise TypeError(
+            "artifacts must be KnownTruthL0L4PipelineDiscoveryArtifactsV1"
+        )
+    candidate_ids = tuple(str(value) for value in artifacts.registered_candidate_ids)
+    try:
+        authority = known_truth_l0_l4_lineage_schema_authority_v1(candidate_ids)
+    except (TypeError, ValueError, AssertionError) as error:
+        return {
+            "authority": KNOWN_TRUTH_L0_L4_LINEAGE_SCHEMA_AUTHORITY_V1,
+            "valid": False,
+            "frame_order": list(KNOWN_TRUTH_L0_L4_LINEAGE_FRAME_ATTRIBUTES_V1),
+            "frames": {},
+            "mismatches": [{
+                "attribute": "<artifact_identity>",
+                "kind": "authority_unavailable",
+                "message": str(error),
+            }],
+        }
+
+    frames: dict[str, dict[str, object]] = {}
+    mismatches: list[dict[str, object]] = []
+    for attribute in KNOWN_TRUTH_L0_L4_LINEAGE_FRAME_ATTRIBUTES_V1:
+        expected = list(authority[attribute]["schema"])
+        frame = getattr(artifacts, attribute, None)
+        if not isinstance(frame, pd.DataFrame):
+            frames[attribute] = {
+                "status": "missing",
+                "schema_id": authority[attribute]["schema_id"],
+                "expected_schema": expected,
+                "actual_schema": [],
+                "missing_columns": expected,
+                "extra_columns": [],
+                "order_matches": False,
+                "row_count": None,
+            }
+            mismatches.append({
+                "attribute": attribute,
+                "kind": "missing_frame",
+                "expected_schema": expected,
+            })
+            continue
+
+        actual = [str(column) for column in frame.columns]
+        missing = [column for column in expected if column not in actual]
+        extra = [column for column in actual if column not in expected]
+        order_matches = actual == expected
+        frames[attribute] = {
+            "status": "valid" if not missing and not extra and order_matches else "invalid",
+            "schema_id": authority[attribute]["schema_id"],
+            "expected_schema": expected,
+            "actual_schema": actual,
+            "missing_columns": missing,
+            "extra_columns": extra,
+            "order_matches": order_matches,
+            "row_count": int(len(frame)),
+        }
+        if missing:
+            mismatches.append({
+                "attribute": attribute,
+                "kind": "missing_columns",
+                "columns": missing,
+            })
+        if extra:
+            mismatches.append({
+                "attribute": attribute,
+                "kind": "extra_columns",
+                "columns": extra,
+            })
+        if not order_matches:
+            mismatches.append({
+                "attribute": attribute,
+                "kind": "column_order",
+                "expected_schema": expected,
+                "actual_schema": actual,
+            })
+
+    return {
+        "authority": KNOWN_TRUTH_L0_L4_LINEAGE_SCHEMA_AUTHORITY_V1,
+        "valid": not mismatches,
+        "frame_order": list(KNOWN_TRUTH_L0_L4_LINEAGE_FRAME_ATTRIBUTES_V1),
+        "frames": frames,
+        "mismatches": mismatches,
+    }
 
 
 @dataclass(frozen=True)
@@ -7394,6 +7492,7 @@ __all__ = [
     "run_known_truth_l0_l4_micro_e2e_v1",
     "run_known_truth_l0_l4_pipeline_discovery_micro_e2e_v1",
     "known_truth_l0_l4_lineage_schema_authority_v1",
+    "validate_known_truth_l0_l4_lineage_artifacts_v1",
     "bind_known_truth_l0_l4_truth_blind_evaluation_input_v1",
     "known_truth_l0_l4_truth_blind_persisted_output_identity_v1",
     "evaluate_known_truth_pipeline_terminal_v1",
