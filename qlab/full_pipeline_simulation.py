@@ -4521,6 +4521,33 @@ _KNOWN_TRUTH_L0_L4_LEGAL_ZERO_ROW_FRAME_ATTRIBUTES_V1 = (
     "l4_holdings",
 )
 
+KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICY_EXACT_V1 = (
+    "exact_preregistered_v1"
+)
+KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICY_RESULT_DEPENDENT_V1 = (
+    "result_dependent_actual_v1"
+)
+KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICIES_V1 = {
+    "l0_market_records": KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICY_EXACT_V1,
+    "l0_signal_records": KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICY_EXACT_V1,
+    "l1_panel": KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICY_EXACT_V1,
+    "l2_gate_summary": KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICY_EXACT_V1,
+    "l2_directions": KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICY_EXACT_V1,
+    "l2_rank_ic": KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICY_RESULT_DEPENDENT_V1,
+    "l3_catalog": KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICY_RESULT_DEPENDENT_V1,
+    "l3_summary": KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICY_RESULT_DEPENDENT_V1,
+    "l3_composite": KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICY_RESULT_DEPENDENT_V1,
+    "l3_targets": KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICY_RESULT_DEPENDENT_V1,
+    "l3_ic": KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICY_RESULT_DEPENDENT_V1,
+    "l3_bucket": KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICY_RESULT_DEPENDENT_V1,
+    "l3_weights": KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICY_RESULT_DEPENDENT_V1,
+    "l3_diagnostics": KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICY_RESULT_DEPENDENT_V1,
+    "l4_summary": KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICY_RESULT_DEPENDENT_V1,
+    "l4_detail": KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICY_RESULT_DEPENDENT_V1,
+    "l4_orders": KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICY_RESULT_DEPENDENT_V1,
+    "l4_holdings": KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICY_RESULT_DEPENDENT_V1,
+}
+
 # The formal qlab entry owns this schema.  The research layer binds to this
 # mapping and must not carry a second, hand-ordered column list.
 KNOWN_TRUTH_L0_L4_LINEAGE_SCHEMA_COLUMNS_V1 = {
@@ -4708,20 +4735,24 @@ def known_truth_l0_l4_lineage_schema_authority_v1(
         result[attribute] = {
             "schema_id": f"ksv4-known-truth-development-lineage-{attribute}/v1",
             "schema": schema,
+            "row_count_policy": KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICIES_V1[attribute],
         }
     return result
 
 
 def validate_known_truth_l0_l4_lineage_artifacts_v1(
     artifacts: KnownTruthL0L4PipelineDiscoveryArtifactsV1,
+    *,
+    row_count_contract: Mapping[str, Mapping[str, object]] | None = None,
 ) -> dict[str, object]:
     """Describe and validate all formal truth-blind L0--L4 artifact frames.
 
     The qlab artifact object is the only schema input.  This function walks
     the complete 18-frame authority in stable order and reports every missing
-    frame, missing/extra column, and order mismatch in one result.  Row
-    counts remain a task-manifest contract and are deliberately reported but
-    not decided here.
+    frame, missing/extra column, order mismatch, and (when supplied) row-count
+    contract mismatch in one result.  Exact structural frames require a
+    non-negative pre-registered count; result-dependent frames require a
+    pre-run null count and report the actual count for atomic persistence.
     """
     if not isinstance(artifacts, KnownTruthL0L4PipelineDiscoveryArtifactsV1):
         raise TypeError(
@@ -4745,13 +4776,32 @@ def validate_known_truth_l0_l4_lineage_artifacts_v1(
 
     frames: dict[str, dict[str, object]] = {}
     mismatches: list[dict[str, object]] = []
+    expected_frame_names = set(KNOWN_TRUTH_L0_L4_LINEAGE_FRAME_ATTRIBUTES_V1)
+    if row_count_contract is not None:
+        if not isinstance(row_count_contract, Mapping):
+            mismatches.append({
+                "attribute": "<row_count_contract>",
+                "kind": "row_count_contract_type",
+                "message": "row_count_contract must be a mapping",
+            })
+        else:
+            actual_frame_names = set(row_count_contract)
+            if actual_frame_names != expected_frame_names:
+                mismatches.append({
+                    "attribute": "<row_count_contract>",
+                    "kind": "row_count_contract_frames",
+                    "missing": sorted(expected_frame_names - actual_frame_names),
+                    "extra": sorted(actual_frame_names - expected_frame_names),
+                })
     for attribute in KNOWN_TRUTH_L0_L4_LINEAGE_FRAME_ATTRIBUTES_V1:
         expected = list(authority[attribute]["schema"])
+        row_count_policy = str(authority[attribute]["row_count_policy"])
         frame = getattr(artifacts, attribute, None)
         if not isinstance(frame, pd.DataFrame):
             frames[attribute] = {
                 "status": "missing",
                 "schema_id": authority[attribute]["schema_id"],
+                "row_count_policy": row_count_policy,
                 "expected_schema": expected,
                 "actual_schema": [],
                 "missing_columns": expected,
@@ -4773,6 +4823,7 @@ def validate_known_truth_l0_l4_lineage_artifacts_v1(
         frames[attribute] = {
             "status": "valid" if not missing and not extra and order_matches else "invalid",
             "schema_id": authority[attribute]["schema_id"],
+            "row_count_policy": row_count_policy,
             "expected_schema": expected,
             "actual_schema": actual,
             "missing_columns": missing,
@@ -4799,6 +4850,53 @@ def validate_known_truth_l0_l4_lineage_artifacts_v1(
                 "expected_schema": expected,
                 "actual_schema": actual,
             })
+        if row_count_contract is not None and isinstance(row_count_contract, Mapping):
+            descriptor = row_count_contract.get(attribute)
+            if not isinstance(descriptor, Mapping):
+                mismatches.append({
+                    "attribute": attribute,
+                    "kind": "row_count_contract",
+                    "message": "row-count contract descriptor is missing",
+                })
+                continue
+            expected_policy = descriptor.get("row_count_policy")
+            if expected_policy != row_count_policy:
+                mismatches.append({
+                    "attribute": attribute,
+                    "kind": "row_count_policy",
+                    "expected": row_count_policy,
+                    "actual": expected_policy,
+                })
+                continue
+            expected_count = descriptor.get("row_count")
+            if row_count_policy == KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICY_EXACT_V1:
+                if not isinstance(expected_count, int) or isinstance(expected_count, bool) or expected_count < 0:
+                    mismatches.append({
+                        "attribute": attribute,
+                        "kind": "row_count_contract",
+                        "message": "exact row-count policy requires a non-negative integer",
+                    })
+                elif int(len(frame)) != int(expected_count):
+                    mismatches.append({
+                        "attribute": attribute,
+                        "kind": "row_count",
+                        "expected": int(expected_count),
+                        "actual": int(len(frame)),
+                    })
+            elif row_count_policy == KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICY_RESULT_DEPENDENT_V1:
+                if expected_count is not None:
+                    mismatches.append({
+                        "attribute": attribute,
+                        "kind": "result_dependent_expected_row_count",
+                        "expected": None,
+                        "actual": expected_count,
+                    })
+            else:
+                mismatches.append({
+                    "attribute": attribute,
+                    "kind": "row_count_policy",
+                    "message": "unknown qlab row-count policy",
+                })
 
     return {
         "authority": KNOWN_TRUTH_L0_L4_LINEAGE_SCHEMA_AUTHORITY_V1,
@@ -7537,6 +7635,9 @@ __all__ = [
     "KNOWN_TRUTH_L0_L4_MICRO_MUST_NOT_BE_USED_FOR_V1",
     "KNOWN_TRUTH_L0_L4_MICRO_SCHEMA_V1",
     "KNOWN_TRUTH_L0_L4_LINEAGE_FRAME_ATTRIBUTES_V1",
+    "KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICIES_V1",
+    "KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICY_EXACT_V1",
+    "KNOWN_TRUTH_L0_L4_LINEAGE_ROW_COUNT_POLICY_RESULT_DEPENDENT_V1",
     "KNOWN_TRUTH_L0_L4_LINEAGE_SCHEMA_AUTHORITY_V1",
     "KNOWN_TRUTH_L0_L4_LINEAGE_SCHEMA_COLUMNS_V1",
     "KNOWN_TRUTH_L0_L4_PIPELINE_DISCOVERY_ARCHIVE_CONDITION_V1",
