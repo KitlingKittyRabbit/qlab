@@ -4484,6 +4484,220 @@ class KnownTruthL0L4PipelineDiscoveryArtifactsV1:
     return_horizon: str
 
 
+KNOWN_TRUTH_L0_L4_LINEAGE_SCHEMA_AUTHORITY_V1 = (
+    "ksv4-known-truth-l0-l4-formal-artifact-schema-authority/v1"
+)
+KNOWN_TRUTH_L0_L4_LINEAGE_FRAME_ATTRIBUTES_V1 = (
+    "l0_market_records",
+    "l0_signal_records",
+    "l1_panel",
+    "l2_gate_summary",
+    "l2_rank_ic",
+    "l2_directions",
+    "l3_catalog",
+    "l3_summary",
+    "l3_composite",
+    "l3_targets",
+    "l3_ic",
+    "l3_bucket",
+    "l3_weights",
+    "l3_diagnostics",
+    "l4_summary",
+    "l4_detail",
+    "l4_orders",
+    "l4_holdings",
+)
+
+# The formal qlab entry owns this schema.  The research layer binds to this
+# mapping and must not carry a second, hand-ordered column list.
+KNOWN_TRUTH_L0_L4_LINEAGE_SCHEMA_COLUMNS_V1 = {
+    "l0_market_records": (
+        "symbol", "open_time", "open", "high", "low", "close", "volume",
+        "close_time", "source", "generation_batch", "value_status", "content_identity",
+    ),
+    "l0_signal_records": (
+        "candidate_id", "symbol", "decision_time", "assumed_execution_gate",
+        "actual_observed_availability", "signal_value", "source", "generation_batch",
+        "value_status", "content_identity",
+    ),
+    "l1_panel": (
+        "symbol", "__candidate_columns__", "canonical_period_end_ts",
+        "assumed_execution_gate", "actual_observed_availability", "control_zero",
+        "signal_timeframes", "native_bar_end_ts", "signal_bar_end_ts",
+        "availability_ts", "data_observed_ts", "order_submit_ts", "execution_ts",
+        "execution_open_time", "next_execution_ts", "return_horizon",
+        "decision_interval", "holding_interval", "strategy_return_interval",
+        "exit_rule", "execution_price_field", "data_observed_rule", "score_order",
+        "entry_price", "exit_price", "exit_ts", "execution_price",
+        "next_execution_price", "executable_return", "forward_return",
+    ),
+    "l2_gate_summary": (
+        "feature_name", "return_horizon", "panel_frequency", "evaluation_frequency",
+        "source_timeframe", "train_days", "test_days", "embargo_days", "step_days",
+        "n_folds", "direction_ok_fold_count", "direction_skipped_fold_count", "ic_mean",
+        "icir", "ic_hac_t_stat", "ic_hac_lags", "ic_positive_share",
+        "ic_observation_count", "ic_scored_decision_count",
+        "bucket_spread_mean_return", "bucket_spread_sharpe",
+        "bucket_spread_positive_share", "bucket_monotonic_increasing",
+        "bucket_monotonic_pair_pass_share", "bucket_scored_decision_count",
+        "stage1_ic_support", "stage2_bucket_support", "two_gate_support",
+    ),
+    "l2_rank_ic": (
+        "decision_ts", "cross_section_size", "status", "raw_rank_ic", "feature_name",
+        "return_horizon", "evaluation_frequency", "fold_idx", "train_mean_ic", "direction",
+    ),
+    "l2_directions": (
+        "feature_name", "return_horizon", "evaluation_frequency", "fold_idx",
+        "train_start", "train_end", "test_start", "test_end", "train_mean_ic",
+        "direction", "train_ic_observation_count", "status",
+    ),
+    "l3_catalog": (
+        "combo_id", "track", "selection_label", "base_panel_frequency", "panel_frequency",
+        "return_horizon", "component_features", "n_components", "weight_scheme",
+    ),
+    "l3_summary": (
+        "combo_id", "track", "weight_scheme", "panel_frequency", "return_horizon",
+        "component_features", "n_components", "train_days", "test_days", "embargo_days",
+        "step_days", "n_folds", "scored_decision_count", "combo_ic_mean", "combo_icir",
+        "combo_ic_hac_t_stat", "combo_ic_hac_lags", "combo_ic_positive_share",
+        "combo_ic_observation_count", "combo_bucket_spread_mean_return",
+        "combo_bucket_spread_sharpe", "combo_bucket_spread_positive_share",
+        "combo_bucket_monotonic_pair_pass_share", "combo_bucket_scored_decision_count",
+        "combo_stage1_ic_support_raw", "combo_stage2_bucket_support",
+        "combo_two_gate_support_raw", "combo_ic_one_sided_p_value",
+    ),
+    "l3_composite": (
+        "combo_id", "track", "weight_scheme", "panel_frequency", "return_horizon",
+        "component_features", "fold_idx", "train_start", "train_end", "test_start",
+        "test_end", "decision_ts", "symbol", "combo_signal", "forward_return",
+        "control_zero",
+    ),
+    "l3_targets": (
+        "combo_id", "track", "weight_scheme", "panel_frequency", "return_horizon",
+        "component_features", "fold_idx", "decision_ts", "symbol", "signal_value",
+        "bucket", "leg", "target_weight",
+    ),
+    "l3_ic": (
+        "combo_id", "track", "weight_scheme", "panel_frequency", "return_horizon",
+        "component_features", "fold_idx", "decision_ts", "rank_ic", "raw_rank_ic",
+        "train_mean_ic", "cross_section_size",
+    ),
+    "l3_bucket": (
+        "decision_ts", "bucket", "bucket_return", "bucket_size", "combo_id", "track",
+        "weight_scheme", "panel_frequency", "return_horizon", "component_features",
+        "fold_idx",
+    ),
+    "l3_weights": (
+        "combo_id", "track", "weight_scheme", "panel_frequency", "return_horizon",
+        "component_features", "fold_idx", "train_start", "train_end", "test_start",
+        "test_end", "feature_name", "direction", "train_mean_ic", "train_icir",
+        "train_hac_t_stat", "train_ic_observation_count", "weight_score", "feature_weight",
+        "effective_factor_count", "active_factor_count", "max_feature_weight",
+        "family_weight_share_max", "effective_family_count", "max_family_weight",
+        "family_count", "near_single_or_few_factor", "correlation_pair_count",
+        "correlation_min_pair_observation_count", "correlation_min_pair_observed_count",
+        "status",
+    ),
+    "l3_diagnostics": (
+        "decision_ts", "cross_section_size", "status", "raw_rank_ic", "diagnostic_type",
+        "combo_id", "track", "weight_scheme", "panel_frequency", "return_horizon",
+        "component_features", "fold_idx",
+    ),
+    "l4_summary": (
+        "combo_id", "track", "weight_scheme", "panel_frequency", "return_horizon",
+        "component_features", "n_components", "train_days", "test_days", "embargo_days", "step_days",
+        "n_folds", "test_decision_count", "scored_decision_count",
+        "skipped_decision_count", "skipped_decision_share",
+        "skipped_small_cross_section_count", "skipped_constant_feature_count",
+        "mean_cross_section_size", "mean_long_count", "mean_short_count",
+        "mean_name_turnover_share", "mean_charged_turnover", "annualized_charged_turnover",
+        "oos_mean_return", "gross_annualized_return", "gross_annualized_volatility",
+        "gross_sharpe", "gross_max_drawdown", "gross_fold_positive_share",
+        "gross_top_fold_contribution", "fold_positive_share", "top_fold_contribution",
+        "cost_1x_mean_bps", "net_1x_annualized_return", "net_1x_sharpe",
+        "net_1x_max_drawdown", "net_1x_fold_positive_share",
+        "net_1x_top_fold_contribution", "mean_effective_factor_count",
+        "min_effective_factor_count", "max_effective_factor_count",
+        "mean_active_factor_count", "min_active_factor_count", "max_active_factor_count",
+        "mean_max_feature_weight", "min_max_feature_weight", "max_max_feature_weight",
+        "mean_family_weight_share_max", "min_family_weight_share_max",
+        "max_family_weight_share_max", "mean_effective_family_count",
+        "min_effective_family_count", "max_effective_family_count",
+        "mean_max_family_weight", "min_max_family_weight", "max_max_family_weight",
+        "near_single_or_few_factor_fold_count", "near_single_or_few_factor_fold_share",
+        "family_count", "correlation_pair_count", "correlation_min_pair_observation_count",
+    ),
+    "l4_detail": (
+        "combo_id", "track", "weight_scheme", "panel_frequency", "return_horizon",
+        "component_features", "signal_timeframes", "native_bar_end_ts",
+        "signal_bar_end_ts", "availability_ts", "data_observed_ts", "decision_interval",
+        "order_submit_ts", "execution_ts", "execution_open_time", "next_execution_ts",
+        "holding_interval", "exit_rule", "score_order", "fold_idx", "decision_ts",
+        "long_count", "short_count", "actual_gross_notional", "actual_net_notional",
+        "actual_vs_target_gross_ratio", "actual_abs_net_exposure_share",
+        "executed_order_notional", "terminal_close_notional", "charged_order_notional",
+        "rebalance_turnover", "terminal_close_turnover", "charged_turnover",
+        "gross_pnl_usd", "gross_return", "cost_1x_usd", "cost_1x", "net_pnl_1x_usd",
+        "net_return_1x", "n_components", "train_start", "train_end", "test_start",
+        "test_end", "cross_section_size", "benchmark_return", "long_leg_return",
+        "short_leg_return", "spread_return", "strategy_long_leg_return",
+        "strategy_short_leg_return", "strategy_spread_return", "long_name_turnover_share",
+        "short_name_turnover_share", "name_turnover_share", "effective_factor_count",
+        "active_factor_count", "max_feature_weight", "family_weight_share_max",
+        "effective_family_count", "max_family_weight", "family_count",
+        "near_single_or_few_factor", "correlation_pair_count",
+        "correlation_min_pair_observation_count", "correlation_min_pair_observed_count",
+        "active_return", "net_active_return_1x",
+    ),
+    "l4_orders": (
+        "combo_id", "track", "weight_scheme", "panel_frequency", "return_horizon",
+        "component_features", "signal_timeframes", "native_bar_end_ts",
+        "signal_bar_end_ts", "availability_ts", "data_observed_ts", "decision_interval",
+        "order_submit_ts", "execution_ts", "execution_open_time", "next_execution_ts",
+        "holding_interval", "exit_rule", "score_order", "fold_idx", "decision_ts",
+        "symbol", "execution_price", "previous_signed_quantity",
+        "desired_signed_quantity", "executed_quantity", "executed_order_notional", "status",
+    ),
+    "l4_holdings": (
+        "combo_id", "track", "weight_scheme", "panel_frequency", "return_horizon",
+        "component_features", "signal_timeframes", "native_bar_end_ts",
+        "signal_bar_end_ts", "availability_ts", "data_observed_ts", "decision_interval",
+        "order_submit_ts", "execution_ts", "execution_open_time", "next_execution_ts",
+        "holding_interval", "exit_rule", "score_order", "fold_idx", "decision_ts",
+        "symbol", "leg", "target_weight", "signed_quantity", "entry_price", "exit_price",
+        "executable_return", "actual_notional", "pnl_usd", "bucket", "signal_value",
+        "forward_return", "weight", "contribution",
+    ),
+}
+
+
+def known_truth_l0_l4_lineage_schema_authority_v1(
+    candidate_ids: Sequence[str],
+) -> dict[str, dict[str, object]]:
+    """Return the qlab-owned schema contract for the formal 18 frames."""
+    candidate_ids = tuple(str(candidate_id) for candidate_id in candidate_ids)
+    if not candidate_ids or len(set(candidate_ids)) != len(candidate_ids):
+        raise ValueError("candidate_ids must be a non-empty unique ordered sequence")
+    result: dict[str, dict[str, object]] = {}
+    for attribute in KNOWN_TRUTH_L0_L4_LINEAGE_FRAME_ATTRIBUTES_V1:
+        schema = list(KNOWN_TRUTH_L0_L4_LINEAGE_SCHEMA_COLUMNS_V1[attribute])
+        if attribute == "l1_panel":
+            if schema.count("__candidate_columns__") != 1:
+                raise AssertionError("qlab l1 schema placeholder is not unique")
+            expanded: list[str] = []
+            for column in schema:
+                if column == "__candidate_columns__":
+                    expanded.extend(candidate_ids)
+                else:
+                    expanded.append(column)
+            schema = expanded
+        result[attribute] = {
+            "schema_id": f"ksv4-known-truth-development-lineage-{attribute}/v1",
+            "schema": schema,
+        }
+    return result
+
+
 @dataclass(frozen=True)
 class KnownTruthL0L4TruthBlindEvaluationInputV1:
     """An atomically persisted, truth-free output bundle for evaluation.
@@ -7132,6 +7346,9 @@ __all__ = [
     "KNOWN_TRUTH_L0_L4_MICRO_MAY_BE_USED_FOR_V1",
     "KNOWN_TRUTH_L0_L4_MICRO_MUST_NOT_BE_USED_FOR_V1",
     "KNOWN_TRUTH_L0_L4_MICRO_SCHEMA_V1",
+    "KNOWN_TRUTH_L0_L4_LINEAGE_FRAME_ATTRIBUTES_V1",
+    "KNOWN_TRUTH_L0_L4_LINEAGE_SCHEMA_AUTHORITY_V1",
+    "KNOWN_TRUTH_L0_L4_LINEAGE_SCHEMA_COLUMNS_V1",
     "KNOWN_TRUTH_L0_L4_PIPELINE_DISCOVERY_ARCHIVE_CONDITION_V1",
     "KNOWN_TRUTH_L0_L4_PIPELINE_DISCOVERY_AUTHORITY_V1",
     "KNOWN_TRUTH_L0_L4_PIPELINE_DISCOVERY_LIFECYCLE_V1",
@@ -7176,6 +7393,7 @@ __all__ = [
     "generate_known_truth_dgp_vertical_slice_v1",
     "run_known_truth_l0_l4_micro_e2e_v1",
     "run_known_truth_l0_l4_pipeline_discovery_micro_e2e_v1",
+    "known_truth_l0_l4_lineage_schema_authority_v1",
     "bind_known_truth_l0_l4_truth_blind_evaluation_input_v1",
     "known_truth_l0_l4_truth_blind_persisted_output_identity_v1",
     "evaluate_known_truth_pipeline_terminal_v1",
