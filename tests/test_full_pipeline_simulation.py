@@ -12,6 +12,7 @@ import pandas as pd
 import pytest
 
 from qlab.data.crypto import keystore_coinglass_factors as factor_registry
+from qlab import factor_research
 from qlab.full_pipeline_simulation import (
     DecisionWindow,
     DETERMINISTIC_RANDOM_ADDRESS_VERSION_V1,
@@ -63,6 +64,7 @@ from qlab.full_pipeline_simulation import (
     estimate_l0_l4_observed_effect_scale_v1,
     validate_known_truth_simulation_contract_v1,
     derive_deterministic_random_address_v1,
+    known_truth_l0_l4_lineage_schema_authority_v1,
 )
 
 
@@ -1119,6 +1121,90 @@ def test_common_slope_uses_the_entire_twenty_asset_cross_section():
     assert estimate["support_rows"] == 20
     assert estimate["support_asset_count"] == 20
     assert estimate["beta_obs"] > 0.0
+
+
+def test_known_truth_lineage_authority_matches_formal_l4_artifacts():
+    from qlab.factor_research import ComboSpec
+    from qlab.walkforward import WalkForwardFold
+
+    decisions = pd.date_range("2026-01-01", periods=5, freq="1D", tz="UTC")
+    symbols = ("A", "B", "C", "D")
+    scores = {symbol: float(index + 1) for index, symbol in enumerate(symbols)}
+    test_returns = {"A": -0.02, "B": -0.01, "C": 0.01, "D": 0.02}
+    rows = []
+    for decision in decisions:
+        for symbol in symbols:
+            executable_return = (
+                scores[symbol] / 100.0
+                if decision <= decisions[1]
+                else test_returns[symbol]
+            )
+            rows.append(
+                {
+                    "decision_ts": decision,
+                    "signal_timeframes": "1d",
+                    "native_bar_end_ts": decision,
+                    "signal_bar_end_ts": decision,
+                    "availability_ts": decision + pd.Timedelta(minutes=1),
+                    "data_observed_ts": decision + pd.Timedelta(minutes=1),
+                    "decision_interval": "1d",
+                    "order_submit_ts": decision + pd.Timedelta(minutes=1),
+                    "execution_ts": decision + pd.Timedelta(minutes=1),
+                    "execution_open_time": decision + pd.Timedelta(minutes=1),
+                    "next_execution_ts": decision + pd.Timedelta(days=1, minutes=1),
+                    "return_horizon": "1d",
+                    "holding_interval": "1d",
+                    "exit_rule": "rebalance_at_next_decision",
+                    "score_order": "high_score_long_low_score_short",
+                    "symbol": symbol,
+                    "signal__1d": scores[symbol],
+                    "entry_price": 100.0,
+                    "exit_price": 100.0 * (1.0 + executable_return),
+                    "execution_price": 100.0,
+                    "next_execution_price": 100.0 * (1.0 + executable_return),
+                    "executable_return": executable_return,
+                }
+            )
+    frame = pd.DataFrame(rows).set_index("decision_ts", drop=False).sort_index()
+    fold = WalkForwardFold(
+        fold_idx=0,
+        train_start=decisions[0],
+        train_end=decisions[1],
+        test_start=decisions[2],
+        test_end=decisions[4],
+    )
+    spec = ComboSpec(
+        combo_id="lineage_schema_1d",
+        track="lineage_schema",
+        panel_frequency="1d",
+        return_horizon="1d",
+        feature_names=("signal__1d",),
+        weight_scheme="equal",
+    )
+
+    summary, detail, _, _ = factor_research.evaluate_executable_long_short_strategy_with_orders(
+        spec,
+        frame,
+        [fold],
+        {"train_days": 2, "test_days": 3, "embargo_days": 0, "step_days": 3},
+        weight_scheme="equal",
+        feature_families=None,
+        decision_frequency="1d",
+        n_buckets=2,
+        min_cross_section=4,
+        frequency_periods_per_year={"1d": 365},
+        cost_multipliers=(1.0,),
+        taker_fee_rate=0.001,
+        horizon_deltas={"1d": pd.Timedelta(days=1)},
+        supported_signal_timeframes=("1d",),
+        execution_delay_minutes=1,
+    )
+    authority = known_truth_l0_l4_lineage_schema_authority_v1(("lineage_schema_1d",))
+
+    assert list(pd.DataFrame([summary]).columns) == authority["l4_summary"]["schema"]
+    assert list(detail.columns) == authority["l4_detail"]["schema"]
+    assert detail["gross_return"].tolist() == pytest.approx([0.015, 0.015, 0.015])
+    assert detail["net_return_1x"].tolist() == pytest.approx([0.014, 0.015, 0.014])
 
 
 def test_observed_effect_scale_preserves_unfiltered_insufficient_support_receipt():

@@ -99,6 +99,7 @@ from qlab.full_pipeline_simulation import (
     known_truth_l0_l4_truth_blind_persisted_output_identity_v1,
     run_known_truth_l0_l4_pipeline_discovery_micro_e2e_v1,
     run_known_truth_l0_l4_micro_e2e_v1,
+    validate_known_truth_l0_l4_lineage_artifacts_v1,
     validate_known_truth_dgp_vertical_specification_v1,
 )
 from qlab.walkforward import WalkForwardFold
@@ -1292,6 +1293,39 @@ def test_pipeline_discovery_uses_complete_registry_and_terminal_truth_blind_boun
     candidate = evaluated.candidate_results.set_index("candidate_id")
     assert candidate.loc[[direct_id, alias_id], "end_to_end_recovery"].tolist() == [True, True]
     assert not candidate.loc[null_ids, "false_activation"].any()
+
+
+def test_lineage_validator_matches_real_artifacts_and_reports_all_frame_mutations(
+    _pipeline_discovery_result,
+):
+    result = _pipeline_discovery_result
+    valid = validate_known_truth_l0_l4_lineage_artifacts_v1(result)
+    assert valid["valid"] is True, valid["mismatches"]
+    assert len(valid["frame_order"]) == 18
+    assert set(valid["frames"]) == set(valid["frame_order"])
+    assert valid["mismatches"] == []
+    assert all(
+        valid["frames"][attribute]["status"] == "valid"
+        for attribute in valid["frame_order"]
+    )
+
+    mutated = replace(
+        result,
+        l1_panel=result.l1_panel.drop(columns=["return_horizon"]),
+        l4_orders=result.l4_orders[list(reversed(result.l4_orders.columns))],
+        l4_holdings=result.l4_holdings.assign(unexpected_lineage_column=0),
+    )
+    invalid = validate_known_truth_l0_l4_lineage_artifacts_v1(mutated)
+    assert invalid["valid"] is False
+    mismatch_attributes = {item["attribute"] for item in invalid["mismatches"]}
+    assert {"l1_panel", "l4_orders", "l4_holdings"}.issubset(mismatch_attributes)
+    mismatch_kinds = {
+        (item["attribute"], item["kind"])
+        for item in invalid["mismatches"]
+    }
+    assert ("l1_panel", "missing_columns") in mismatch_kinds
+    assert ("l4_orders", "column_order") in mismatch_kinds
+    assert ("l4_holdings", "extra_columns") in mismatch_kinds
 
 
 def test_pipeline_discovery_rejects_preselected_or_truth_contaminated_inputs(
