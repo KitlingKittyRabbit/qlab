@@ -56,6 +56,23 @@ class SingleFeatureDirection:
     status: str
 
 
+@dataclass(frozen=True)
+class SingleFeatureTwoGateScanResult:
+    """The shared formal single-feature L2 two-gate result.
+
+    This is the one qlab-owned admission surface used by both the historical
+    research runner and known-truth discovery.  It returns the existing
+    diagnostics rather than recomputing a second summary in a caller.
+    """
+
+    summary: dict[str, object]
+    ic_detail: pd.DataFrame
+    bucket_detail: pd.DataFrame
+    direction_frame: pd.DataFrame
+    rank_diagnostics: pd.DataFrame
+    bucket_diagnostics: pd.DataFrame
+
+
 def parse_horizon_csv(value: str, horizon_deltas: Mapping[str, pd.Timedelta]) -> list[str]:
     horizons = [token.strip() for token in value.split(",") if token.strip()]
     if not horizons:
@@ -778,6 +795,247 @@ def summarize_bucket_backtest(
         summary[f"q{bucket}_avg_size"] = float(
             bucket_avg_sizes.get(bucket, np.nan))
     return summary
+
+
+def scan_single_feature_two_gate_v1(
+    base_frame: pd.DataFrame,
+    feature_name: str,
+    horizon: str,
+    *,
+    panel_frequency: str,
+    folds: Sequence,
+    walk_forward_spec: Mapping[str, int],
+    source_timeframes: Sequence[str],
+    horizon_deltas: Mapping[str, pd.Timedelta],
+    min_cross_section: int,
+    n_buckets: int,
+    frequency_periods_per_year: Mapping[str, int | float],
+    one_sided_t_threshold: float = 1.645,
+    bucket_monotonic_threshold: float = 0.75,
+    train_ic_epsilon: float = 1e-12,
+    signal_timeframe: str | None = None,
+) -> SingleFeatureTwoGateScanResult:
+    """Run the production single-feature L2 two-gate scan for one unit.
+
+    The sequence and output field names are the formal L2 contract used by
+    the KSV4 research runner: non-overlap frequency, canonical frequency
+    filter, train-only direction, test rank diagnostics, bucket diagnostics,
+    existing summaries, and the existing two-gate flag function.  Callers
+    supply the fold ledger and may only organize the returned records.
+    """
+    if not isinstance(feature_name, str) or not feature_name:
+        raise ValueError("feature_name must be non-empty")
+    if horizon not in horizon_deltas:
+        raise ValueError("horizon missing from horizon_deltas: " + str(horizon))
+    if not source_timeframes:
+        raise ValueError("source_timeframes must not be empty")
+    if signal_timeframe is None:
+        evaluation_frequency = non_overlapping_decision_frequency(
+            (feature_name,),
+            panel_frequency,
+            horizon,
+            horizon_deltas,
+            source_timeframes,
+        )
+    else:
+        signal_timeframe = str(signal_timeframe)
+        if signal_timeframe not in source_timeframes:
+            raise ValueError("signal_timeframe is not registered: " + signal_timeframe)
+        signal_delta = pd.Timedelta(horizon_deltas[signal_timeframe])
+        horizon_delta = pd.Timedelta(horizon_deltas[horizon])
+        if signal_delta > horizon_delta or horizon_delta % signal_delta != pd.Timedelta(0):
+            raise ValueError(
+                f"signal timeframe {signal_timeframe} for {feature_name} is not an exact divisor "
+                f"of return horizon {horizon}"
+            )
+        evaluation_frequency = horizon
+    combo_spec = ComboSpec(
+        combo_id=f"{feature_name}__{horizon}",
+        track="single_factor_two_gate",
+        panel_frequency=evaluation_frequency,
+        return_horizon=horizon,
+        feature_names=(feature_name,),
+        weight_scheme="single",
+    )
+    validate_no_overlap_design([combo_spec], horizon_deltas, source_timeframes)
+    evaluation_frame = filter_frame_to_decision_frequency(
+        base_frame,
+        evaluation_frequency,
+        horizon_deltas,
+    )
+    required_columns = ["symbol", feature_name, "forward_return"]
+    missing = sorted(set(required_columns).difference(evaluation_frame.columns))
+    if missing:
+        raise ValueError("single-feature L2 frame missing: " + ", ".join(missing))
+    working = evaluation_frame[required_columns].copy()
+
+    ic_rows: list[dict[str, object]] = []
+    rank_diagnostics: list[dict[str, object]] = []
+    bucket_frames: list[pd.DataFrame] = []
+    bucket_diagnostics: list[dict[str, object]] = []
+    direction_rows: list[dict[str, object]] = []
+    for fold in folds:
+        train_slice = select_dates(working, fold, "train")
+        test_slice = select_dates(working, fold, "test")
+        direction = single_feature_train_direction(
+            train_slice,
+            feature_name,
+            min_cross_section,
+            epsilon=train_ic_epsilon,
+        )
+        direction_rows.append(
+            {
+                "feature_name": feature_name,
+                "return_horizon": horizon,
+                "evaluation_frequency": evaluation_frequency,
+                "fold_idx": fold.fold_idx,
+                "train_start": fold.train_start,
+                "train_end": fold.train_end,
+                "test_start": fold.test_start,
+                "test_end": fold.test_end,
+                "train_mean_ic": direction.train_mean_ic,
+                "direction": direction.direction if direction.status == "ok" else 0,
+                "train_ic_observation_count": direction.observation_count,
+                "status": "ok" if direction.status == "ok" else "no_train_direction",
+            }
+        )
+        if direction.status != "ok":
+            continue
+        test_ic_diagnostics = rank_ic_diagnostics_for_frame(
+            test_slice[["symbol", feature_name, "forward_return"]],
+            feature_name,
+            min_cross_section,
+        )
+        for diagnostic in test_ic_diagnostics:
+            row = {
+                **dict(diagnostic),
+                "feature_name": feature_name,
+                "return_horizon": horizon,
+                "evaluation_frequency": evaluation_frequency,
+                "fold_idx": fold.fold_idx,
+                "train_mean_ic": direction.train_mean_ic,
+                "direction": direction.direction,
+            }
+            rank_diagnostics.append(row)
+            if row["status"] == "ok":
+                ic_rows.append(
+                    {
+                        "feature_name": feature_name,
+                        "return_horizon": horizon,
+                        "evaluation_frequency": evaluation_frequency,
+                        "fold_idx": fold.fold_idx,
+                        "decision_ts": row["decision_ts"],
+                        "train_mean_ic": direction.train_mean_ic,
+                        "direction": direction.direction,
+                        "raw_rank_ic": row["raw_rank_ic"],
+                        "rank_ic": float(row["raw_rank_ic"]) * direction.direction,
+                        "cross_section_size": row["cross_section_size"],
+                    }
+                )
+        bucket_frame, diagnostics = bucket_diagnostics_for_frame(
+            test_slice[["symbol", feature_name, "forward_return"]],
+            feature_name,
+            direction.direction,
+            n_buckets,
+        )
+        for diagnostic in diagnostics:
+            bucket_diagnostics.append(
+                {
+                    **dict(diagnostic),
+                    "feature_name": feature_name,
+                    "return_horizon": horizon,
+                    "evaluation_frequency": evaluation_frequency,
+                    "fold_idx": fold.fold_idx,
+                    "train_mean_ic": direction.train_mean_ic,
+                    "direction": direction.direction,
+                }
+            )
+        if not bucket_frame.empty:
+            bucket_frames.append(
+                bucket_frame.assign(
+                    feature_name=feature_name,
+                    return_horizon=horizon,
+                    evaluation_frequency=evaluation_frequency,
+                    fold_idx=fold.fold_idx,
+                    train_mean_ic=direction.train_mean_ic,
+                    direction=direction.direction,
+                )
+            )
+
+    ic_detail = pd.DataFrame(ic_rows)
+    bucket_detail = pd.concat(bucket_frames, ignore_index=True) if bucket_frames else pd.DataFrame()
+    direction_frame = pd.DataFrame(direction_rows)
+    ic_summary = summarize_ic_series(
+        panel_frequency,
+        horizon,
+        feature_name,
+        ic_detail,
+        walk_forward_spec,
+        rank_diagnostics,
+        hac_overlap_lags=0,
+    )
+    bucket_summary = summarize_bucket_backtest(
+        panel_frequency,
+        horizon,
+        feature_name,
+        bucket_detail,
+        walk_forward_spec,
+        bucket_diagnostics,
+        n_buckets=n_buckets,
+        frequency_periods_per_year=frequency_periods_per_year,
+        annualization_frequency=horizon,
+    )
+    row: dict[str, object] = {
+        "feature_name": feature_name,
+        "return_horizon": horizon,
+        "panel_frequency": panel_frequency,
+        "evaluation_frequency": evaluation_frequency,
+        "source_timeframe": signal_timeframe or (
+            feature_name.rsplit("__", 1)[-1] if "__" in feature_name else panel_frequency
+        ),
+        "train_days": walk_forward_spec["train_days"],
+        "test_days": walk_forward_spec["test_days"],
+        "embargo_days": walk_forward_spec["embargo_days"],
+        "step_days": walk_forward_spec["step_days"],
+        "n_folds": ic_summary["n_folds"],
+        "direction_ok_fold_count": int(
+            (direction_frame["status"] == "ok").sum()
+        ) if not direction_frame.empty else 0,
+        "direction_skipped_fold_count": int(
+            (direction_frame["status"] != "ok").sum()
+        ) if not direction_frame.empty else 0,
+        "ic_mean": ic_summary["mean_ic"],
+        "icir": ic_summary["icir"],
+        "ic_hac_t_stat": ic_summary["hac_t_stat"],
+        "ic_hac_lags": ic_summary["hac_lags"],
+        "ic_positive_share": ic_summary["ic_positive_share"],
+        "ic_observation_count": ic_summary["ic_observation_count"],
+        "ic_scored_decision_count": ic_summary["scored_decision_count"],
+        "bucket_spread_mean_return": bucket_summary["spread_mean_return"],
+        "bucket_spread_sharpe": bucket_summary["spread_sharpe"],
+        "bucket_spread_positive_share": bucket_summary["spread_positive_share"],
+        "bucket_monotonic_increasing": bucket_summary["monotonic_increasing"],
+        "bucket_monotonic_pair_pass_share": bucket_summary["monotonic_pair_pass_share"],
+        "bucket_scored_decision_count": bucket_summary["scored_decision_count"],
+    }
+    row.update(
+        two_gate_support_flags(
+            ic_mean=float(row["ic_mean"]),
+            ic_hac_t_stat=float(row["ic_hac_t_stat"]),
+            bucket_spread_mean_return=float(row["bucket_spread_mean_return"]),
+            bucket_monotonic_pair_pass_share=float(row["bucket_monotonic_pair_pass_share"]),
+            one_sided_t_threshold=one_sided_t_threshold,
+            bucket_monotonic_threshold=bucket_monotonic_threshold,
+        )
+    )
+    return SingleFeatureTwoGateScanResult(
+        summary=row,
+        ic_detail=ic_detail,
+        bucket_detail=bucket_detail,
+        direction_frame=direction_frame,
+        rank_diagnostics=pd.DataFrame(rank_diagnostics),
+        bucket_diagnostics=pd.DataFrame(bucket_diagnostics),
+    )
 
 
 def top_bottom_diagnostics_for_frame(

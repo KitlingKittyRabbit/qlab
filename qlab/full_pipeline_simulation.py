@@ -26,7 +26,8 @@ import struct
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal, InvalidOperation
 from numbers import Integral
-from typing import Mapping, Sequence
+from pathlib import Path
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -4330,6 +4331,194 @@ class KnownTruthL0L4MicroArtifactsV1:
     return_horizon: str
 
 
+KNOWN_TRUTH_L0_L4_PIPELINE_DISCOVERY_SCHEMA_V1 = (
+    "ksv4-known-truth-l0-l4-pipeline-discovery/v1"
+)
+KNOWN_TRUTH_L0_L4_PIPELINE_DISCOVERY_LIFECYCLE_V1 = (
+    "candidate_known_truth_l0_l4_pipeline_discovery_v1"
+)
+KNOWN_TRUTH_L0_L4_PIPELINE_DISCOVERY_AUTHORITY_V1 = (
+    "issue_34_blueprint_section_8_qlab_formal_l0_l4_discovery_v1"
+)
+KNOWN_TRUTH_L0_L4_PIPELINE_DISCOVERY_MAY_BE_USED_FOR_V1 = (
+    "diagnose_pre_registered_pipeline_discovery_and_terminal_truth_recovery_v1"
+)
+KNOWN_TRUTH_L0_L4_PIPELINE_DISCOVERY_MUST_NOT_BE_USED_FOR_V1 = (
+    "no_truth_before_pipeline_completion_no_formal_1100_no_research_conclusion_no_trade_v1"
+)
+KNOWN_TRUTH_L0_L4_PIPELINE_DISCOVERY_ARCHIVE_CONDITION_V1 = (
+    "superseded_by_approved_known_truth_l0_l4_pipeline_discovery_v1"
+)
+KNOWN_TRUTH_PIPELINE_DISCOVERY_COLUMNS_V1 = (
+    "candidate_id",
+    "return_horizon",
+    "l2_two_gate_support",
+    "l3_acceptance",
+    "pipeline_discovery",
+    "learned_direction",
+    "l2_evidence_key",
+    "l3_evidence_combo_ids",
+    "first_loss_layer",
+)
+KNOWN_TRUTH_L4_ACTIVATION_COLUMNS_V1 = (
+    "candidate_id",
+    "return_horizon",
+    "combo_id",
+    "l4_exposure",
+    "execution_evidence_count",
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_SCHEMA_V1 = (
+    "ksv4-known-truth-l0-l4-truth-blind-evaluation-input/v1"
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_LIFECYCLE_V1 = (
+    "candidate_known_truth_l0_l4_truth_blind_evaluation_input_v1"
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_AUTHORITY_V1 = (
+    "issue_34_blueprint_section_8_atomic_truth_blind_output_contract_v1"
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_MAY_BE_USED_FOR_V1 = (
+    "post_pipeline_terminal_truth_evaluation_only_v1"
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_MUST_NOT_BE_USED_FOR_V1 = (
+    "no_pre_completion_truth_access_no_pipeline_selection_no_research_conclusion_v1"
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_ARCHIVE_CONDITION_V1 = (
+    "superseded_by_approved_known_truth_terminal_evaluation_input_v1"
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_SCHEMA_V1 = (
+    "ksv4-known-truth-l0-l4-truth-blind-persistence-receipt/v1"
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_LIFECYCLE_V1 = (
+    "candidate_known_truth_l0_l4_truth_blind_persistence_receipt_v1"
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_AUTHORITY_V1 = (
+    "issue_34_blueprint_section_8_atomic_truth_blind_persistence_v1"
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_FORMAL_ENTRY_V1 = (
+    "qlab.full_pipeline_simulation.run_known_truth_l0_l4_pipeline_discovery_micro_e2e_v1"
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_MAY_BE_USED_FOR_V1 = (
+    "bind_a_completed_truth_blind_l0_l4_output_for_terminal_evaluation_only_v1"
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_MUST_NOT_BE_USED_FOR_V1 = (
+    "no_partial_output_no_truth_before_completion_no_research_conclusion_no_trade_v1"
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_ARCHIVE_CONDITION_V1 = (
+    "superseded_by_approved_known_truth_l0_l4_truth_blind_persistence_receipt_v1"
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_OUTPUT_FILES_V1 = {
+    "pipeline_discovery": "pipeline_discovery.csv",
+    "l4_activation": "l4_activation.csv",
+}
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_FILENAME_V1 = (
+    "truth_blind_persistence_receipt.json"
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_SIDECAR_FILENAME_V1 = (
+    "truth_blind_persistence_receipt.json.sha256"
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_COMPLETION_MARKER_FILENAME_V1 = (
+    ".truth_blind_complete"
+)
+KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_COMPLETION_MARKER_BYTES_V1 = (
+    b"ksv4-known-truth-l0-l4-truth-blind-complete/v1\n"
+)
+KNOWN_TRUTH_TERMINAL_EVALUATION_SCHEMA_V1 = (
+    "ksv4-known-truth-l0-l4-terminal-evaluation/v1"
+)
+KNOWN_TRUTH_TERMINAL_EVALUATION_LIFECYCLE_V1 = (
+    "candidate_known_truth_l0_l4_terminal_evaluation_v1"
+)
+KNOWN_TRUTH_TERMINAL_EVALUATION_AUTHORITY_V1 = (
+    "issue_34_blueprint_section_8_qlab_formal_truth_evaluator_v1"
+)
+KNOWN_TRUTH_TERMINAL_EVALUATION_MAY_BE_USED_FOR_V1 = (
+    "diagnose_known_truth_pipeline_discovery_and_l4_recovery_v1"
+)
+KNOWN_TRUTH_TERMINAL_EVALUATION_MUST_NOT_BE_USED_FOR_V1 = (
+    "no_live_profitability_no_l55_fdr_claim_no_candidate_upgrade_v1"
+)
+KNOWN_TRUTH_TERMINAL_EVALUATION_ARCHIVE_CONDITION_V1 = (
+    "superseded_by_approved_known_truth_terminal_evaluation_v1"
+)
+
+
+@dataclass(frozen=True)
+class KnownTruthL0L4PipelineDiscoveryArtifactsV1:
+    """Truth-blind outputs of a pre-registered scan through formal L0--L4.
+
+    ``pipeline_discovery`` is produced only from the formal L2 gate and the
+    formal L3 catalog/spec construction.  ``l4_activation`` is evidence for a
+    later terminal evaluation; it never changes discovery.  No truth manifest
+    is accepted by this entry point.
+    """
+
+    l0_market_records: pd.DataFrame
+    l0_signal_records: pd.DataFrame
+    l1_panel: pd.DataFrame
+    l2_gate_summary: pd.DataFrame
+    l2_rank_ic: pd.DataFrame
+    l2_directions: pd.DataFrame
+    l3_catalog: pd.DataFrame
+    l3_summary: pd.DataFrame
+    l3_composite: pd.DataFrame
+    l3_targets: pd.DataFrame
+    l3_ic: pd.DataFrame
+    l3_bucket: pd.DataFrame
+    l3_weights: pd.DataFrame
+    l3_diagnostics: pd.DataFrame
+    l4_summary: pd.DataFrame
+    l4_detail: pd.DataFrame
+    l4_orders: pd.DataFrame
+    l4_holdings: pd.DataFrame
+    pipeline_discovery: pd.DataFrame
+    l4_activation: pd.DataFrame
+    schema_version: str
+    lifecycle: str
+    authority: str
+    may_be_used_for: str
+    must_not_be_used_for: str
+    archive_condition: str
+    asset_symbols: tuple[str, ...]
+    registered_candidate_ids: tuple[str, ...]
+    decision_frequency: str
+    return_horizon: str
+
+
+@dataclass(frozen=True)
+class KnownTruthL0L4TruthBlindEvaluationInputV1:
+    """An atomically persisted, truth-free output bundle for evaluation.
+
+    The persistence receipt is produced by the thin outer runner.  This qlab
+    object reopens and verifies the receipt, completion marker, fixed output
+    files, and byte hashes; it never reads the truth sidecar.
+    """
+
+    pipeline_discovery: pd.DataFrame
+    l4_activation: pd.DataFrame
+    schema_version: str
+    lifecycle: str
+    authority: str
+    persistence_receipt_path: str
+    persistence_receipt_sha256: str
+    persistence_status: str
+    output_identity: str
+
+
+@dataclass(frozen=True)
+class KnownTruthTerminalEvaluationV1:
+    """Terminal truth evaluation kept separate from truth-blind L0--L4."""
+
+    candidate_results: pd.DataFrame
+    information_group_results: pd.DataFrame
+    summary: pd.DataFrame
+    schema_version: str
+    lifecycle: str
+    authority: str
+    may_be_used_for: str
+    must_not_be_used_for: str
+    archive_condition: str
+
+
 def _known_truth_dgp_curve_cdf_v1(curve_id: str, elapsed_hours: float) -> float:
     if elapsed_hours < 0.0 or not math.isfinite(elapsed_hours):
         raise ValueError("effect curve elapsed time must be finite and non-negative")
@@ -5716,6 +5905,69 @@ def _validate_known_truth_l0_l4_micro_raw_v1(
     return market_by_symbol, canonical_selected, canonical_market
 
 
+def _known_truth_l0_l4_build_panel_v1(
+    *,
+    candidate_ids: tuple[str, ...],
+    market_by_symbol: Mapping[str, pd.DataFrame],
+    selected: pd.DataFrame,
+    decision_frequency: str,
+    return_horizon: str,
+    horizon_deltas: Mapping[str, pd.Timedelta],
+    execution_delay_minutes: int,
+) -> pd.DataFrame:
+    """Build the shared formal L0/L1 panel and executable-return adapter.
+
+    Both public micro routes use this one raw-record-to-panel path.  The pivot
+    is only the schema adapter for the already validated raw DGP records;
+    frequency filtering and the open-to-open executable return remain the
+    existing qlab entries.
+    """
+    panel_values = selected.pivot(
+        index=["decision_time", "symbol"],
+        columns="candidate_id",
+        values="signal_value",
+    ).reindex(columns=list(candidate_ids))
+    panel_values.index.names = ["decision_ts", "symbol"]
+    if panel_values.isna().any().any():
+        raise ValueError("micro L1 panel contains incomplete candidate rows")
+    panel_values["signal_bar_end_ts"] = panel_values.index.get_level_values("decision_ts")
+    panel_values["canonical_period_end_ts"] = panel_values.index.get_level_values("decision_ts")
+    availability = selected.drop_duplicates(["decision_time", "symbol"]).set_index(
+        ["decision_time", "symbol"]
+    )[["assumed_execution_gate", "actual_observed_availability"]]
+    availability.index.names = ["decision_ts", "symbol"]
+    panel_values = panel_values.join(availability, how="left", validate="one_to_one")
+    panel_values["control_zero"] = 0.0
+    panel_values = panel_values.sort_index()
+    decision_panel = factor_research.filter_frame_to_decision_frequency(
+        panel_values,
+        decision_frequency,
+        horizon_deltas,
+    )
+    if decision_panel.empty:
+        raise ValueError("micro L1 has no decision-frequency rows")
+    contract = ContinuousHoldingTimeContract(
+        return_horizon=return_horizon,
+        decision_interval=decision_frequency,
+        holding_interval=return_horizon,
+        strategy_return_interval=return_horizon,
+        signal_timeframes=("1m",),
+        execution_delay_minutes=execution_delay_minutes,
+        data_observed_rule="assumed_available_by_t_plus_4m",
+    )
+    validate_continuous_holding_contract(contract, horizon_deltas)
+    l1_panel = panel_with_executable_return(
+        decision_panel,
+        market_by_symbol,
+        contract,
+        horizon_deltas,
+    ).sort_index(kind="mergesort")
+    # Formal factor/rank entries consume the canonical ``forward_return``
+    # name.  The executable-return adapter above has already calculated it.
+    l1_panel["forward_return"] = l1_panel["executable_return"].astype(float)
+    return l1_panel
+
+
 def run_known_truth_l0_l4_micro_e2e_v1(
     raw_input: KnownTruthL0L4RawInputV1,
     *,
@@ -5788,57 +6040,15 @@ def run_known_truth_l0_l4_micro_e2e_v1(
     if int(n_buckets) != 2 or int(min_cross_section) < int(n_buckets):
         raise ValueError("micro route requires two buckets and a complete two-asset cross-section")
 
-    # DGP signal rows already satisfy the approved L0 raw schema: their
-    # ``decision_time`` is the canonical period-end label and their explicit
-    # availability fields are preserved below.  The pivot is therefore only
-    # the deterministic raw-record-to-panel shape adapter.  L1's frequency
-    # filter and executable availability/price ledger remain the existing
-    # qlab entries; no research-layer transform or return calculation is
-    # introduced here.
-    panel_values = selected.pivot(
-        index=["decision_time", "symbol"],
-        columns="candidate_id",
-        values="signal_value",
-    ).reindex(columns=list(candidate_ids))
-    panel_values.index.names = ["decision_ts", "symbol"]
-    if panel_values.isna().any().any():
-        raise ValueError("micro L1 panel contains incomplete candidate rows")
-    panel_values["signal_bar_end_ts"] = panel_values.index.get_level_values("decision_ts")
-    panel_values["canonical_period_end_ts"] = panel_values.index.get_level_values("decision_ts")
-    availability = selected.drop_duplicates(["decision_time", "symbol"]).set_index(
-        ["decision_time", "symbol"]
-    )[["assumed_execution_gate", "actual_observed_availability"]]
-    availability.index.names = ["decision_ts", "symbol"]
-    panel_values = panel_values.join(availability, how="left", validate="one_to_one")
-    panel_values["control_zero"] = 0.0
-    panel_values = panel_values.sort_index()
-    decision_panel = factor_research.filter_frame_to_decision_frequency(
-        panel_values,
-        decision_frequency,
-        horizon_deltas,
-    )
-    if decision_panel.empty:
-        raise ValueError("micro L1 has no decision-frequency rows")
-    contract = ContinuousHoldingTimeContract(
+    l1_panel = _known_truth_l0_l4_build_panel_v1(
+        candidate_ids=candidate_ids,
+        market_by_symbol=market_by_symbol,
+        selected=selected,
+        decision_frequency=decision_frequency,
         return_horizon=return_horizon,
-        decision_interval=decision_frequency,
-        holding_interval=return_horizon,
-        strategy_return_interval=return_horizon,
-        signal_timeframes=("1m",),
+        horizon_deltas=horizon_deltas,
         execution_delay_minutes=execution_delay_minutes,
-        data_observed_rule="assumed_available_by_t_plus_4m",
     )
-    validate_continuous_holding_contract(contract, horizon_deltas)
-    l1_panel = panel_with_executable_return(
-        decision_panel,
-        market_by_symbol,
-        contract,
-        horizon_deltas,
-    ).sort_index(kind="mergesort")
-    # The formal factor/rank entries consume the canonical ``forward_return``
-    # name.  This is only the name adapter for the already-computed executable
-    # open-to-open return; no second label or price path is calculated here.
-    l1_panel["forward_return"] = l1_panel["executable_return"].astype(float)
 
     l2_rows: list[dict[str, object]] = []
     for feature_name in candidate_ids:
@@ -5958,6 +6168,858 @@ def run_known_truth_l0_l4_micro_e2e_v1(
     )
 
 
+def _known_truth_pipeline_expected_registry_v1(return_horizon: str) -> pd.DataFrame:
+    """Return the complete formal scan registry for one return horizon."""
+    formal_registry = factor_registry.base_panel_registry("1h").reset_index(drop=True)
+    by_feature = formal_registry.set_index("feature_name", drop=False)
+    rows: list[dict[str, object]] = []
+    for candidate_id in KNOWN_TRUTH_REGISTRY_CANDIDATE_IDS_V1:
+        feature_name, horizon = str(candidate_id).rsplit("::", 1)
+        if horizon != return_horizon:
+            continue
+        if feature_name not in by_feature.index:
+            raise RuntimeError("formal candidate registry lost its feature row")
+        row = by_feature.loc[feature_name]
+        rows.append(
+            {
+                "candidate_id": str(candidate_id),
+                # The formal factor functions use feature_name as the panel
+                # column key.  Here that key is the pre-registered
+                # (feature,horizon) discovery unit, not a caller-selected ID.
+                "feature_name": str(candidate_id),
+                "base_feature_name": feature_name,
+                "return_horizon": horizon,
+                "family": str(row["family"]),
+                "signal_timeframe": str(row["signal_timeframe"]),
+            }
+        )
+    result = pd.DataFrame(rows)
+    if result.empty:
+        raise ValueError("formal scan registry has no candidates for the requested horizon")
+    return result
+
+
+def _validate_known_truth_pipeline_scan_registry_v1(
+    scan_registry: pd.DataFrame,
+    return_horizon: str,
+) -> pd.DataFrame:
+    if not isinstance(scan_registry, pd.DataFrame):
+        raise TypeError("scan_registry must be a pandas DataFrame")
+    required = {
+        "candidate_id",
+        "feature_name",
+        "base_feature_name",
+        "return_horizon",
+        "family",
+        "signal_timeframe",
+    }
+    missing = sorted(required.difference(scan_registry.columns))
+    if missing:
+        raise ValueError("scan_registry is missing: " + ", ".join(missing))
+    expected = _known_truth_pipeline_expected_registry_v1(return_horizon)
+    actual = scan_registry.loc[:, list(expected.columns)].copy().reset_index(drop=True)
+    if len(actual) != len(expected):
+        raise ValueError("scan_registry must cover the complete registered horizon")
+    if actual.to_dict("records") != expected.to_dict("records"):
+        raise ValueError("scan_registry does not match the formal registered identities/order")
+    if actual["candidate_id"].duplicated().any():
+        raise ValueError("scan_registry contains duplicate discovery units")
+    return expected
+
+
+def _known_truth_pipeline_empty_frame_v1(columns: Sequence[str]) -> pd.DataFrame:
+    return pd.DataFrame({str(column): pd.Series(dtype="object") for column in columns})
+
+
+def _known_truth_pipeline_split_component_features_v1(value: object) -> tuple[str, ...]:
+    if not isinstance(value, str) or not value:
+        raise ValueError("L3 catalog component_features must be non-empty text")
+    result = tuple(part.strip() for part in value.split("|") if part.strip())
+    if not result or len(set(result)) != len(result):
+        raise ValueError("L3 catalog component features are invalid")
+    return result
+
+
+def _known_truth_pipeline_build_discovery_frames_v1(
+    *,
+    gate_summary: pd.DataFrame,
+    catalog: pd.DataFrame,
+    l3_weights: pd.DataFrame,
+    l4_orders: pd.DataFrame,
+    l4_holdings: pd.DataFrame,
+    candidate_registry: pd.DataFrame,
+    return_horizon: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    accepted: dict[str, list[str]] = {str(value): [] for value in candidate_registry["candidate_id"]}
+    if not catalog.empty:
+        for row in catalog.itertuples(index=False):
+            for candidate_id in _known_truth_pipeline_split_component_features_v1(
+                row.component_features
+            ):
+                if candidate_id not in accepted:
+                    raise ValueError("L3 catalog contains an unregistered discovery unit")
+                accepted[candidate_id].append(str(row.combo_id))
+    directions_by_candidate: dict[str, set[int]] = {}
+    if not l3_weights.empty:
+        for row in l3_weights.itertuples(index=False):
+            feature_name = str(row.feature_name)
+            if feature_name not in accepted:
+                raise ValueError("L3 weights contain an unregistered discovery unit")
+            direction = int(row.direction)
+            if direction not in {-1, 1}:
+                raise ValueError("L3 direction evidence must be -1 or 1")
+            directions_by_candidate.setdefault(feature_name, set()).add(direction)
+    gate_by_candidate = gate_summary.set_index("feature_name", drop=False)
+    if gate_by_candidate.index.duplicated().any():
+        raise ValueError("L2 gate summary contains duplicate discovery units")
+    rows: list[dict[str, object]] = []
+    for registry_row in candidate_registry.itertuples(index=False):
+        candidate_id = str(registry_row.candidate_id)
+        if candidate_id not in gate_by_candidate.index:
+            raise ValueError("L2 gate summary does not cover the registered scan")
+        gate = bool(gate_by_candidate.loc[candidate_id, "two_gate_support"])
+        combo_ids = tuple(sorted(set(accepted[candidate_id])))
+        l3_acceptance = bool(combo_ids)
+        direction_values = directions_by_candidate.get(candidate_id, set())
+        if l3_acceptance and direction_values == set():
+            raise ValueError("L3-accepted discovery unit has no direction evidence")
+        if len(direction_values) > 1:
+            raise ValueError("a discovery unit has conflicting L3 direction evidence")
+        learned_direction = next(iter(direction_values), 0)
+        first_loss_layer = "none" if l3_acceptance and gate else (
+            "l2" if not gate else "l3"
+        )
+        rows.append(
+            {
+                "candidate_id": candidate_id,
+                "return_horizon": return_horizon,
+                "l2_two_gate_support": gate,
+                "l3_acceptance": l3_acceptance,
+                "pipeline_discovery": bool(gate and l3_acceptance),
+                "learned_direction": learned_direction,
+                "l2_evidence_key": f"{candidate_id}::{return_horizon}::l2",
+                "l3_evidence_combo_ids": "|".join(combo_ids),
+                "first_loss_layer": first_loss_layer,
+            }
+        )
+    discovery = pd.DataFrame(rows, columns=KNOWN_TRUTH_PIPELINE_DISCOVERY_COLUMNS_V1)
+
+    activation_rows: list[dict[str, object]] = []
+    for candidate_id, combo_ids in sorted(accepted.items()):
+        for combo_id in sorted(set(combo_ids)):
+            orders = (
+                l4_orders.loc[l4_orders["combo_id"].astype(str).eq(combo_id)]
+                if not l4_orders.empty and "combo_id" in l4_orders
+                else pd.DataFrame()
+            )
+            holdings = (
+                l4_holdings.loc[l4_holdings["combo_id"].astype(str).eq(combo_id)]
+                if not l4_holdings.empty and "combo_id" in l4_holdings
+                else pd.DataFrame()
+            )
+            exposure = False
+            if not holdings.empty:
+                if "signed_quantity" not in holdings:
+                    raise ValueError("formal L4 holdings are missing signed_quantity exposure evidence")
+                quantities = pd.to_numeric(holdings["signed_quantity"], errors="coerce")
+                if not np.isfinite(quantities.to_numpy(dtype=float)).all():
+                    raise ValueError("formal L4 holdings contain non-finite exposure evidence")
+                exposure = bool((quantities.abs() > 0.0).any())
+            activation_rows.append(
+                {
+                    "candidate_id": candidate_id,
+                    "return_horizon": return_horizon,
+                    "combo_id": combo_id,
+                    "l4_exposure": exposure,
+                    "execution_evidence_count": int(len(orders)),
+                }
+            )
+    activation = pd.DataFrame(
+        activation_rows,
+        columns=KNOWN_TRUTH_L4_ACTIVATION_COLUMNS_V1,
+    )
+    return discovery, activation
+
+
+def run_known_truth_l0_l4_pipeline_discovery_micro_e2e_v1(
+    raw_input: KnownTruthL0L4RawInputV1,
+    *,
+    scan_registry: pd.DataFrame,
+    folds: Sequence[object],
+    walk_forward_spec: Mapping[str, int],
+    horizon_deltas: Mapping[str, pd.Timedelta],
+    frequency_periods_per_year: Mapping[str, int | float],
+    decision_frequency: str = "4h",
+    return_horizon: str = "4h",
+    supported_signal_timeframes: Sequence[str] = ("1h", "4h", "8h", "12h", "1d"),
+    execution_delay_minutes: int = 4,
+    n_buckets: int = 2,
+    min_cross_section: int | None = None,
+    cost_multipliers: Sequence[float],
+    taker_fee_rate: float,
+) -> KnownTruthL0L4PipelineDiscoveryArtifactsV1:
+    """Scan a registered horizon through formal L0--L4 without truth.
+
+    No candidate IDs are accepted as a selection input.  The complete
+    pre-registered horizon is derived and scanned; L2 admission is fed into
+    qlab's existing structured L3 catalog builder, and every catalog component
+    is evaluated by the existing L3/L4 entries.  Truth is intentionally not a
+    parameter and is unavailable until the separate terminal evaluator.
+    """
+    if decision_frequency != return_horizon:
+        raise ValueError("pipeline discovery micro route requires matching decision and return horizons")
+    if execution_delay_minutes != 4:
+        raise ValueError("pipeline discovery micro route is frozen to the four-minute gate")
+    candidate_registry = _validate_known_truth_pipeline_scan_registry_v1(
+        scan_registry, return_horizon
+    )
+    candidate_ids = tuple(candidate_registry["candidate_id"].astype(str))
+    market_by_symbol, selected, canonical_market = _validate_known_truth_l0_l4_micro_raw_v1(
+        raw_input, candidate_ids
+    )
+    if min_cross_section is None:
+        min_cross_section = len(raw_input.asset_symbols)
+    if int(min_cross_section) != len(raw_input.asset_symbols):
+        raise ValueError("pipeline discovery min_cross_section must equal the complete raw asset count")
+    if int(n_buckets) != 2 or int(min_cross_section) < int(n_buckets):
+        raise ValueError("pipeline discovery micro route requires a complete two-asset two-bucket section")
+    if not folds:
+        raise ValueError("pipeline discovery requires at least one walk-forward fold")
+    required_walk_forward = {"train_days", "test_days", "embargo_days", "step_days"}
+    if not required_walk_forward.issubset(walk_forward_spec):
+        raise ValueError("pipeline discovery walk_forward_spec is incomplete")
+    if "1m" not in horizon_deltas or return_horizon not in horizon_deltas:
+        raise ValueError("pipeline discovery horizon_deltas is incomplete")
+    if return_horizon not in frequency_periods_per_year:
+        raise ValueError("pipeline discovery frequency_periods_per_year is incomplete")
+    if not supported_signal_timeframes:
+        raise ValueError("pipeline discovery supported_signal_timeframes must not be empty")
+    for multiplier in cost_multipliers:
+        if not math.isfinite(float(multiplier)) or float(multiplier) <= 0.0:
+            raise ValueError("pipeline discovery cost multipliers must be positive and finite")
+    if not math.isfinite(float(taker_fee_rate)) or float(taker_fee_rate) < 0.0:
+        raise ValueError("pipeline discovery taker fee must be non-negative and finite")
+    l1_panel = _known_truth_l0_l4_build_panel_v1(
+        candidate_ids=candidate_ids,
+        market_by_symbol=market_by_symbol,
+        selected=selected,
+        decision_frequency=decision_frequency,
+        return_horizon=return_horizon,
+        horizon_deltas=horizon_deltas,
+        execution_delay_minutes=execution_delay_minutes,
+    )
+    # This loop only orders the complete pre-registered units.  Every L2
+    # statistic, direction, diagnostic, and gate comes from the same qlab
+    # entry used by the historical research runner.
+    l2_results = [
+        factor_research.scan_single_feature_two_gate_v1(
+            l1_panel,
+            str(registry_row.feature_name),
+            return_horizon,
+            panel_frequency="1h",
+            folds=folds,
+            walk_forward_spec=walk_forward_spec,
+            source_timeframes=supported_signal_timeframes,
+            horizon_deltas=horizon_deltas,
+            min_cross_section=int(min_cross_section),
+            n_buckets=int(n_buckets),
+            frequency_periods_per_year=frequency_periods_per_year,
+            signal_timeframe=str(registry_row.signal_timeframe),
+        )
+        for registry_row in candidate_registry.itertuples(index=False)
+    ]
+    if not l2_results:
+        raise ValueError("formal L2 scan produced no registered candidates")
+    gate_summary = pd.DataFrame([result.summary for result in l2_results])
+    l2_rank_ic = pd.concat(
+        [result.rank_diagnostics for result in l2_results], ignore_index=True
+    )
+    l2_directions = pd.concat(
+        [result.direction_frame for result in l2_results], ignore_index=True
+    )
+    l3_specs: list[factor_research.ComboSpec] = []
+    l3_catalog = _known_truth_pipeline_empty_frame_v1(
+        (
+            "combo_id", "track", "selection_label", "base_panel_frequency",
+            "panel_frequency", "return_horizon", "component_features",
+            "n_components", "weight_scheme",
+        )
+    )
+    if bool(gate_summary["two_gate_support"].any()):
+        l3_registry = candidate_registry.loc[:, ["feature_name", "family"]].copy()
+        l3_specs, l3_catalog = factor_research.candidate_structured_combo_specs_from_gate_summary(
+            gate_summary,
+            l3_registry,
+            panel_frequency="1h",
+            support_column="two_gate_support",
+            strict_support_column=None,
+            weight_schemes=("equal",),
+            horizon_deltas=horizon_deltas,
+            supported_signal_timeframes=supported_signal_timeframes,
+        )
+    family_map = dict(
+        candidate_registry[["candidate_id", "family"]]
+        .rename(columns={"candidate_id": "feature_name"})
+        .itertuples(index=False, name=None)
+    )
+    l3_summary_frames: list[pd.DataFrame] = []
+    l3_composite_frames: list[pd.DataFrame] = []
+    l3_ic_frames: list[pd.DataFrame] = []
+    l3_bucket_frames: list[pd.DataFrame] = []
+    l3_weight_frames: list[pd.DataFrame] = []
+    l3_diagnostic_frames: list[pd.DataFrame] = []
+    l4_summary_frames: list[pd.DataFrame] = []
+    l4_detail_frames: list[pd.DataFrame] = []
+    l4_order_frames: list[pd.DataFrame] = []
+    l4_holding_frames: list[pd.DataFrame] = []
+    for spec in l3_specs:
+        (
+            summary,
+            composite,
+            ic_detail,
+            bucket_detail,
+            weights,
+            diagnostics,
+        ) = factor_research.evaluate_combo_signal_two_gate_diagnostics(
+            spec,
+            l1_panel,
+            folds,
+            walk_forward_spec,
+            weight_scheme=spec.weight_scheme,
+            feature_families=family_map,
+            control_columns=("control_zero",),
+            decision_frequency=spec.panel_frequency,
+            n_buckets=int(n_buckets),
+            min_cross_section=int(min_cross_section),
+            frequency_periods_per_year=frequency_periods_per_year,
+            horizon_deltas=horizon_deltas,
+            supported_signal_timeframes=supported_signal_timeframes,
+        )
+        l3_summary_frames.append(summary)
+        l3_composite_frames.append(composite)
+        l3_ic_frames.append(ic_detail)
+        l3_bucket_frames.append(bucket_detail)
+        l3_weight_frames.append(weights)
+        l3_diagnostic_frames.append(diagnostics)
+        (
+            l4_summary_dict,
+            l4_detail,
+            l4_orders,
+            l4_holdings,
+        ) = factor_research.evaluate_executable_long_short_strategy_with_orders(
+            spec,
+            l1_panel,
+            folds,
+            walk_forward_spec,
+            weight_scheme=spec.weight_scheme,
+            feature_families=family_map,
+            decision_frequency=spec.panel_frequency,
+            n_buckets=int(n_buckets),
+            min_cross_section=int(min_cross_section),
+            frequency_periods_per_year=frequency_periods_per_year,
+            cost_multipliers=cost_multipliers,
+            taker_fee_rate=taker_fee_rate,
+            horizon_deltas=horizon_deltas,
+            supported_signal_timeframes=supported_signal_timeframes,
+            execution_delay_minutes=execution_delay_minutes,
+        )
+        l4_summary_frames.append(pd.DataFrame([l4_summary_dict]))
+        l4_detail_frames.append(l4_detail)
+        l4_order_frames.append(l4_orders)
+        l4_holding_frames.append(l4_holdings)
+    l3_composite = pd.concat(l3_composite_frames, ignore_index=True) if l3_composite_frames else pd.DataFrame()
+    l3_targets = (
+        factor_research.combo_signal_target_membership(l3_composite, n_buckets=int(n_buckets))
+        if not l3_composite.empty else pd.DataFrame()
+    )
+    l3_summary = pd.concat(l3_summary_frames, ignore_index=True) if l3_summary_frames else pd.DataFrame()
+    l3_ic = pd.concat(l3_ic_frames, ignore_index=True) if l3_ic_frames else pd.DataFrame()
+    l3_bucket = pd.concat(l3_bucket_frames, ignore_index=True) if l3_bucket_frames else pd.DataFrame()
+    l3_weights = pd.concat(l3_weight_frames, ignore_index=True) if l3_weight_frames else pd.DataFrame()
+    l3_diagnostics = pd.concat(l3_diagnostic_frames, ignore_index=True) if l3_diagnostic_frames else pd.DataFrame()
+    l4_summary = pd.concat(l4_summary_frames, ignore_index=True) if l4_summary_frames else pd.DataFrame()
+    l4_detail = pd.concat(l4_detail_frames, ignore_index=True) if l4_detail_frames else pd.DataFrame()
+    l4_orders = pd.concat(l4_order_frames, ignore_index=True) if l4_order_frames else pd.DataFrame()
+    l4_holdings = pd.concat(l4_holding_frames, ignore_index=True) if l4_holding_frames else pd.DataFrame()
+    pipeline_discovery, l4_activation = _known_truth_pipeline_build_discovery_frames_v1(
+        gate_summary=gate_summary,
+        catalog=l3_catalog,
+        l3_weights=l3_weights,
+        l4_orders=l4_orders,
+        l4_holdings=l4_holdings,
+        candidate_registry=candidate_registry,
+        return_horizon=return_horizon,
+    )
+    return KnownTruthL0L4PipelineDiscoveryArtifactsV1(
+        l0_market_records=canonical_market,
+        l0_signal_records=selected.copy(deep=True),
+        l1_panel=l1_panel,
+        l2_gate_summary=gate_summary,
+        l2_rank_ic=l2_rank_ic,
+        l2_directions=l2_directions,
+        l3_catalog=l3_catalog,
+        l3_summary=l3_summary,
+        l3_composite=l3_composite,
+        l3_targets=l3_targets,
+        l3_ic=l3_ic,
+        l3_bucket=l3_bucket,
+        l3_weights=l3_weights,
+        l3_diagnostics=l3_diagnostics,
+        l4_summary=l4_summary,
+        l4_detail=l4_detail,
+        l4_orders=l4_orders,
+        l4_holdings=l4_holdings,
+        pipeline_discovery=pipeline_discovery,
+        l4_activation=l4_activation,
+        schema_version=KNOWN_TRUTH_L0_L4_PIPELINE_DISCOVERY_SCHEMA_V1,
+        lifecycle=KNOWN_TRUTH_L0_L4_PIPELINE_DISCOVERY_LIFECYCLE_V1,
+        authority=KNOWN_TRUTH_L0_L4_PIPELINE_DISCOVERY_AUTHORITY_V1,
+        may_be_used_for=KNOWN_TRUTH_L0_L4_PIPELINE_DISCOVERY_MAY_BE_USED_FOR_V1,
+        must_not_be_used_for=KNOWN_TRUTH_L0_L4_PIPELINE_DISCOVERY_MUST_NOT_BE_USED_FOR_V1,
+        archive_condition=KNOWN_TRUTH_L0_L4_PIPELINE_DISCOVERY_ARCHIVE_CONDITION_V1,
+        asset_symbols=raw_input.asset_symbols,
+        registered_candidate_ids=candidate_ids,
+        decision_frequency=decision_frequency,
+        return_horizon=return_horizon,
+    )
+
+
+def _known_truth_pipeline_truth_column_v1(column: object) -> bool:
+    token = str(column).lower()
+    return token in {
+        "truth",
+        "truth_role",
+        "information_group",
+        "marginal_predictive_truth",
+        "expected_direction",
+        "is_predictive",
+        "discovery_result",
+    } or token.startswith("truth_")
+
+
+def _known_truth_pipeline_output_identity_v1(
+    pipeline_discovery: pd.DataFrame,
+    l4_activation: pd.DataFrame,
+) -> str:
+    return _json_content_sha256(
+        {
+            "pipeline_discovery": _frame_content_sha256(pipeline_discovery),
+            "l4_activation": _frame_content_sha256(l4_activation),
+        }
+    )
+
+
+def known_truth_l0_l4_truth_blind_persisted_output_identity_v1(
+    output_file_sha256: Mapping[str, str],
+) -> str:
+    """Hash the fixed persisted output-file identity, excluding the receipt."""
+    expected_names = tuple(KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_OUTPUT_FILES_V1)
+    if set(output_file_sha256) != set(expected_names):
+        raise ValueError("truth-blind persisted output identity has the wrong file set")
+    rows = []
+    for name in expected_names:
+        value = output_file_sha256[name]
+        if not isinstance(value, str) or len(value) != 64 or any(
+            character not in "0123456789abcdef" for character in value
+        ):
+            raise ValueError(f"invalid persisted output SHA-256 for {name}")
+        rows.append({"name": name, "sha256": value})
+    return _json_content_sha256({"outputs": rows})
+
+
+def _known_truth_sha256_file_v1(path: Path, label: str) -> str:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"{label} is not a regular file")
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _known_truth_require_sha256_v1(value: object, label: str) -> str:
+    if not isinstance(value, str) or len(value) != 64 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
+        raise ValueError(f"{label} must be a lowercase SHA-256 digest")
+    return value
+
+
+def _known_truth_read_persistence_receipt_v1(
+    persistence_receipt: Path | str,
+    expected_receipt_sha256: str,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any], str]:
+    """Read and verify the actual atomically published truth-blind directory."""
+    receipt_path = Path(persistence_receipt)
+    if not receipt_path.is_absolute() or receipt_path.is_symlink() or not receipt_path.is_file():
+        raise ValueError("truth-blind persistence receipt must be an existing regular absolute path")
+    expected_receipt_sha256 = _known_truth_require_sha256_v1(
+        expected_receipt_sha256, "expected persistence receipt SHA-256"
+    )
+    actual_receipt_sha256 = _known_truth_sha256_file_v1(
+        receipt_path, "truth-blind persistence receipt"
+    )
+    if actual_receipt_sha256 != expected_receipt_sha256:
+        raise ValueError("truth-blind persistence receipt SHA-256 does not match")
+
+    sidecar_path = receipt_path.with_name(
+        KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_SIDECAR_FILENAME_V1
+    )
+    if sidecar_path.is_symlink() or not sidecar_path.is_file():
+        raise ValueError("truth-blind persistence receipt SHA sidecar is missing")
+    sidecar_tokens = sidecar_path.read_text(encoding="utf-8").strip().split()
+    if sidecar_tokens != [actual_receipt_sha256, receipt_path.name]:
+        raise ValueError("truth-blind persistence receipt SHA sidecar is invalid")
+
+    try:
+        payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("truth-blind persistence receipt is not valid JSON") from error
+    if not isinstance(payload, dict):
+        raise ValueError("truth-blind persistence receipt must be a JSON object")
+    if payload.get("schema_version") != KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_SCHEMA_V1:
+        raise ValueError("truth-blind persistence receipt schema is not approved")
+    if payload.get("status") != "complete":
+        raise ValueError("truth-blind persistence receipt is not complete")
+    if payload.get("lifecycle") != KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_LIFECYCLE_V1:
+        raise ValueError("truth-blind persistence receipt lifecycle is not approved")
+    if payload.get("authority") != KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_AUTHORITY_V1:
+        raise ValueError("truth-blind persistence receipt authority is not approved")
+    if payload.get("may_be_used_for") != KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_MAY_BE_USED_FOR_V1:
+        raise ValueError("truth-blind persistence receipt use boundary is not approved")
+    if payload.get("must_not_be_used_for") != KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_MUST_NOT_BE_USED_FOR_V1:
+        raise ValueError("truth-blind persistence receipt prohibition is not approved")
+    if payload.get("archive_condition") != KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_ARCHIVE_CONDITION_V1:
+        raise ValueError("truth-blind persistence receipt archive condition is not approved")
+    if payload.get("receipt_path") != str(receipt_path.resolve()):
+        raise ValueError("truth-blind persistence receipt path identity does not match")
+
+    output_root_value = payload.get("output_root")
+    if not isinstance(output_root_value, str) or not output_root_value:
+        raise ValueError("truth-blind persistence output root is missing")
+    output_root = Path(output_root_value)
+    if not output_root.is_absolute() or output_root.is_symlink() or not output_root.is_dir():
+        raise ValueError("truth-blind persistence output root is not a final regular directory")
+    output_root = output_root.resolve()
+    if receipt_path.resolve() != output_root / KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_FILENAME_V1:
+        raise ValueError("truth-blind persistence receipt is not inside its declared output root")
+    if sidecar_path.resolve() != output_root / KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_SIDECAR_FILENAME_V1:
+        raise ValueError("truth-blind persistence receipt sidecar is outside its declared output root")
+
+    expected_entries = {
+        *KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_OUTPUT_FILES_V1.values(),
+        KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_COMPLETION_MARKER_FILENAME_V1,
+        KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_FILENAME_V1,
+        KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_SIDECAR_FILENAME_V1,
+    }
+    actual_entries = {entry.name for entry in output_root.iterdir()}
+    if actual_entries != expected_entries:
+        raise ValueError("truth-blind persistence output directory is partial or contains extra files")
+
+    marker_path = output_root / KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_COMPLETION_MARKER_FILENAME_V1
+    if marker_path.is_symlink() or not marker_path.is_file():
+        raise ValueError("truth-blind persistence completion marker is missing")
+    if marker_path.read_bytes() != KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_COMPLETION_MARKER_BYTES_V1:
+        raise ValueError("truth-blind persistence completion marker is invalid")
+    marker_metadata = payload.get("completion_marker")
+    if not isinstance(marker_metadata, dict) or marker_metadata.get("path") != str(marker_path) or marker_metadata.get(
+        "sha256"
+    ) != _known_truth_sha256_file_v1(marker_path, "truth-blind completion marker"):
+        raise ValueError("truth-blind persistence completion marker identity does not match")
+
+    input_identity = payload.get("input_identity")
+    if not isinstance(input_identity, dict) or not input_identity:
+        raise ValueError("truth-blind persistence input identity is missing")
+    for key, value in input_identity.items():
+        _known_truth_require_sha256_v1(value, f"input identity {key}")
+    repository_identity = payload.get("repository_identity")
+    if not isinstance(repository_identity, dict) or not repository_identity or any(
+        not isinstance(key, str) or not key or not isinstance(value, str) or not value
+        for key, value in repository_identity.items()
+    ):
+        raise ValueError("truth-blind persistence repository identity is missing")
+    execution = payload.get("execution")
+    if not isinstance(execution, dict):
+        raise ValueError("truth-blind persistence execution identity is missing")
+    argv = execution.get("argv")
+    if not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item for item in argv):
+        raise ValueError("truth-blind persistence argv is missing")
+    if execution.get("exit_code") != 0 or isinstance(execution.get("exit_code"), bool):
+        raise ValueError("truth-blind persistence exit code is not successful")
+    if execution.get("invocation_count") != 1:
+        raise ValueError("truth-blind persistence invocation count is not exactly one")
+    if not isinstance(execution.get("exit_code_source"), str) or not execution["exit_code_source"].strip():
+        raise ValueError("truth-blind persistence exit code source is missing")
+    publication = payload.get("publication")
+    if publication != {"complete": True, "mode": "atomic_directory_rename_v1"}:
+        raise ValueError("truth-blind persistence publication is not atomic and complete")
+    source = payload.get("source")
+    if not isinstance(source, dict) or source.get("call_count") != 1:
+        raise ValueError("truth-blind persistence source call identity is missing")
+    if source.get("formal_entry") != KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_FORMAL_ENTRY_V1:
+        raise ValueError("truth-blind persistence formal entry is not the approved qlab entry")
+    if source.get("truth_access") != "none":
+        raise ValueError("truth-blind persistence truth access is not none")
+
+    outputs = payload.get("outputs")
+    expected_output_names = tuple(KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_OUTPUT_FILES_V1)
+    if not isinstance(outputs, dict) or set(outputs) != set(expected_output_names):
+        raise ValueError("truth-blind persistence output file set is not frozen")
+    frames: dict[str, pd.DataFrame] = {}
+    output_hashes: dict[str, str] = {}
+    for output_name in expected_output_names:
+        entry = outputs[output_name]
+        filename = KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_OUTPUT_FILES_V1[output_name]
+        if not isinstance(entry, dict):
+            raise ValueError(f"truth-blind persistence metadata missing for {output_name}")
+        path_value = entry.get("path")
+        path = output_root / filename
+        if path_value != str(path) or path.is_symlink() or not path.is_file():
+            raise ValueError(f"truth-blind persistence path is not bound for {output_name}")
+        expected_columns = (
+            KNOWN_TRUTH_PIPELINE_DISCOVERY_COLUMNS_V1
+            if output_name == "pipeline_discovery"
+            else KNOWN_TRUTH_L4_ACTIVATION_COLUMNS_V1
+        )
+        if entry.get("schema") != list(expected_columns):
+            raise ValueError(f"truth-blind persistence schema is not frozen for {output_name}")
+        actual_sha = _known_truth_sha256_file_v1(path, f"truth-blind output {output_name}")
+        expected_sha = _known_truth_require_sha256_v1(entry.get("sha256"), f"output {output_name}")
+        if actual_sha != expected_sha:
+            raise ValueError(f"truth-blind output SHA-256 changed for {output_name}")
+        if entry.get("size_bytes") != path.stat().st_size or isinstance(entry.get("size_bytes"), bool):
+            raise ValueError(f"truth-blind output byte size changed for {output_name}")
+        try:
+            frame = pd.read_csv(path)
+        except (OSError, ValueError, pd.errors.ParserError) as error:
+            raise ValueError(f"truth-blind output cannot be read for {output_name}") from error
+        if tuple(frame.columns) != expected_columns:
+            raise ValueError(f"truth-blind output schema changed for {output_name}")
+        if len(frame) != entry.get("row_count") or isinstance(entry.get("row_count"), bool):
+            raise ValueError(f"truth-blind output row count changed for {output_name}")
+        if any(_known_truth_pipeline_truth_column_v1(column) for column in frame.columns):
+            raise ValueError("truth fields cannot enter the truth-blind persisted output")
+        frames[output_name] = frame
+        output_hashes[output_name] = actual_sha
+    if payload.get("output_identity") != known_truth_l0_l4_truth_blind_persisted_output_identity_v1(output_hashes):
+        raise ValueError("truth-blind persisted output identity does not match its bytes")
+    return frames["pipeline_discovery"], frames["l4_activation"], payload, actual_receipt_sha256
+
+
+def bind_known_truth_l0_l4_truth_blind_evaluation_input_v1(
+    *,
+    persistence_receipt: Path | str,
+    expected_receipt_sha256: str,
+) -> KnownTruthL0L4TruthBlindEvaluationInputV1:
+    """Bind only a real, complete, atomically published truth-blind bundle."""
+    pipeline, activation, receipt, receipt_sha256 = _known_truth_read_persistence_receipt_v1(
+        persistence_receipt, expected_receipt_sha256
+    )
+    return KnownTruthL0L4TruthBlindEvaluationInputV1(
+        pipeline_discovery=pipeline,
+        l4_activation=activation,
+        schema_version=KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_SCHEMA_V1,
+        lifecycle=KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_LIFECYCLE_V1,
+        authority=KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_AUTHORITY_V1,
+        persistence_receipt_path=str(Path(persistence_receipt).resolve()),
+        persistence_receipt_sha256=receipt_sha256,
+        persistence_status=str(receipt["status"]),
+        output_identity=str(receipt["output_identity"]),
+    )
+
+
+def evaluate_known_truth_pipeline_terminal_v1(
+    truth_blind_input: KnownTruthL0L4TruthBlindEvaluationInputV1,
+    truth_manifest: pd.DataFrame,
+) -> KnownTruthTerminalEvaluationV1:
+    """Evaluate truth only after a complete truth-blind L0--L4 output exists."""
+    if not isinstance(truth_blind_input, KnownTruthL0L4TruthBlindEvaluationInputV1):
+        raise TypeError("truth_blind_input must be the persisted truth-blind bundle")
+    if truth_blind_input.schema_version != KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_SCHEMA_V1:
+        raise ValueError("truth-blind input schema is not approved")
+    if truth_blind_input.lifecycle != KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_LIFECYCLE_V1:
+        raise ValueError("truth-blind input lifecycle is not approved")
+    if truth_blind_input.authority != KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_AUTHORITY_V1:
+        raise ValueError("truth-blind input authority is not approved")
+    pipeline, activation, receipt, receipt_sha256 = _known_truth_read_persistence_receipt_v1(
+        truth_blind_input.persistence_receipt_path,
+        truth_blind_input.persistence_receipt_sha256,
+    )
+    if truth_blind_input.persistence_status != receipt.get("status"):
+        raise ValueError("truth-blind input persistence status does not match its receipt")
+    if truth_blind_input.output_identity != receipt.get("output_identity"):
+        raise ValueError("truth-blind input output identity does not match its receipt")
+    if truth_blind_input.persistence_receipt_sha256 != receipt_sha256:
+        raise ValueError("truth-blind input receipt identity does not match its bytes")
+    if tuple(pipeline.columns) != KNOWN_TRUTH_PIPELINE_DISCOVERY_COLUMNS_V1:
+        raise ValueError("pipeline discovery output schema is not frozen")
+    if tuple(activation.columns) != KNOWN_TRUTH_L4_ACTIVATION_COLUMNS_V1:
+        raise ValueError("L4 activation output schema is not frozen")
+    if any(_known_truth_pipeline_truth_column_v1(column) for column in pipeline.columns):
+        raise ValueError("truth-blind discovery output contains truth fields")
+    if any(_known_truth_pipeline_truth_column_v1(column) for column in activation.columns):
+        raise ValueError("truth-blind activation output contains truth fields")
+    required_truth = {
+        "candidate_id",
+        "return_horizon",
+        "truth_role",
+        "information_group",
+        "marginal_predictive_truth",
+        "expected_direction",
+    }
+    if not isinstance(truth_manifest, pd.DataFrame):
+        raise TypeError("truth_manifest must be a pandas DataFrame")
+    missing_truth = sorted(required_truth.difference(truth_manifest.columns))
+    if missing_truth:
+        raise ValueError("truth_manifest is missing: " + ", ".join(missing_truth))
+    truth = truth_manifest.loc[:, list(required_truth)].copy()
+    unit_columns = ["candidate_id", "return_horizon"]
+    if truth[unit_columns].duplicated().any() or pipeline[unit_columns].duplicated().any():
+        raise ValueError("truth and discovery units must be unique")
+    if set(map(tuple, truth[unit_columns].astype(str).to_numpy())) != set(
+        map(tuple, pipeline[unit_columns].astype(str).to_numpy())
+    ):
+        raise ValueError("truth manifest must cover exactly the truth-blind scan units")
+    allowed_roles = {"direct", "proxy", "alias", "near_alias", "null"}
+    if not truth["truth_role"].astype(str).isin(allowed_roles).all():
+        raise ValueError("truth_manifest contains an unknown role")
+    truth["candidate_id"] = truth["candidate_id"].astype(str)
+    truth["return_horizon"] = truth["return_horizon"].astype(str)
+    truth["information_group"] = truth["information_group"].fillna("").astype(str)
+    truth["marginal_predictive_truth"] = pd.to_numeric(
+        truth["marginal_predictive_truth"], errors="coerce"
+    )
+    truth["expected_direction"] = pd.to_numeric(
+        truth["expected_direction"], errors="coerce"
+    )
+    if truth[["marginal_predictive_truth", "expected_direction"]].isna().any().any():
+        raise ValueError("truth_manifest truth values must be finite integers")
+    if not truth["marginal_predictive_truth"].isin([0, 1]).all():
+        raise ValueError("marginal_predictive_truth must be 0 or 1")
+    for row in truth.itertuples(index=False):
+        role = str(row.truth_role)
+        predictive = int(row.marginal_predictive_truth)
+        direction = int(row.expected_direction)
+        if role == "null" and (predictive != 0 or direction != 0):
+            raise ValueError("null truth must be non-predictive with direction zero")
+        if role != "null" and (predictive != 1 or direction not in {-1, 1}):
+            raise ValueError("predictive truth roles require M=1 and direction +/-1")
+        if role != "null" and not str(row.information_group).strip():
+            raise ValueError("predictive truth roles require an information group")
+    merged = pipeline.merge(
+        truth,
+        on=unit_columns,
+        how="left",
+        validate="one_to_one",
+    )
+    activation_view = activation.groupby(unit_columns, sort=False).agg(
+        l4_exposure=("l4_exposure", "any"),
+        execution_evidence_count=("execution_evidence_count", "sum"),
+    ).reset_index() if not activation.empty else pd.DataFrame(columns=[*unit_columns, "l4_exposure", "execution_evidence_count"])
+    merged = merged.merge(activation_view, on=unit_columns, how="left", validate="one_to_one")
+    merged["l4_exposure"] = merged["l4_exposure"].fillna(False).astype(bool)
+    merged["execution_evidence_count"] = merged["execution_evidence_count"].fillna(0).astype(int)
+    merged["pipeline_discovery"] = merged["pipeline_discovery"].astype(bool)
+    merged["truth_predictive"] = merged["marginal_predictive_truth"].astype(int).eq(1)
+    merged["correct_direction"] = (
+        merged["pipeline_discovery"]
+        & merged["truth_predictive"]
+        & merged["learned_direction"].astype(int).eq(merged["expected_direction"].astype(int))
+    )
+    merged["true_discovery"] = merged["truth_predictive"] & merged["pipeline_discovery"]
+    merged["false_discovery"] = (~merged["truth_predictive"]) & merged["pipeline_discovery"]
+    merged["false_negative"] = merged["truth_predictive"] & (~merged["pipeline_discovery"])
+    merged["end_to_end_recovery"] = (
+        merged["true_discovery"]
+        & merged["correct_direction"]
+        & merged["l4_exposure"]
+    )
+    merged["false_activation"] = (~merged["truth_predictive"]) & merged["l4_exposure"]
+    merged["failure_class"] = "none"
+    merged.loc[~merged["pipeline_discovery"], "failure_class"] = merged.loc[
+        ~merged["pipeline_discovery"], "first_loss_layer"
+    ]
+    merged.loc[
+        merged["pipeline_discovery"] & merged["truth_predictive"] & (~merged["correct_direction"]),
+        "failure_class",
+    ] = "direction"
+    merged.loc[
+        merged["true_discovery"] & merged["correct_direction"] & (~merged["l4_exposure"]),
+        "failure_class",
+    ] = "l4"
+    merged.loc[merged["false_activation"], "failure_class"] = "null_false_activation"
+    merged["information_group_key"] = np.where(
+        merged["truth_predictive"],
+        merged["information_group"],
+        "__null__" + merged["candidate_id"].astype(str),
+    )
+    candidate_columns = [
+        "candidate_id", "return_horizon", "truth_role", "information_group",
+        "pipeline_discovery", "l2_two_gate_support", "l3_acceptance",
+        "learned_direction", "expected_direction", "correct_direction",
+        "l4_exposure", "end_to_end_recovery", "false_activation",
+        "first_loss_layer", "failure_class",
+    ]
+    candidate_results = merged[candidate_columns].sort_values(
+        unit_columns, kind="mergesort"
+    ).reset_index(drop=True)
+    group_rows: list[dict[str, object]] = []
+    for group_key, group in merged.groupby("information_group_key", sort=True):
+        group_rows.append(
+            {
+                "information_group_key": group_key,
+                "truth_predictive": bool(group["truth_predictive"].any()),
+                "pipeline_discovery": bool(group["pipeline_discovery"].any()),
+                "true_discovery": bool(group["true_discovery"].any()),
+                "false_discovery": bool(group["false_discovery"].any()),
+                "false_negative": bool(group["false_negative"].all()) if bool(group["truth_predictive"].any()) else False,
+                "correct_direction": bool(group["correct_direction"].any()),
+                "l4_exposure": bool(group["l4_exposure"].any()),
+                "end_to_end_recovery": bool(group["end_to_end_recovery"].any()),
+                "candidate_count": int(len(group)),
+            }
+        )
+    information_group_results = pd.DataFrame(group_rows)
+    tp = int(merged["true_discovery"].sum())
+    fp = int(merged["false_discovery"].sum())
+    fn = int(merged["false_negative"].sum())
+    total_true = int(merged["truth_predictive"].sum())
+    recovered = int(merged["end_to_end_recovery"].sum())
+    group_tp = int(information_group_results["true_discovery"].sum()) if not information_group_results.empty else 0
+    group_fp = int(information_group_results["false_discovery"].sum()) if not information_group_results.empty else 0
+    group_fn = int(information_group_results["false_negative"].sum()) if not information_group_results.empty else 0
+    summary = pd.DataFrame([
+        {
+            "total_units": int(len(merged)),
+            "discovered_units": int(merged["pipeline_discovery"].sum()),
+            "tp": tp,
+            "fp": fp,
+            "fn": fn,
+            "tpr": float(tp / total_true) if total_true else 0.0,
+            "fdp": float(fp / max(int(merged["pipeline_discovery"].sum()), 1)),
+            "false_activation": int(merged["false_activation"].sum()),
+            "end_to_end_recovery": recovered,
+            "information_group_tp": group_tp,
+            "information_group_fp": group_fp,
+            "information_group_fn": group_fn,
+            "information_group_tpr": float(group_tp / max(int(information_group_results["truth_predictive"].sum()) if not information_group_results.empty else 0, 1)),
+            "information_group_fdp": float(group_fp / max(int(information_group_results["pipeline_discovery"].sum()) if not information_group_results.empty else 0, 1)),
+            "schema_version": KNOWN_TRUTH_TERMINAL_EVALUATION_SCHEMA_V1,
+        }
+    ])
+    return KnownTruthTerminalEvaluationV1(
+        candidate_results=candidate_results,
+        information_group_results=information_group_results,
+        summary=summary,
+        schema_version=KNOWN_TRUTH_TERMINAL_EVALUATION_SCHEMA_V1,
+        lifecycle=KNOWN_TRUTH_TERMINAL_EVALUATION_LIFECYCLE_V1,
+        authority=KNOWN_TRUTH_TERMINAL_EVALUATION_AUTHORITY_V1,
+        may_be_used_for=KNOWN_TRUTH_TERMINAL_EVALUATION_MAY_BE_USED_FOR_V1,
+        must_not_be_used_for=KNOWN_TRUTH_TERMINAL_EVALUATION_MUST_NOT_BE_USED_FOR_V1,
+        archive_condition=KNOWN_TRUTH_TERMINAL_EVALUATION_ARCHIVE_CONDITION_V1,
+    )
+
+
 __all__ = [
     "DecisionWindow",
     "DETERMINISTIC_RANDOM_ADDRESS_VERSION_V1",
@@ -6051,6 +7113,9 @@ __all__ = [
     "KnownTruthSignalAssignmentV1",
     "KnownTruthL0L4RawInputV1",
     "KnownTruthL0L4MicroArtifactsV1",
+    "KnownTruthL0L4PipelineDiscoveryArtifactsV1",
+    "KnownTruthL0L4TruthBlindEvaluationInputV1",
+    "KnownTruthTerminalEvaluationV1",
     "KnownTruthSimulationContractV1",
     "KnownTruthTaskV1",
     "_known_truth_dgp_rank_effect_weight_v1",
@@ -6067,6 +7132,38 @@ __all__ = [
     "KNOWN_TRUTH_L0_L4_MICRO_MAY_BE_USED_FOR_V1",
     "KNOWN_TRUTH_L0_L4_MICRO_MUST_NOT_BE_USED_FOR_V1",
     "KNOWN_TRUTH_L0_L4_MICRO_SCHEMA_V1",
+    "KNOWN_TRUTH_L0_L4_PIPELINE_DISCOVERY_ARCHIVE_CONDITION_V1",
+    "KNOWN_TRUTH_L0_L4_PIPELINE_DISCOVERY_AUTHORITY_V1",
+    "KNOWN_TRUTH_L0_L4_PIPELINE_DISCOVERY_LIFECYCLE_V1",
+    "KNOWN_TRUTH_L0_L4_PIPELINE_DISCOVERY_MAY_BE_USED_FOR_V1",
+    "KNOWN_TRUTH_L0_L4_PIPELINE_DISCOVERY_MUST_NOT_BE_USED_FOR_V1",
+    "KNOWN_TRUTH_L0_L4_PIPELINE_DISCOVERY_SCHEMA_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_ARCHIVE_CONDITION_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_AUTHORITY_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_LIFECYCLE_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_MAY_BE_USED_FOR_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_MUST_NOT_BE_USED_FOR_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_INPUT_SCHEMA_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_COMPLETION_MARKER_BYTES_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_COMPLETION_MARKER_FILENAME_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_OUTPUT_FILES_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_FORMAL_ENTRY_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_ARCHIVE_CONDITION_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_AUTHORITY_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_FILENAME_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_LIFECYCLE_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_MAY_BE_USED_FOR_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_MUST_NOT_BE_USED_FOR_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_SCHEMA_V1",
+    "KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_SIDECAR_FILENAME_V1",
+    "KNOWN_TRUTH_L4_ACTIVATION_COLUMNS_V1",
+    "KNOWN_TRUTH_PIPELINE_DISCOVERY_COLUMNS_V1",
+    "KNOWN_TRUTH_TERMINAL_EVALUATION_ARCHIVE_CONDITION_V1",
+    "KNOWN_TRUTH_TERMINAL_EVALUATION_AUTHORITY_V1",
+    "KNOWN_TRUTH_TERMINAL_EVALUATION_LIFECYCLE_V1",
+    "KNOWN_TRUTH_TERMINAL_EVALUATION_MAY_BE_USED_FOR_V1",
+    "KNOWN_TRUTH_TERMINAL_EVALUATION_MUST_NOT_BE_USED_FOR_V1",
+    "KNOWN_TRUTH_TERMINAL_EVALUATION_SCHEMA_V1",
     "ObservedEffectCandidate",
     "ObservedEffectBetaTotalArtifacts",
     "ObservedEffectScaleContract",
@@ -6078,6 +7175,10 @@ __all__ = [
     "generate_market_input_spine_v1",
     "generate_known_truth_dgp_vertical_slice_v1",
     "run_known_truth_l0_l4_micro_e2e_v1",
+    "run_known_truth_l0_l4_pipeline_discovery_micro_e2e_v1",
+    "bind_known_truth_l0_l4_truth_blind_evaluation_input_v1",
+    "known_truth_l0_l4_truth_blind_persisted_output_identity_v1",
+    "evaluate_known_truth_pipeline_terminal_v1",
     "validate_market_input_spine_specification_v1",
     "validate_random_stream_specification_v1",
     "validate_known_truth_simulation_contract_v1",
