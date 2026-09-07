@@ -1310,6 +1310,12 @@ def test_lineage_validator_matches_real_artifacts_and_reports_all_frame_mutation
         valid["frames"][attribute]["status"] == "valid"
         for attribute in valid["frame_order"]
     )
+    assert valid["frames"]["l1_panel"]["row_count_policy"] == (
+        "exact_preregistered_v1"
+    )
+    assert valid["frames"]["l3_catalog"]["row_count_policy"] == (
+        "result_dependent_actual_v1"
+    )
 
     mutated = replace(
         result,
@@ -1328,6 +1334,64 @@ def test_lineage_validator_matches_real_artifacts_and_reports_all_frame_mutation
     assert ("l1_panel", "missing_columns") in mismatch_kinds
     assert ("l4_orders", "column_order") in mismatch_kinds
     assert ("l4_holdings", "extra_columns") in mismatch_kinds
+
+
+def test_lineage_row_count_policy_accepts_zero_or_positive_result_frames_and_rejects_fake_counts(
+    _pipeline_discovery_result,
+):
+    result = _pipeline_discovery_result
+    authority = known_truth_l0_l4_lineage_schema_authority_v1(
+        result.registered_candidate_ids
+    )
+    result_dependent = {
+        attribute
+        for attribute, descriptor in authority.items()
+        if descriptor["row_count_policy"] == "result_dependent_actual_v1"
+    }
+    contract = {
+        attribute: {
+            "schema_id": descriptor["schema_id"],
+            "schema": list(descriptor["schema"]),
+            "row_count_policy": descriptor["row_count_policy"],
+            "row_count": None if attribute in result_dependent else int(len(getattr(result, attribute))),
+        }
+        for attribute, descriptor in authority.items()
+    }
+    positive = validate_known_truth_l0_l4_lineage_artifacts_v1(
+        result, row_count_contract=contract
+    )
+    assert positive["valid"] is True, positive["mismatches"]
+
+    zero_catalog = result.l3_catalog.iloc[0:0].copy()
+    zero = validate_known_truth_l0_l4_lineage_artifacts_v1(
+        replace(result, l3_catalog=zero_catalog), row_count_contract=contract
+    )
+    assert zero["valid"] is True, zero["mismatches"]
+    assert zero["frames"]["l3_catalog"]["row_count"] == 0
+
+    fake_result_count = {key: dict(value) for key, value in contract.items()}
+    fake_result_count["l3_catalog"]["row_count"] = 1
+    invalid_result_count = validate_known_truth_l0_l4_lineage_artifacts_v1(
+        replace(result, l3_catalog=zero_catalog),
+        row_count_contract=fake_result_count,
+    )
+    assert invalid_result_count["valid"] is False
+    assert any(
+        item["attribute"] == "l3_catalog"
+        and item["kind"] == "result_dependent_expected_row_count"
+        for item in invalid_result_count["mismatches"]
+    )
+
+    wrong_exact_count = {key: dict(value) for key, value in contract.items()}
+    wrong_exact_count["l1_panel"]["row_count"] = int(len(result.l1_panel)) + 1
+    invalid_exact_count = validate_known_truth_l0_l4_lineage_artifacts_v1(
+        result, row_count_contract=wrong_exact_count
+    )
+    assert invalid_exact_count["valid"] is False
+    assert any(
+        item["attribute"] == "l1_panel" and item["kind"] == "row_count"
+        for item in invalid_exact_count["mismatches"]
+    )
 
 
 def test_pipeline_discovery_20_asset_zero_acceptance_binds_formal_empty_schemas(
