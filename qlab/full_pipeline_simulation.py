@@ -4507,6 +4507,19 @@ KNOWN_TRUTH_L0_L4_LINEAGE_FRAME_ATTRIBUTES_V1 = (
     "l4_orders",
     "l4_holdings",
 )
+_KNOWN_TRUTH_L0_L4_LEGAL_ZERO_ROW_FRAME_ATTRIBUTES_V1 = (
+    "l3_summary",
+    "l3_composite",
+    "l3_targets",
+    "l3_ic",
+    "l3_bucket",
+    "l3_weights",
+    "l3_diagnostics",
+    "l4_summary",
+    "l4_detail",
+    "l4_orders",
+    "l4_holdings",
+)
 
 # The formal qlab entry owns this schema.  The research layer binds to this
 # mapping and must not carry a second, hand-ordered column list.
@@ -6543,6 +6556,42 @@ def _known_truth_pipeline_empty_frame_v1(columns: Sequence[str]) -> pd.DataFrame
     return pd.DataFrame({str(column): pd.Series(dtype="object") for column in columns})
 
 
+def _known_truth_pipeline_bind_zero_row_lineage_schemas_v1(
+    frames: Mapping[str, pd.DataFrame],
+    candidate_ids: Sequence[str],
+) -> dict[str, pd.DataFrame]:
+    """Bind schemas for legal empty frames at the formal qlab boundary.
+
+    The underlying L3/L4 entries legitimately return an empty frame when no
+    registered unit is accepted or no execution/order/holding row exists.  A
+    eleven verified L3/L4 entries return a bare ``DataFrame()`` in that
+    branch.  Only those exact zero-row/no-column representations are completed
+    here from the qlab-owned 18-frame authority.  Other frame attributes and
+    any zero-row frame that already has columns are left untouched so missing,
+    extra, or reordered columns still fail closed in the lineage validator.
+    """
+    authority = known_truth_l0_l4_lineage_schema_authority_v1(candidate_ids)
+    expected_attributes = tuple(KNOWN_TRUTH_L0_L4_LINEAGE_FRAME_ATTRIBUTES_V1)
+    if tuple(frames) != expected_attributes:
+        raise ValueError("formal lineage frame order is not the qlab authority order")
+    bound: dict[str, pd.DataFrame] = {}
+    for attribute in expected_attributes:
+        frame = frames[attribute]
+        if not isinstance(frame, pd.DataFrame):
+            raise TypeError(f"formal lineage frame is not a DataFrame: {attribute}")
+        if (
+            attribute in _KNOWN_TRUTH_L0_L4_LEGAL_ZERO_ROW_FRAME_ATTRIBUTES_V1
+            and frame.empty
+            and len(frame.columns) == 0
+        ):
+            bound[attribute] = _known_truth_pipeline_empty_frame_v1(
+                authority[attribute]["schema"]
+            )
+        else:
+            bound[attribute] = frame
+    return bound
+
+
 def _known_truth_pipeline_split_component_features_v1(value: object) -> tuple[str, ...]:
     if not isinstance(value, str) or not value:
         raise ValueError("L3 catalog component_features must be non-empty text")
@@ -6853,6 +6902,49 @@ def run_known_truth_l0_l4_pipeline_discovery_micro_e2e_v1(
     l4_detail = pd.concat(l4_detail_frames, ignore_index=True) if l4_detail_frames else pd.DataFrame()
     l4_orders = pd.concat(l4_order_frames, ignore_index=True) if l4_order_frames else pd.DataFrame()
     l4_holdings = pd.concat(l4_holding_frames, ignore_index=True) if l4_holding_frames else pd.DataFrame()
+    lineage_frames = _known_truth_pipeline_bind_zero_row_lineage_schemas_v1(
+        {
+            "l0_market_records": canonical_market,
+            "l0_signal_records": selected,
+            "l1_panel": l1_panel,
+            "l2_gate_summary": gate_summary,
+            "l2_rank_ic": l2_rank_ic,
+            "l2_directions": l2_directions,
+            "l3_catalog": l3_catalog,
+            "l3_summary": l3_summary,
+            "l3_composite": l3_composite,
+            "l3_targets": l3_targets,
+            "l3_ic": l3_ic,
+            "l3_bucket": l3_bucket,
+            "l3_weights": l3_weights,
+            "l3_diagnostics": l3_diagnostics,
+            "l4_summary": l4_summary,
+            "l4_detail": l4_detail,
+            "l4_orders": l4_orders,
+            "l4_holdings": l4_holdings,
+        },
+        candidate_ids,
+    )
+    (
+        canonical_market,
+        selected,
+        l1_panel,
+        gate_summary,
+        l2_rank_ic,
+        l2_directions,
+        l3_catalog,
+        l3_summary,
+        l3_composite,
+        l3_targets,
+        l3_ic,
+        l3_bucket,
+        l3_weights,
+        l3_diagnostics,
+        l4_summary,
+        l4_detail,
+        l4_orders,
+        l4_holdings,
+    ) = (lineage_frames[attribute] for attribute in KNOWN_TRUTH_L0_L4_LINEAGE_FRAME_ATTRIBUTES_V1)
     pipeline_discovery, l4_activation = _known_truth_pipeline_build_discovery_frames_v1(
         gate_summary=gate_summary,
         catalog=l3_catalog,

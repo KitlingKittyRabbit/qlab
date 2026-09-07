@@ -93,9 +93,11 @@ from qlab.full_pipeline_simulation import (
     KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_SCHEMA_V1,
     KNOWN_TRUTH_L0_L4_TRUTH_BLIND_PERSISTENCE_RECEIPT_SIDECAR_FILENAME_V1,
     KNOWN_TRUTH_L4_ACTIVATION_COLUMNS_V1,
+    KNOWN_TRUTH_L0_L4_LINEAGE_FRAME_ATTRIBUTES_V1,
     KNOWN_TRUTH_PIPELINE_DISCOVERY_COLUMNS_V1,
     bind_known_truth_l0_l4_truth_blind_evaluation_input_v1,
     evaluate_known_truth_pipeline_terminal_v1,
+    known_truth_l0_l4_lineage_schema_authority_v1,
     known_truth_l0_l4_truth_blind_persisted_output_identity_v1,
     run_known_truth_l0_l4_pipeline_discovery_micro_e2e_v1,
     run_known_truth_l0_l4_micro_e2e_v1,
@@ -1326,6 +1328,162 @@ def test_lineage_validator_matches_real_artifacts_and_reports_all_frame_mutation
     assert ("l1_panel", "missing_columns") in mismatch_kinds
     assert ("l4_orders", "column_order") in mismatch_kinds
     assert ("l4_holdings", "extra_columns") in mismatch_kinds
+
+
+def test_pipeline_discovery_20_asset_zero_acceptance_binds_formal_empty_schemas(
+    tmp_path,
+):
+    """The real 20-asset scan preserves the 18-frame contract when L3/L4 are empty."""
+    periods = 485
+    injected = _injected(size=len(ASSETS), periods=periods)
+    injected.pop("measurement-alpha")
+    dgp = generate_known_truth_dgp_vertical_slice_v1(
+        _spec(
+            assets=ASSETS,
+            scenario=_scenario_pipeline_discovery(),
+            periods=periods,
+        ),
+        _registry(),
+        injected_standard_innovations=injected,
+    )
+    formal_registry = factor_registry.base_panel_registry("1h").reset_index(drop=True)
+    by_feature = formal_registry.set_index("feature_name", drop=False)
+    scan_rows = []
+    for candidate_id in CANDIDATES:
+        feature_name, candidate_horizon = candidate_id.rsplit("::", 1)
+        if candidate_horizon != "4h":
+            continue
+        row = by_feature.loc[feature_name]
+        scan_rows.append(
+            {
+                "candidate_id": candidate_id,
+                "feature_name": candidate_id,
+                "base_feature_name": feature_name,
+                "return_horizon": "4h",
+                "family": row["family"],
+                "signal_timeframe": row["signal_timeframe"],
+            }
+        )
+    scan_registry = pd.DataFrame(
+        scan_rows,
+        columns=[
+            "candidate_id", "feature_name", "base_feature_name",
+            "return_horizon", "family", "signal_timeframe",
+        ],
+    )
+    raw = KnownTruthL0L4RawInputV1(
+        market_records=dgp.market_records,
+        signal_records=dgp.signal_records.loc[
+            dgp.signal_records["decision_time"].isin(
+                (START, START + pd.Timedelta(hours=4))
+            )
+        ].copy(),
+        schema_version=dgp.schema_version,
+        generation_batch=dgp.generation_batch,
+        asset_symbols=dgp.asset_symbols,
+    )
+    horizon_deltas = {
+        "1m": pd.Timedelta(minutes=1),
+        "1h": pd.Timedelta(hours=1),
+        "4h": pd.Timedelta(hours=4),
+        "8h": pd.Timedelta(hours=8),
+        "12h": pd.Timedelta(hours=12),
+        "1d": pd.Timedelta(days=1),
+    }
+    fold = WalkForwardFold(
+        fold_idx=0,
+        train_start=START,
+        train_end=START,
+        test_start=START + pd.Timedelta(hours=4),
+        test_end=START + pd.Timedelta(hours=8),
+    )
+    result = run_known_truth_l0_l4_pipeline_discovery_micro_e2e_v1(
+        raw,
+        scan_registry=scan_registry,
+        folds=(fold,),
+        walk_forward_spec={
+            "train_days": 1,
+            "test_days": 1,
+            "embargo_days": 0,
+            "step_days": 1,
+        },
+        horizon_deltas=horizon_deltas,
+        frequency_periods_per_year={"4h": 2190},
+        supported_signal_timeframes=("1h", "4h", "8h", "12h", "1d"),
+        cost_multipliers=(1.0,),
+        taker_fee_rate=0.001,
+    )
+    assert result.asset_symbols == ASSETS
+    assert len(result.registered_candidate_ids) == 23
+    authority = known_truth_l0_l4_lineage_schema_authority_v1(
+        result.registered_candidate_ids
+    )
+    expected_empty = {
+        "l3_summary", "l3_composite", "l3_targets", "l3_ic",
+        "l3_bucket", "l3_weights", "l3_diagnostics", "l4_summary",
+        "l4_detail", "l4_orders", "l4_holdings",
+    }
+    for attribute in expected_empty:
+        frame = getattr(result, attribute)
+        assert len(frame) == 0
+        assert list(frame.columns) == authority[attribute]["schema"]
+        path = tmp_path / f"{attribute}.csv"
+        frame.to_csv(path, index=False, lineterminator="\n")
+        assert len(hashlib.sha256(path.read_bytes()).hexdigest()) == 64
+    validation = validate_known_truth_l0_l4_lineage_artifacts_v1(result)
+    # This deliberately short fixture has no train direction, so its
+    # non-whitelisted bare-empty L2 rank frame must remain invalid rather than
+    # being silently completed by the L3/L4-only helper.
+    assert result.l2_rank_ic.empty
+    assert list(result.l2_rank_ic.columns) == []
+    assert validation["valid"] is False
+    assert any(
+        item["attribute"] == "l2_rank_ic"
+        for item in validation["mismatches"]
+    )
+    assert set(validation["frame_order"]) == set(KNOWN_TRUTH_L0_L4_LINEAGE_FRAME_ATTRIBUTES_V1)
+    for attribute in KNOWN_TRUTH_L0_L4_LINEAGE_FRAME_ATTRIBUTES_V1:
+        frame = getattr(result, attribute)
+        assert not any("truth" in str(column).lower() for column in frame.columns)
+    assert not hasattr(result, "truth_sidecar")
+
+    from qlab.full_pipeline_simulation import (
+        _known_truth_pipeline_bind_zero_row_lineage_schemas_v1,
+    )
+
+    # Only the eleven verified L3/L4 no-acceptance frames may be completed.
+    for attribute in (
+        "l0_market_records", "l0_signal_records", "l1_panel",
+        "l2_gate_summary", "l2_rank_ic", "l2_directions", "l3_catalog",
+    ):
+        frames = {
+            name: getattr(result, name)
+            for name in KNOWN_TRUTH_L0_L4_LINEAGE_FRAME_ATTRIBUTES_V1
+        }
+        frames[attribute] = pd.DataFrame()
+        bound = _known_truth_pipeline_bind_zero_row_lineage_schemas_v1(
+            frames, result.registered_candidate_ids
+        )
+        assert list(bound[attribute].columns) == []
+        invalid = validate_known_truth_l0_l4_lineage_artifacts_v1(
+            replace(result, **{attribute: bound[attribute]})
+        )
+        assert invalid["valid"] is False
+
+    # A pre-existing wrong schema is never rewritten, even for an empty frame.
+    frames = {
+        name: getattr(result, name)
+        for name in KNOWN_TRUTH_L0_L4_LINEAGE_FRAME_ATTRIBUTES_V1
+    }
+    frames["l3_summary"] = pd.DataFrame(columns=["wrong_column"])
+    bound = _known_truth_pipeline_bind_zero_row_lineage_schemas_v1(
+        frames, result.registered_candidate_ids
+    )
+    assert list(bound["l3_summary"].columns) == ["wrong_column"]
+    invalid = validate_known_truth_l0_l4_lineage_artifacts_v1(
+        replace(result, l3_summary=bound["l3_summary"])
+    )
+    assert invalid["valid"] is False
 
 
 def test_pipeline_discovery_rejects_preselected_or_truth_contaminated_inputs(
